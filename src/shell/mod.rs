@@ -216,6 +216,7 @@ pub const COMMANDS: &[&str] = &[
     "ifup", "arping", "ethinfo", "netetat", "netdiag", "netbanc-rx", "netbanc-dhcp", "dnsdiag", "services", "nslookup", "http", "https", "tls-selftest", "tls",
     "smoltest", "nvme-parallele", "sched-latence",
     "hwinfo", "hwtest", "bootlog", "nvmetest", "disktest", "ata-integrite", "persist-test", "safe-mode",
+    "disques-internes", "sonde-ecriture-interne",
     "diag-save",
     "git", "rustc", "cargo", "rust-selftest",
     "python", "python3", "pip", "pip3", "python-selftest",
@@ -2173,6 +2174,16 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         "nvmetest" => { crate::platform::pc::trigkey::nvmetest(); 0 }
         "disktest" => { crate::platform::pc::trigkey::disktest(argc, &argv); 0 }
         "ata-integrite" => { crate::drivers::ata_integrite::commande(argc, &argv); 0 }
+        // BOUCHAUD_CLE_USB_TEST_V1 : les disques internes sont-ils en lecture
+        // seule, et combien de commandes ont ete refusees ?
+        "disques-internes" => { crate::drivers::ecriture_interne::bilan(); 0 }
+        "sonde-ecriture-interne" => {
+            #[cfg(feature = "banc-ecriture-interne")]
+            crate::platform::pc::sonde_ecriture_interne::commande();
+            #[cfg(not(feature = "banc-ecriture-interne"))]
+            println!("sonde-ecriture-interne : absente de cette image (option banc-ecriture-interne)");
+            0
+        }
         "persist-test" => { crate::platform::pc::trigkey::persist_test(argc, &argv); 0 }
         "safe-mode" => { crate::platform::pc::trigkey::safe_mode(argc, &argv); 0 }
         // Emet des lectures NVMe depuis PLUSIEURS taches et publie la

@@ -66,7 +66,7 @@ F = {
 REQUISES_PARTOUT = {
     "provenance", "artefact", "performance", "memoire-onglets", "ordre-worker", "crash-services",
     "compositor-piege", "endurance-longue", "browser-host-smoke", "cache", "wpt", "endurance",
-    "endurance-kvm", "sites", "crash-rendu",
+    "endurance-kvm", "sites", "crash-rendu", "bureau-ring3",
 }
 HORS_RUN_DEV = {"primitives"}
 Q = ("(github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') "
@@ -206,9 +206,9 @@ def verifie(t: dict) -> list:
     for cle, job in paires:
         if f"          {cle}: ${{{{ needs.{job}.result }}}}\n" not in conv or job not in attendus:
             f.append(f"verdict : {cle} (job {job}) non transmis ou non attendu -- contrat et workflow divergent")
-    transmis = set(re.findall(r"^          (R_[A-Z_]+): ", conv, re.M))
+    transmis = set(re.findall(r"^          (R_[A-Z0-9_]+): ", conv, re.M))
     if transmis != {cle for cle, _ in paires}:
-        f.append(f"verdict : variables hors contrat {sorted(transmis - {cle for cle, _ in paires})}")
+        f.append(f"verdict : variables hors contrat {sorted(transmis ^ {cle for cle, _ in paires})}")
     requises = {e.job for e in c.EPREUVES if all(x == c.REQUIS for x in e.exigence.values())}
     if requises != REQUISES_PARTOUT:
         f.append(f"contrat : epreuves requises dans les deux paliers modifiees {sorted(requises ^ REQUISES_PARTOUT)}")

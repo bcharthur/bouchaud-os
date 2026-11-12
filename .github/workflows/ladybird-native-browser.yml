@@ -956,6 +956,53 @@ jobs:
             fixture-worker-cycle.log
           if-no-files-found: warn
 
+  bureau-ring3:
+    # BOUCHAUD_BUREAU_RING3_2B : DOOM et Ladybird, deux applications BOGU
+    # ordinaires dans leurs processus, composees ensemble par `composited`
+    # ring 3 (deplacement, empilement, une troisieme application qui meurt).
+    name: ladybird / bureau ring 3 (DOOM + Ladybird composes par composited)
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd musl-tools build-essential binutils
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: DOOM + Ladybird composes par composited ring 3
+        run: tools/ci/run_bureau_ring3_applications.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-bureau-ring3
+          path: |
+            target/bureau-ring3-applications/serie.log
+            target/bureau-ring3-applications/fixture.log
+            target/bureau-ring3-applications/*.ppm
+          if-no-files-found: warn
+
   sites:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)
     # en HTTPS reel, sonde de pixels sur la trame du Compositor.
@@ -1007,7 +1054,7 @@ jobs:
     # Le NOM depend du palier : un vert de developpement ne peut pas etre lu
     # comme une convergence (run-bouchaud-ladybird-ci.ps1 cherche ce nom).
     name: ${{ inputs.palier == 'artefact' && 'ladybird / verdict de production' || (((github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') || github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024') && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement') }}
-    needs: [dedoublonne, provenance, attente, build, reutilise, artefact, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
+    needs: [dedoublonne, provenance, attente, build, reutilise, artefact, primitives, browser-host-smoke, cache, wpt, endurance, endurance-kvm, sites, crash-rendu, bureau-ring3, performance, memoire-onglets, ordre-worker, crash-services, compositor-piege, endurance-longue]
     if: always()
     runs-on: ubuntu-24.04
     # Reflet : le run push du meme arbre peut durer des heures (build froid).
@@ -1063,6 +1110,7 @@ jobs:
           R_ENDURANCE_KVM: ${{ needs.endurance-kvm.result }}
           R_SITES: ${{ needs.sites.result }}
           R_CRASH_RENDU: ${{ needs.crash-rendu.result }}
+          R_BUREAU_RING3: ${{ needs.bureau-ring3.result }}
         run: python3 tools/ci/verdict_convergence.py
 
   browser-host-smoke:

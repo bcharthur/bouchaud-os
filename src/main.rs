@@ -226,6 +226,8 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // Archive userland du second disque : c'est ce qui permet d'installer un
     // programme sans reconstruire le noyau. Le pilote est sonde juste avant,
     // pour que le journal montre les disques avant ce qu'on en a tire.
+    // BOUCHAUD_CLE_USB_TEST_V1 : avant le premier pilote de stockage.
+    drivers::ecriture_interne::annonce();
     drivers::ata::probe();
     // La couche bloc generique, juste apres la detection : le systeme de
     // fichiers peut alors parler a un VOLUME plutot qu'a une nappe, et un

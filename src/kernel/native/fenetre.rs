@@ -35,9 +35,9 @@ use super::object::Object;
 #[path = "fenetre_contrat.rs"]
 pub mod contrat;
 
-/// Droits de la capacite donnee au compositeur : pomper/lire, attendre,
-/// inspecter. Ni DUP ni TRANSFER.
-pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WAIT.0 | Rights::INSPECT.0);
+/// Droits de la capacite donnee au compositeur : pomper/lire, configurer et
+/// fermer (WRITE), attendre, inspecter. Ni DUP ni TRANSFER.
+pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::WAIT.0 | Rights::INSPECT.0);
 
 /// Taille du rapport ecrit par `bo_fenetre_pompe` : dix `u32`.
 pub const ETAT_OCTETS: usize = 40;
@@ -140,6 +140,39 @@ pub fn lit(args: [u64; 6]) -> Result<u64> {
     LECTURES.fetch_add(1, Ordering::Relaxed);
     PIXELS_LUS.fetch_add(pixels, Ordering::Relaxed);
     Ok(pixels)
+}
+
+/// `bo_fenetre_configure(fenetre, largeur, hauteur, focus)` (WRITE) : nouvelle
+/// zone utile et foyer, annonces au client par `Configure`. La zone est bornee
+/// par l'allocation de la surface (`Geometrie::redimensionne`) : un compositeur
+/// ne fait jamais lire au-dela de ce qui existe. Rend la zone retenue
+/// (largeur << 32 | hauteur).
+pub fn configure(args: [u64; 6]) -> Result<u64> {
+    let objet = fenetre_de(args[0], Rights::WRITE)?;
+    let Object::Fenetre(fenetre) = objet.as_ref() else { return Err(Error::WrongType) };
+    let (l, h) = (u32::try_from(args[1]).map_err(|_| Error::InvalidArgument)?,
+                  u32::try_from(args[2]).map_err(|_| Error::InvalidArgument)?);
+    if l == 0 || h == 0 || args[3] > 1 {
+        return Err(Error::InvalidArgument);
+    }
+    let focus = args[3] == 1;
+    let mut c = fenetre.client.lock();
+    if !c.redimensionne(l as usize, h as usize, focus) {
+        // Taille inchangee : le foyer seul.
+        c.envoie_configuration(focus);
+    }
+    let (rl, rh) = c.zone_utile();
+    Ok(((rl as u64) << 32) | rh as u64)
+}
+
+/// `bo_fenetre_ferme(fenetre)` (WRITE) : demande polie de fermeture
+/// (`CloseRequest`). Le client sort de lui-meme ; sa mort se lit ensuite par
+/// `bo_fenetre_pompe` comme toute autre.
+pub fn ferme(args: [u64; 6]) -> Result<u64> {
+    let objet = fenetre_de(args[0], Rights::WRITE)?;
+    let Object::Fenetre(fenetre) = objet.as_ref() else { return Err(Error::WrongType) };
+    fenetre.client.lock().demande_fermeture();
+    Ok(0)
 }
 
 /// Les comptes du pont, pour le journal du banc.

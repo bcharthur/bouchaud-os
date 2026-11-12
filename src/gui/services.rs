@@ -79,6 +79,14 @@ pub fn relance_enfant_si_necessaire(maintenant_ns: u64) -> bool {
 
 pub fn racine() -> u32 { RACINE.load(Ordering::Acquire) }
 pub fn en_echec() -> bool { ECHEC.load(Ordering::Acquire) != 0 }
+/// BOUCHAUD_BUREAU_RING3_MORT_ISOLEE_V1 : `pid` vient de sortir ; s'il etait
+/// la racine du navigateur, elle est oubliee (son arbre est arrete par
+/// l'appelant). Sinon rien : la mort d'un autre client ne concerne pas le
+/// navigateur.
+pub fn oublie_racine(pid: u32) {
+    let _ = RACINE.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
 /// Arret borne de l'arbre, y compris les moteurs sans fenetre.
 pub fn arrete() {
     let pid = RACINE.swap(0, Ordering::AcqRel);

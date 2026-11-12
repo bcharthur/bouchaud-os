@@ -80,6 +80,18 @@ class ClassementTests(unittest.TestCase):
                 for x in uf.classe([E1, E2], l, fin):
                     self.assertIn(x["statut"], uf.STATUTS)
 
+    def test_budget_par_etape(self):
+        # Revue #300 : une etape qui depasse SON budget en ecrivant sans cesse
+        # est un TIMEOUT, meme si la console n'est jamais silencieuse.
+        self.assertIsNone(uf.verdict_attente(ecoule=10, silence=1, limite=60))
+        self.assertEqual(uf.verdict_attente(ecoule=61, silence=1, limite=60), "bavarde")
+        self.assertEqual(uf.verdict_attente(ecoule=300, silence=0, limite=60), "bavarde")
+        # Console figee au-dela du budget : blocage suspecte.
+        self.assertEqual(uf.verdict_attente(ecoule=61, silence=61, limite=60), "muette")
+        r = uf.classe([E1], etape("a", ["/etc/hosts"] * 9, fin=False, temoin=False),
+                      uf.verdict_attente(ecoule=61, silence=1, limite=60))
+        self.assertEqual(r[0]["statut"], "TIMEOUT")
+
     def test_script_encadre_chaque_etape(self):
         s = uf.script(["journal off"], [E1, E2]).splitlines()
         i = s.index("find /etc")

@@ -284,6 +284,20 @@ def script(prelude: list[str], etapes: list[Etape]) -> str:
     return "\n".join(l) + "\n"
 
 
+def verdict_attente(ecoule: float, silence: float, limite: float) -> str | None:
+    """Pendant une etape pas encore terminee (temoin non vu) : `None` pour
+    continuer d'attendre ; `muette` si la console n'a rien ecrit depuis plus
+    que le budget (blocage suspecte) ; `bavarde` si l'etape depasse son budget
+    alors que la console avance encore (TIMEOUT). Revue #300 : le budget est
+    celui de l'ETAPE, compte depuis son debut, quelle que soit l'activite de
+    la console -- une commande qui ecrit sans fin n'est jamais un succes."""
+    if silence > limite:
+        return "muette"
+    if ecoule > limite:
+        return "bavarde"
+    return None
+
+
 def sysrq(moniteur: Path) -> None:
     try:
         s = socket.socket(socket.AF_UNIX)
@@ -315,6 +329,7 @@ def lance(boot: Path, sortie: Path, nom: str, kvm: bool) -> tuple[list[dict], st
     debut = time.monotonic()
     derniere_taille, derniere_activite = 0, time.monotonic()
     fin_machine = "eteinte"
+    debut_etape: dict[str, float] = {}
     try:
         while qemu.poll() is None:
             time.sleep(1)
@@ -334,11 +349,15 @@ def lance(boot: Path, sortie: Path, nom: str, kvm: bool) -> tuple[list[dict], st
             courante = vus[-1] if vus else None
             limite = courante.budget_s if courante else 180
             silence = time.monotonic() - derniere_activite
-            if courante and f"UNIX_TEMOIN {courante.id}" not in texte and silence > limite:
-                fin_machine = "muette"
-                sysrq(moniteur)
-                time.sleep(8)
-                break
+            if courante and f"UNIX_TEMOIN {courante.id}" not in texte:
+                ecoule = time.monotonic() - debut_etape.setdefault(courante.id, time.monotonic())
+                v = verdict_attente(ecoule, silence, limite)
+                if v:
+                    fin_machine = v
+                    if v == "muette":
+                        sysrq(moniteur)
+                        time.sleep(8)
+                    break
             if time.monotonic() - debut > budget_total:
                 fin_machine = "bavarde"
                 break
