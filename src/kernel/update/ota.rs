@@ -162,6 +162,33 @@ fn ecrit_ramfs(chemin: &str, donnees: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// RESUME: a transient network failure (a stalled TCP stream answered by an
+/// empty response -- seen at part 16 of 24 under QEMU) retries THIS part
+/// only; the parts already verified stay staged. A part that arrives but
+/// does not match the index is NOT retried: that is not the network.
+const TENTATIVES: u32 = 4;
+
+fn telecharge_avec_reprise(url: &str, max: usize) -> Result<Vec<u8>, &'static str> {
+    let mut derniere = "injoignable";
+    for essai in 1..=TENTATIVES {
+        match telecharge(url, max) {
+            Ok(c) => {
+                if essai > 1 {
+                    crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} resultat=ok", url, essai);
+                }
+                return Ok(c);
+            }
+            Err(e) => {
+                derniere = e;
+                crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} raison={}", url, essai, e);
+                if e == "trop_grand" { break; }
+                dort_s(2u64 << essai);
+            }
+        }
+    }
+    Err(derniere)
+}
+
 fn hex32(h: &[u8; 32]) -> String {
     let mut s = String::new();
     for b in h { s.push_str(&format!("{:02x}", b)); }
@@ -171,7 +198,7 @@ fn hex32(h: &[u8; 32]) -> String {
 /// Downloads the retained release in parts, checks it against the SIGNED
 /// manifest, stages it for `updated`. Err: nothing usable is staged.
 fn telecharge_et_prepare(r: &Retenue) -> Result<u64, &'static str> {
-    let index = telecharge(&format!("{}/system-slot.parts", r.source), INDEX_MAX).map_err(|_| "index_injoignable")?;
+    let index = telecharge_avec_reprise(&format!("{}/system-slot.parts", r.source), INDEX_MAX).map_err(|_| "index_injoignable")?;
     let index = String::from(String::from_utf8_lossy(&index));
     let mut total = crate::net::security::tls::sha256::Sha256::new();
     let mut octets = 0u64;
@@ -182,7 +209,7 @@ fn telecharge_et_prepare(r: &Retenue) -> Result<u64, &'static str> {
         if champs.len() != 3 || champs[0] != attendu_nom { return Err("index_mal_forme"); }
         let taille: usize = champs[1].parse().map_err(|_| "index_mal_forme")?;
         if taille == 0 || taille > PARTIE_MAX { return Err("partie_hors_bornes"); }
-        let corps = telecharge(&format!("{}/{}", r.source, attendu_nom), PARTIE_MAX).map_err(|_| "partie_injoignable")?;
+        let corps = telecharge_avec_reprise(&format!("{}/{}", r.source, attendu_nom), PARTIE_MAX).map_err(|_| "partie_injoignable")?;
         if corps.len() != taille { return Err("partie_taille_differente"); }
         let h = crate::net::security::tls::sha256::sha256(&corps);
         if hex32(&h) != champs[2] { return Err("partie_empreinte_differente"); }
