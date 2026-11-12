@@ -47,28 +47,33 @@ for slot in a b; do
 done
 "$BUILDER" --charge-installation "$OUT/kernel-slot.elf" "$OUT/recovery"
 
-SDK=userland/libs/bouchaud-sdk/build-program.sh
-for name in serviced healthd updated logd; do
-  "$SDK" "$WORK/$name" "userland/services/$name/$name.c"
-done
-
-# Le ramdisk utilise le même tar USTAR déterministe que run_ab_rollback.sh.
-python3 - "$OUT" "$WORK" <<'PY'
-import io
+# BOUCHAUD_LIVRAISON_V1 : le ramdisk de chaque slot est le SYSTEME COMPLET
+# (tools/release/assemble_systeme.sh) : services, compositeur, DOOM, Ladybird
+# (si BO_NATIF_LADYBIRD designe l'artefact natif), /etc/bouchaud (version, OTA
+# stable). Sans Ladybird, l'image est construite mais declaree NON livrable.
+bash tools/release/assemble_systeme.sh "$WORK/systeme" ${BO_NATIF_LADYBIRD:+"$BO_NATIF_LADYBIRD"} | tee "$OUT/systeme.txt"
+# Tar USTAR deterministe : ordre trie, mtime 0, uid/gid 0, droits conserves.
+python3 - "$OUT" "$WORK/systeme" <<'PY'
+import os
 import sys
 import tarfile
 from pathlib import Path
-out, work = map(Path, sys.argv[1:3])
+out, racine = Path(sys.argv[1]), Path(sys.argv[2])
+chemins = sorted(p for p in racine.rglob("*"))
 for slot in ("a", "b"):
     with tarfile.open(out / f"slot-{slot}" / "ramdisk", "w", format=tarfile.USTAR_FORMAT) as archive:
-        for name in ("serviced", "healthd", "updated", "logd"):
-            data = (work / name).read_bytes()
-            info = tarfile.TarInfo(f"bin/{name}")
-            info.size = len(data)
+        for p in chemins:
+            info = archive.gettarinfo(str(p), arcname=str(p.relative_to(racine)))
             info.mtime = 0
-            info.mode = 0o755
-            archive.addfile(info, io.BytesIO(data))
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            if p.is_file():
+                with p.open("rb") as f:
+                    archive.addfile(info, f)
+            else:
+                archive.addfile(info)
 PY
+cp "$WORK/systeme/etc/bouchaud/composants" "$OUT/composants.txt"
 
 # Boot actif A connu bon, B sain mais non candidat ; pas de mise à jour fantôme.
 rustc +"$TOOLCHAIN" --edition 2021 -O tools/update/meta.rs -o "$WORK/meta"

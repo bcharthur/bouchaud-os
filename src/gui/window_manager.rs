@@ -1606,6 +1606,7 @@ fn boucle() {
             // `delta_ms`. La chronologie va donc jusqu'au navigateur.
             if derniere_trame == 0 {
                 crate::platform::pc::ecran_faute::point("bureau-premiere-trame");
+                journalise_demarrer(wins.len());
             }
             derniere_trame = maintenant;
             sale = false;
@@ -2362,12 +2363,33 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 // de cette fonction. Le contrat ne peut donc plus etre oublie a un appelant.
 
 /// Ajoute une fenetre au bureau ET annonce ce que son apparition change.
+/// BOUCHAUD_LIVRAISON_V1 : la geometrie REELLE du bouton Demarrer (elle
+/// depend du nombre de fenetres) et des lignes du menu, telle que l'Atelier
+/// la calcule. Le test de l'image de livraison clique dessus avec la souris
+/// de QEMU au lieu de deviner des coordonnees.
+pub(crate) fn journalise_demarrer(n: usize) {
+    let r = start_btn(n);
+    crate::serial_println!("BOUCHAUD_ATELIER_DEMARRER fenetres={} x={} y={} w={} h={}", n, r.x, r.y, r.w, r.h);
+}
+
+fn journalise_menu() {
+    for (i, (libelle, _)) in window::MENU.iter().enumerate() {
+        let r = window::rect_ligne_menu(i);
+        crate::serial_println!("BOUCHAUD_ATELIER_MENU_LIGNE libelle={} x={} y={} w={} h={}", libelle, r.x, r.y, r.largeur, r.hauteur);
+    }
+}
+
 fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
+    // BOUCHAUD_LIVRAISON_V1 : chaque application ouverte dans l'Atelier laisse
+    // une trace (le Terminal n'en laissait aucune) : c'est ce que le test de
+    // l'image de livraison exige apres un double-clic REEL sur son icone.
+    crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_OUVERTE titre={}", fenetre.window.title);
     // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
     // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
     crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
     wins.push(fenetre);
     degats.tout();
+    journalise_demarrer(wins.len());
 }
 
 /// Remonte au premier plan une fenetre DEJA presente, et rend son nouvel index.
@@ -2744,6 +2766,7 @@ fn handle_click(
     }
     if start_btn(wins.len()).hit(mx, my) {
         *menu_open = true;
+        journalise_menu();
         for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
             degats.ajoute(origine_de(cible), rect);
         }
