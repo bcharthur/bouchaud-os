@@ -647,7 +647,7 @@ if [ "$OTA_COMPLET" = 1 ]; then
       grep -aF "$m" <<< "$dernier" >/dev/null || echec "boot=5 marqueur_absent=$m"
     done
     grep -aq "BOUCHAUD_OTA_TELECHARGE" <<< "$dernier" && echec "boot=5 raison=release_en_echec_retelechargee"
-    sed 's/\x1b\[[0-9;]*m//g' "$OUT"/boot-*.log | grep -aq "plancher_avance" && echec "raison=plancher_avance_par_une_release_en_echec"
+    grep -aq "plancher_avance" "$OUT"/boot-*.log && echec "raison=plancher_avance_par_une_release_en_echec"
     compteurs=$(for k in 1 2 3 4 5; do P $k | grep -aoE "BOUCHAUD_PERSIST_DEMARRAGES n=[0-9]+" | sed 's/.*n=//'; done | tr '\n' ' ')
     python3 -c 'import sys; c=[int(x) for x in sys.argv[1:]]; sys.exit(0 if len(c) >= 2 and c[0] == 1 and all(b > a for a, b in zip(c, c[1:])) else 1)' $compteurs \
       || echec "raison=state_non_preservee compteurs=$compteurs"
