@@ -22,15 +22,15 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 | 0 | Fusion #300/#301/#302/#304, main vérifiée | **FAIT** | CI au SHA exact |
 | 0 | « Unix & Filesystem Reliability » en check requis | **ACTION HUMAINE** | API 403 (droits admin) |
 | 1 | Disposition ESP / META / SYS-A / SYS-B / RECOVERY | **FAIT** (image) | QEMU TCG/OVMF (`trigkey-ab-preflight`, `run_ab_rollback.sh`) |
-| 1 | Partition STATE | **NON FAIT** | voir ci-dessous |
-| 2 | Installateur texte sûr | **NON FAIT** | voir ci-dessous |
+| 1 | Partition STATE | **FAIT** (image) | QEMU TCG/OVMF (`run_state_ab.sh`) |
+| 2 | Installateur SSD dédié (hôte Linux) | **FAIT**, jamais lancé sur un vrai disque | HOST (13 tests) + QEMU TCG/OVMF (`run_installe_ssd_qemu.sh`) |
 | 3 | Image physique unifiée | **PARTIEL** | voir ci-dessous |
 | 4 | Release signée, canaux, promotion | **FAIT (outillage)**, bloqué par la clé | HOST (31 tests, dont témoins négatifs) + QEMU TCG (banc A/B) |
 | 5 | Agent de mise à jour réseau | **NON FAIT** | — |
 | 6 | Ed25519, anti-retour, refus sans clé | **FAIT** | HOST + QEMU TCG |
 | 6 | Rotation et révocation de clé | **PROCÉDURE** | aucun banc |
 | 7 | Rollback, recovery | **FAIT** | QEMU TCG (`run_ab_rollback.sh`, 11 scénarios) |
-| 8 | Persistance à travers les cycles A/B | **NON FAIT** | dépend de STATE |
+| 8 | Persistance à travers coupures et changement de slot | **FAIT** | QEMU TCG/OVMF (`run_state_ab.sh` : A, A, B ; compteur 1, 2, 3) |
 | 9 | Réseau RTL8168, DHCP, DNS, TLS, horloge | **BLOCKED_PHYSICAL** | QEMU seulement (autres NIC) |
 | 10 | `bo-update` | **NON FAIT** | — |
 | 11 | Qualification physique | **BLOCKED_PHYSICAL** | procédures ci-dessous |
@@ -38,12 +38,25 @@ Niveaux de preuve, à ne jamais confondre : HOST, QEMU TCG, QEMU KVM, OVMF, VIRG
 
 Détail des lignes marquées « voir ci-dessous » :
 
-- **Partition STATE (phase 1).**
-  - La persistance actuelle (`fs::persistance`) occupe la fin d'un disque de données.
-  - L'image A/B ne pose pas de partition STATE.
-- **Installateur texte sûr (phase 2).**
-  - L'installateur actuel est la commande noyau `installer --go [--ecrase]`. Il pose un ESP et un SYSTEME, sans A/B. Il ne demande pas l'identité du disque.
-  - Il ne doit pas servir pour le Trigkey.
+- **Partition STATE (phase 1, `BOUCHAUD_STATE_AB_V1`).**
+  - `build_trigkey_ab_image.sh` pose une 6e partition `BOUCHAUD-STATE` (256 Mio dans l'image, type `B0DC8A5D-0001`), la dernière du disque, à zéro.
+  - Le noyau la monte comme volume persistant (`installation::monte_le_systeme_installe`) : `/persist` vit dessus. Une mise à jour réécrit un slot, jamais STATE.
+  - Chaque démarrage d'un système installé incrémente `/persist/.bouchaud/demarrages`, puis synchronise et journalise `BOUCHAUD_PERSIST_DEMARRAGES n=… slot=…`. C'est le témoin du banc.
+  - **Défaut trouvé par ce banc et corrigé.** `persistance::monte()` tenait le verrou tournant du RAMFS pendant ses lectures disque. Sur NVMe, une lecture cède le processeur, et LOCKDEP paniquait (`held_rank=50 … acquiring=scheduler-transition`) au premier montage. Le disque est désormais lu sans verrou, et le dépôt dans le RAMFS se fait sous verrou, sans E/S. Ce défaut n'apparaissait qu'avec une persistance sur NVMe, que rien n'exerçait jusque-là.
+- **Installateur SSD dédié (phase 2, `BOUCHAUD_INSTALL_SSD_V1`).**
+  - `tools/install/installe_ssd.py` s'exécute **sur un hôte Linux** : le SSD dédié y est branché (adaptateur USB-NVMe ou baie) avant d'être monté dans le Trigkey.
+  - `liste` montre les disques. `installe` exige la cible **et** son identité exacte `modèle|série|octets`, lue dans `/sys/block`. Il ne choisit jamais de disque.
+  - Le mode par défaut est un dry-run. `--execute` demande en plus la phrase tapée `EFFACER <SÉRIE>`.
+  - Refus :
+    - une partition (et non le disque entier) ;
+    - un disque dont une partition est montée ou sert de swap, notamment le disque système ;
+    - un numéro de série illisible ;
+    - une image altérée ou plus grande que le disque ;
+    - une image dont la dernière partition n'est pas STATE.
+  - Après écriture : `fsync`, puis **relecture intégrale** comparée à l'empreinte. STATE est ensuite étendue jusqu'à la fin du disque : GPT de secours écrite avant la primaire, CRC recalculés, relecture des deux.
+  - Banc : `run_installe_ssd_qemu.sh` installe l'image réelle sur un fichier de 2 Gio. Un témoin vérifie qu'un refus de confirmation n'écrit rien. Le SSD obtenu est ensuite démarré deux fois sous QEMU : STATE est montée à sa taille étendue, et le compteur vaut 1 puis 2.
+  - La commande noyau historique `installer --go [--ecrase]` (ESP + SYSTEME, sans A/B, sans identité) **ne doit pas servir** pour le Trigkey.
+  - **Jamais lancé sur un vrai disque** par cette session.
 - **Image physique unifiée (phase 3).**
   - Les slots A/B portent le noyau et 4 services : serviced, healthd, updated et logd.
   - Ils ne portent ni Ladybird, ni DOOM, ni le bureau.
