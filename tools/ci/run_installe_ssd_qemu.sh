@@ -56,10 +56,10 @@ print(st[3] + 1 - ins.SECTEURS_ZONE, ins.SECTEURS_ZONE)
 PY
 }
 empreinte_zone() { read -r z n < <(zone); dd if="$J/ssdq" bs=512 skip="$z" count="$n" status=none | sha256sum | cut -c1-64; }
-retourne() {  # LBA_RELATIF : inverse l'octet 100 d'un secteur de la zone (temoin de corruption)
+retourne() {  # LBA_RELATIF : inverse l octet 13 (generation, sous la somme de controle 0..44) d un superbloc
   read -r z n < <(zone)
   python3 -c 'import sys; p,o=sys.argv[1],int(sys.argv[2]); f=open(p,"r+b"); f.seek(o); b=f.read(1); f.seek(o); f.write(bytes([b[0]^0xFF]))' \
-    "$J/ssdq" $(( (z + $1) * 512 + 100 ))
+    "$J/ssdq" $(( (z + $1) * 512 + 13 ))
 }
 demarre() {
   local log="$OUT/ssd-boot-$1.log"
