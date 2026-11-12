@@ -58,8 +58,15 @@ const ETAT: &str = ".bouchaud/ota-etat";
 const HISTORIQUE: &str = ".bouchaud/ota-historique";
 const HISTORIQUE_MAX: usize = 50;
 
-static CHAMPS: crate::kernel::sync::SpinLock<Vec<(&'static str, String)>> =
+static CHAMPS: crate::kernel::sync::SpinLock<Vec<(String, String)>> =
     crate::kernel::sync::SpinLock::new(Vec::new());
+/// Bornes de l'etat relu sur STATE (un fichier altere ne fait pas grossir le noyau).
+const CHAMPS_MAX: usize = 32;
+const CLE_MAX: usize = 40;
+const VALEUR_MAX: usize = 240;
+/// Premiere relance apres un echec recuperable de telechargement ; doublee a
+/// chaque echec consecutif, jamais au-dela de PERIODE_S.
+pub const RELANCE_MIN_S: u64 = 60;
 
 /// Consentement donne pendant CE demarrage (`bo-update consentir`).
 static CONSENTEMENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -97,18 +104,53 @@ fn lit_persist(rel: &str) -> Vec<u8> {
 }
 
 /// Met a jour un champ de l'etat et le reecrit.
-fn etat(cle: &'static str, valeur: String) {
+fn etat(cle: &str, valeur: String) {
     let texte = {
         let mut c = CHAMPS.lock();
-        match c.iter_mut().find(|(k, _)| *k == cle) {
+        match c.iter_mut().find(|(k, _)| k == cle) {
             Some(e) => e.1 = valeur,
-            None => c.push((cle, valeur)),
+            None => c.push((String::from(cle), valeur)),
         }
-        let mut t = String::new();
-        for (k, v) in c.iter() { t.push_str(&format!("{}={}\n", k, v)); }
-        t
+        texte_champs(&c)
     };
     ecrit_persist(ETAT, texte.as_bytes());
+}
+
+/// Retire un champ de l'etat et le reecrit.
+fn etat_retire(cle: &str) {
+    let texte = {
+        let mut c = CHAMPS.lock();
+        c.retain(|(k, _)| k != cle);
+        texte_champs(&c)
+    };
+    ecrit_persist(ETAT, texte.as_bytes());
+}
+
+fn texte_champs(c: &[(String, String)]) -> String {
+    let mut t = String::new();
+    for (k, v) in c.iter() { t.push_str(&format!("{}={}\n", k, v)); }
+    t
+}
+
+/// L'etat du demarrage PRECEDENT (STATE), relu une fois : le dernier
+/// telechargement, la derniere verification, etc. traversent les
+/// redemarrages. Borne ; une ligne mal formee est ignoree.
+fn charge_etat() {
+    let ancien = String::from_utf8_lossy(&lit_persist(ETAT)).into_owned();
+    let mut c = CHAMPS.lock();
+    for l in ancien.lines() {
+        if c.len() >= CHAMPS_MAX { break; }
+        let Some((k, v)) = l.split_once('=') else { continue };
+        if k.is_empty() || k.len() > CLE_MAX || v.len() > VALEUR_MAX { continue; }
+        if !k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { continue; }
+        if c.iter().any(|(x, _)| x == k) { continue; }
+        c.push((String::from(k), String::from(v)));
+    }
+}
+
+/// Lecture d'un champ de l'etat.
+fn etat_lu(cle: &str) -> Option<String> {
+    CHAMPS.lock().iter().find(|(k, _)| k == cle).map(|(_, v)| v.clone())
 }
 
 /// Ajoute une ligne a l'historique (les HISTORIQUE_MAX dernieres).
@@ -140,6 +182,17 @@ pub fn historique_texte() -> String { String::from_utf8_lossy(&lit_persist(HISTO
 
 /// Identite du systeme qui tourne et des slots, au demarrage.
 fn note_identite() {
+    charge_etat();
+    // Un telechargement en cours au demarrage precedent n'a pas fini : coupure
+    // ou redemarrage pendant le telechargement. Les parties vivaient en RAM ;
+    // rien n'avait ete offert a `updated` ni ecrit dans un slot. On le dit, et
+    // le cycle suivant recommence depuis la premiere partie, sous signature.
+    if let Some(v) = etat_lu("telechargement_en_cours") {
+        historique(&format!("telechargement_interrompu {}", v));
+        crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_INTERROMPU {} consequence=reprise_depuis_la_premiere_partie", v);
+        etat("dernier_telechargement", format!("{} interrompu {}", horodatage(), v));
+        etat_retire("telechargement_en_cours");
+    }
     let version = {
         let fs = crate::fs::ramfs::fs();
         fs.resolve("/etc/bouchaud/version", 0).map(|i| String::from_utf8_lossy(&fs.nodes[i].content).into_owned())
@@ -337,6 +390,31 @@ fn telecharge_avec_reprise(url: &str, max: usize) -> Result<Vec<u8>, &'static st
     Err(derniere)
 }
 
+/// One part: a network failure OR a SHORT body (a response cut in transit)
+/// is retried, this part only. A body of the announced size whose digest
+/// differs is NOT retried here: that is the content, not the transport (the
+/// caller refuses the download; the next cycle starts over).
+fn telecharge_partie(url: &str, taille: usize) -> Result<Vec<u8>, &'static str> {
+    let mut derniere = "partie_injoignable";
+    for essai in 1..=TENTATIVES {
+        let raison = match telecharge(url, PARTIE_MAX) {
+            Ok(c) if c.len() == taille => {
+                if essai > 1 {
+                    crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} resultat=ok", url, essai);
+                }
+                return Ok(c);
+            }
+            Ok(c) if c.len() < taille => { derniere = "partie_tronquee"; format!("partie_tronquee octets={}/{}", c.len(), taille) }
+            Ok(_) => return Err("partie_taille_differente"),
+            Err("trop_grand") => return Err("partie_taille_differente"),
+            Err(e) => { derniere = "partie_injoignable"; String::from(e) }
+        };
+        crate::serial_println!("BOUCHAUD_OTA_REPRISE url={} essai={} raison={}", url, essai, raison);
+        if essai < TENTATIVES { dort_s(2u64 << essai); }
+    }
+    Err(derniere)
+}
+
 fn hex32(h: &[u8; 32]) -> String {
     let mut s = String::new();
     for b in h { s.push_str(&format!("{:02x}", b)); }
@@ -357,8 +435,7 @@ fn telecharge_et_prepare(r: &Retenue) -> Result<u64, &'static str> {
         if champs.len() != 3 || champs[0] != attendu_nom { return Err("index_mal_forme"); }
         let taille: usize = champs[1].parse().map_err(|_| "index_mal_forme")?;
         if taille == 0 || taille > PARTIE_MAX { return Err("partie_hors_bornes"); }
-        let corps = telecharge_avec_reprise(&format!("{}/{}", r.source, attendu_nom), PARTIE_MAX).map_err(|_| "partie_injoignable")?;
-        if corps.len() != taille { return Err("partie_taille_differente"); }
+        let corps = telecharge_partie(&format!("{}/{}", r.source, attendu_nom), taille)?;
         let h = crate::net::security::tls::sha256::sha256(&corps);
         if hex32(&h) != champs[2] { return Err("partie_empreinte_differente"); }
         total.update(&corps);
@@ -383,15 +460,29 @@ const ESSAIS_INSTALLATION: u64 = 3;
 
 /// After a `disponible`: download (consent), wait for the candidate,
 /// reboot (consent).
-fn installe_si_consenti() {
-    let Some(r) = RETENUE.lock().take() else { return };
+/// What a cycle's install step ended with.
+enum Issue {
+    /// Nothing to retry soon (nothing available, no consent, installed, ...).
+    Rien,
+    /// The download failed in a way the next cycle can fix (network,
+    /// truncated or altered part): retried sooner than PERIODE_S.
+    EchecRecuperable(&'static str),
+}
+
+fn installe_si_consenti() -> Issue {
+    let Some(r) = RETENUE.lock().take() else { return Issue::Rien };
     if !consenti("telechargement") {
         crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_EN_ATTENTE consentement_requis sequence={}", r.manifeste.sequence);
-        return;
+        return Issue::Rien;
     }
     // Nothing is offered to `updated` while parts are being written.
     let _ = ecrit_ramfs("/update/pret", b"en_cours\n");
-    match telecharge_et_prepare(&r) {
+    // Persistant (STATE) : un redemarrage pendant le telechargement se voit au
+    // demarrage suivant (BOUCHAUD_OTA_TELECHARGEMENT_INTERROMPU).
+    etat("telechargement_en_cours", format!("sequence={} debut={}", r.manifeste.sequence, horodatage()));
+    let issue = telecharge_et_prepare(&r);
+    etat_retire("telechargement_en_cours");
+    match issue {
         Ok(octets) => {
             crate::serial_println!(
                 "BOUCHAUD_OTA_TELECHARGE source={} sequence={} octets={} empreinte=signee_verifiee prepare=/update",
@@ -402,7 +493,7 @@ fn installe_si_consenti() {
             etat("dernier_telechargement", format!("{} echec raison={}", horodatage(), e));
             historique(&format!("telechargement_refuse sequence={} raison={}", r.manifeste.sequence, e));
             crate::serial_println!("BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source={} raison={}", r.source, e);
-            return;
+            return Issue::EchecRecuperable(e);
         }
     }
     // Each offer to `updated` is a NEW generation of `pret` (revue #308) :
@@ -418,7 +509,7 @@ fn installe_si_consenti() {
         let refus_avant = super::refus_installation();
         if ecrit_ramfs("/update/pret", format!("pret generation={}\n", g).as_bytes()).is_err() {
             crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE raison=pret_non_ecrit");
-            return;
+            return Issue::Rien;
         }
         s = 0;
         while !super::candidat_en_attente() && super::refus_installation() == refus_avant && s < 1800 {
@@ -434,7 +525,7 @@ fn installe_si_consenti() {
             continue;
         }
         crate::serial_println!("BOUCHAUD_OTA_INSTALLATION_ABSENTE essai={} attente_s={}", essai, s);
-        return;
+        return Issue::Rien;
     }
     crate::serial_println!("BOUCHAUD_OTA_CANDIDAT_PRET sequence={} essai={} attente_s={}", r.manifeste.sequence, essai, s);
     historique(&format!("candidat_pret sequence={} version={}", r.manifeste.sequence, r.manifeste.version()));
@@ -512,6 +603,7 @@ fn fil_ota() -> ! {
         s += 1;
     }
     note_identite();
+    let mut echecs_consecutifs = 0u32;
     loop {
         // Verifier DES que le reseau est la (pas d'abandon apres un delai :
         // un cable branche plus tard declenche la verification).
@@ -525,12 +617,25 @@ fn fil_ota() -> ! {
         let n = verifie_tout();
         crate::serial_println!("BOUCHAUD_OTA_CYCLE sources={} prochain_s={}", n, PERIODE_S);
         etat("prochaine_verification_s", format!("{}", PERIODE_S));
-        installe_si_consenti();
+        let attente = match installe_si_consenti() {
+            Issue::EchecRecuperable(raison) => {
+                // Un echec de RESEAU ou d'integrite d'une partie n'attend pas
+                // six heures : relance bornee (60 s, 120 s, ... <= PERIODE_S).
+                // La decision reste celle du manifeste SIGNE, revue a chaque
+                // cycle : rien n'est installe sans lui.
+                echecs_consecutifs = echecs_consecutifs.saturating_add(1);
+                let s = relance_s(echecs_consecutifs);
+                crate::serial_println!("BOUCHAUD_OTA_RELANCE dans_s={} echecs_consecutifs={} raison={}", s, echecs_consecutifs, raison);
+                etat("prochaine_verification_s", format!("{}", s));
+                s
+            }
+            Issue::Rien => { echecs_consecutifs = 0; PERIODE_S }
+        };
         // Periode, interrompue par une demande (`bo-update verifier`) ou par
         // la perte puis le retour du reseau.
         let mut ecoule = 0;
         let mut perdu = false;
-        while ecoule < PERIODE_S {
+        while ecoule < attente {
             if VERIFIER_MAINTENANT.load(core::sync::atomic::Ordering::Acquire) { break; }
             let bail = crate::net::bail_obtenu();
             if !bail { perdu = true; }
@@ -539,6 +644,13 @@ fn fil_ota() -> ! {
             ecoule += 5;
         }
     }
+}
+
+/// Attente avant le cycle suivant apres `n` echecs consecutifs (n >= 1).
+pub fn relance_s(n: u32) -> u64 {
+    let mut s = RELANCE_MIN_S;
+    for _ in 1..n.min(20) { s = s.saturating_mul(2); }
+    s.min(PERIODE_S)
 }
 
 /// Started at boot. Inert without a configuration.
