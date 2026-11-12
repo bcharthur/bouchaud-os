@@ -72,10 +72,17 @@ jobs:
       - name: Scenarios find et commandes (TCG)
         run: |
           r=0
-          for s in find commandes arborescence; do
+          for s in find commandes arborescence persistance; do
             python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/tcg --scenario "$s" || r=1
           done
           exit "$r"
+
+      - name: Temoin -- persistance avec zone effacee entre deux demarrages (DOIT echouer)
+        run: |
+          if python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/temoin --scenario persistance --temoin-zone-effacee > temoin.log 2>&1; then
+            cat temoin.log; echo "TEMOIN_AVEUGLE : la zone effacee n'a pas ete vue" >&2; exit 1
+          fi
+          grep -E 'id=b2-relit statut=FAIL' temoin.log
 
       - name: Acces a /dev/kvm
         run: |
@@ -85,7 +92,7 @@ jobs:
       - name: Scenarios find et commandes (KVM)
         run: |
           r=0
-          for s in find commandes arborescence; do
+          for s in find commandes arborescence persistance; do
             python3 tools/ci/unix_fiabilite.py target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/unix-fs-ci/kvm --kvm --scenario "$s" || r=1
           done
           exit "$r"

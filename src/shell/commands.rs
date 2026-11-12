@@ -678,15 +678,15 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
             println!("cat: lecture interrompue a l'octet {}", position);
             return 1;
         }
-        print!("{}", String::from_utf8_lossy(&tranche[..lus]));
         dernier = tranche[lus - 1];
         position += lus;
-    }
-    // Comme la branche de l'entree standard : un saut de ligne seulement si
-    // le fichier n'en finit pas deja par un (le banc Unix voyait une ligne vide
-    // de trop apres chaque fichier texte).
-    if dernier != b'\n' {
-        println!("");
+        // Comme la branche de l'entree standard : un saut de ligne seulement si
+        // le fichier n'en finit pas deja par un (le banc Unix voyait une ligne
+        // vide de trop apres chaque fichier texte). Et dans la MEME ecriture que
+        // la derniere tranche : une trace du noyau emise entre les deux se
+        // collait a la fin de la ligne (banc persistance, `[PERF-RIP-RESUME]`).
+        let fin = if position >= taille && dernier != b'\n' { "\n" } else { "" };
+        print!("{}{}", String::from_utf8_lossy(&tranche[..lus]), fin);
     }
     0
 }
