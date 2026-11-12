@@ -186,6 +186,9 @@ diagnostic_echec() {
     # 1. Verdict : démarrage, sonde de vidange, état et commit, refus, services.
     grep -aE "BOUCHAUD_AB_(BOOT|PASSAGE)|BOUCHAUD_USB_STOCKAGE_VIDANGE|BOUCHAUD_USB_(REFUS_VIDANGE|VOLUME_ORPHELIN)|BOUCHAUD_UPDATE_SANTE|SERVICED_(UPDATE_STATE|HEALTH_COMMIT)|\[SERVICED\] (system|svc=[a-z]+ [A-Za-z]+->(Failed|Stopped))|KERNEL PANIC|panicked at" \
       <<< "$propre" | awk -v n="$n" 'c < 40 { print "AB_DIAG " n " " $0; c++ }' || true
+    # 1b. BOUCHAUD_OTA_V1 : agent, updated, transport HTTPS.
+    grep -aE "BOUCHAUD_OTA_|UPDATED_(OTA|INSTALL|SKIP|IDLE|PROGRESS)|nautile/(ERR|NET)\] (https|\[TLS)|BOUCHAUD_PERSIST_(MONTAGE|DEMARRAGES)" \
+      <<< "$propre" | awk -v n="$n" 'c < 60 { print "AB_DIAG " n " " $0; c++ }' || true
     # 2. Transport USB : décompte, puis les premiers échecs d'E/S.
     echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre" || true) reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre" || true) reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre" || true) vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre" || true)"
     # awk lit tout (pas de `head`) : sous pipefail, aucun SIGPIPE du producteur.
@@ -409,12 +412,16 @@ srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 PY
   PID_HTTP=$!
-  trap 'kill "$PID_HTTP" 2>/dev/null; rm -rf "$CLES"' EXIT
+  # Ajoute l'arret du serveur a la trap du banc, SANS la remplacer : le
+  # diagnostic d'echec et le nettoyage doivent toujours avoir lieu.
+  trap 'rc=$?; kill "$PID_HTTP" 2>/dev/null; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
 elif [ "$SCENARIO" = ota-verifie ]; then
   RESEAU=(-nic user,model=e1000)
   python3 -m http.server "$PORT_OTA" --bind 127.0.0.1 --directory "$OUT/srv" > "$OUT/http.log" 2>&1 &
   PID_HTTP=$!
-  trap 'kill "$PID_HTTP" 2>/dev/null; rm -rf "$CLES"' EXIT
+  # Ajoute l'arret du serveur a la trap du banc, SANS la remplacer : le
+  # diagnostic d'echec et le nettoyage doivent toujours avoir lieu.
+  trap 'rc=$?; kill "$PID_HTTP" 2>/dev/null; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
 fi
 # BOUCHAUD_AB_ETAT_APRES_COMMIT_ATTENDU_V1 : après `result=committed`,
 # serviced relit l'état par la capacité et écrit `SERVICED_UPDATE_STATE`.
