@@ -1945,7 +1945,7 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // Fichiers
         "pwd" => { ramfs::print_path(&ramfs::fs(), *cwd); println!(""); 0 }
         "ls" => c::ls(argc, &argv, *cwd),
-        "tree" => { c::tree(argc, &argv, *cwd); 0 }
+        "tree" => c::tree(argc, &argv, *cwd),
         "cd" => c::cd(argc, &argv, cwd),
         "mkdir" => c::mkdir(argc, &argv, *cwd),
         "touch" => c::touch(argc, &argv, *cwd),
