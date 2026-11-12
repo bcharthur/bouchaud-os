@@ -1,4 +1,4 @@
-"""BOUCHAUD_BUREAU_RING3_2A : le juge de l'ecran compose par `composited`.
+"""BOUCHAUD_BUREAU_RING3_2A/2B : le juge de l'ecran compose par `composited`.
 
 Le banc ne vaut que si le juge REFUSE ce qui doit l'etre : contenu non recopie
 (la premiere version du compositeur perdait la trame complete du demarrage),
@@ -41,13 +41,45 @@ def ppm(pixel):
     return f"P6\n# capture\n{w} {h}\n255\n".encode() + bytes(corps)
 
 
-def lance(contenu, etat):
+def lance(contenu, etat, fenetres=None):
+    args = ["vide"] if etat == "mort" else [",".join(map(str, f)) for f in (fenetres or [FEN])]
     with tempfile.TemporaryDirectory() as d:
         f = Path(d, "c.ppm")
         f.write_bytes(contenu)
-        r = subprocess.run([sys.executable, str(SCRIPT), str(f), *map(str, FEN), etat],
+        r = subprocess.run([sys.executable, str(SCRIPT), str(f), *args],
                            capture_output=True, text=True, timeout=20)
         return r.returncode, r.stdout
+
+
+# BOUCHAUD_BUREAU_RING3_2B : deux fenetres qui se recouvrent, ecran 60x80.
+ECRAN2 = (60, 80)
+BAS = (4, 28, 20, 20)    # cadre (2, 2)-(26, 50)
+HAUT = (14, 52, 20, 20)  # cadre (12, 26)-(36, 74) : recouvre le bas de BAS
+
+
+def pile(x, y, fenetres, deborde=False):
+    """L'ecran attendu ; `deborde` : la fenetre du fond est peinte PAR-DESSUS."""
+    ordre = list(enumerate(fenetres))
+    if deborde:
+        ordre = ordre[::-1]
+    for k, (fx, fy, fl, fh) in reversed(ordre):
+        if fx - 2 <= x < fx + fl + 2 and fy - 26 <= y < fy + fh + 2:
+            if fx <= x < fx + fl and fy <= y < fy + fh:
+                return vcb.motif(x - fx, y - fy)
+            if fy - 24 <= y < fy and fx <= x < fx + fl:
+                return vcb.BARRE if k == len(fenetres) - 1 else vcb.BARRE_INACTIVE
+            return vcb.BORD
+    return vcb.FOND
+
+
+def ppm2(pixel):
+    w, h = ECRAN2
+    corps = bytearray()
+    for y in range(h):
+        for x in range(w):
+            v = pixel(x, y)
+            corps += bytes(((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF))
+    return f"P6\n{w} {h}\n255\n".encode() + bytes(corps)
 
 
 class CaptureBureauTests(unittest.TestCase):
@@ -96,6 +128,46 @@ class CaptureBureauTests(unittest.TestCase):
         self.assertEqual(code, 0, sortie)
         code, sortie = lance(ppm(lambda x, y: bureau(x, y, vcb.motif)), "mort")
         self.assertEqual(code, 1, sortie)
+
+    def test_deux_fenetres_empilees_acceptees(self):
+        code, sortie = lance(ppm2(lambda x, y: pile(x, y, [BAS, HAUT])), "vivant", [BAS, HAUT])
+        self.assertEqual(code, 0, sortie)
+        self.assertIn("fenetres=2", sortie)
+
+    def test_fenetre_du_fond_qui_deborde_refusee(self):
+        # La fenetre du fond peinte PAR-DESSUS celle du premier plan.
+        code, sortie = lance(ppm2(lambda x, y: pile(x, y, [BAS, HAUT], deborde=True)), "vivant", [BAS, HAUT])
+        self.assertEqual(code, 1, sortie)
+
+    def test_ordre_inverse_annonce_refuse(self):
+        # Ecran correct pour [BAS, HAUT], juge avec l'ordre inverse.
+        code, sortie = lance(ppm2(lambda x, y: pile(x, y, [BAS, HAUT])), "vivant", [HAUT, BAS])
+        self.assertEqual(code, 1, sortie)
+
+    def test_barre_active_sur_la_mauvaise_fenetre_refusee(self):
+        def barres_inversees(x, y):
+            v = pile(x, y, [BAS, HAUT])
+            return {vcb.BARRE: vcb.BARRE_INACTIVE, vcb.BARRE_INACTIVE: vcb.BARRE}.get(v, v)
+        code, sortie = lance(ppm2(barres_inversees), "vivant", [BAS, HAUT])
+        self.assertEqual(code, 1, sortie)
+
+    def test_fenetre_opaque_peinte_acceptee(self):
+        # DOOM/Ladybird : contenu quelconque, mais peint.
+        def jeu(x, y):
+            v = pile(x, y, [BAS, HAUT])
+            fx, fy, fl, fh = HAUT
+            return 0x7F3F1F if fx <= x < fx + fl and fy <= y < fy + fh else v
+        code, sortie = lance(ppm2(jeu), "vivant", [BAS, HAUT + ("o",)])
+        self.assertEqual(code, 0, sortie)
+
+    def test_fenetre_opaque_non_peinte_refusee(self):
+        def vide(x, y):
+            v = pile(x, y, [BAS, HAUT])
+            fx, fy, fl, fh = HAUT
+            return vcb.FOND if fx <= x < fx + fl and fy <= y < fy + fh else v
+        code, sortie = lance(ppm2(vide), "vivant", [BAS, HAUT + ("o",)])
+        self.assertEqual(code, 1, sortie)
+        self.assertIn("non-peinte", sortie)
 
     def test_ppm_tronque_echoue_sans_boucler(self):
         for brut in (b"", b"P6", b"P6\n# rien", b"P6 50 50 255\n\x00"):

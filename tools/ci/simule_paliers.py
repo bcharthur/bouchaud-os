@@ -88,7 +88,8 @@ def env_verdict(bloc: list[str]) -> dict[str, str]:
             dans_env = True
             continue
         if dans_env:
-            m = re.match(r"^          ([A-Z_]+): (.*)$", ligne)
+            # Les noms peuvent porter des chiffres (R_BUREAU_RING3).
+            m = re.match(r"^          ([A-Z][A-Z0-9_]*): (.*)$", ligne)
             if m:
                 env[m.group(1)] = m.group(2).strip()
             elif not ligne.startswith("          "):

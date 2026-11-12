@@ -685,6 +685,9 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
         numbers::DISPLAY_INFO => crate::kernel::native::affichage::info(args),
         numbers::FENETRE_POMPE => crate::kernel::native::fenetre::pompe(args),
         numbers::FENETRE_LIT => crate::kernel::native::fenetre::lit(args),
+        numbers::FENETRE_CONFIGURE => crate::kernel::native::fenetre::configure(args),
+        numbers::FENETRE_FERME => crate::kernel::native::fenetre::ferme(args),
+        numbers::DISPLAY_RELANCE_CLIENT => crate::kernel::native::affichage::relance(args),
 
         _ => Err(Error::InvalidCall),
     }
