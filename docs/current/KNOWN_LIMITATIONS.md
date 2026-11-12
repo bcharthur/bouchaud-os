@@ -33,7 +33,7 @@ Les colonnes distinguent ce qui est **sur `main`**, ce qui est **dans une PR ouv
 
 | Anomalie | Vue | État |
 |---|---|---|
-| `SIGCHLD_MULTIFIL_ECHEC` | une fois, `main@992e67e1`, passe TCG | 125 reproductions ciblées sans échec ; le journal du banc publie désormais le cas fautif |
+| `SIGCHLD_MULTIFIL_ECHEC` | deux fois, en passe TCG : `main@992e67e1`, puis `main@b3d4077` (#311) | 125 reproductions ciblées sans échec après la première. La seconde nomme le cas `boucle` : enfant zombie récoltable, mais SIGCHLD jamais livré au parent (réveil seulement par la borne de 10 s). |
 | Panique SMP4 « correctif » du banc de comptabilité | une fois sur 41 démarrages locaux | 36 démarrages isolés sans panique ; le banc publie désormais le site et le message |
 | #264 panique SMP4 de passation pendant le soak de 20 min | soak `reliability-v3`, intermittente | **Attribuée le 10/11** : `switch_to` publiait la passation (`SWITCH_PENDING`) avec IF ouvert ; une IRQ de l'horloge entre cette publication et `switching_out` terminait une passation à moitié publiée, ou publiait la tâche sortante depuis sa propre pile. Correctif : passation publiée et terminée IF coupé, assertion dans `prepare_switch_handoff`, test structurel + 4 mutations (`tools/smp/test_passation_if_coupe.rs`). Soak SMP4 TCG local 9/9. **Close seulement après le soak hébergé de 20 min (`reliability-v3`, QEMU TCG `-cpu max`, SMP4) vert au SHA final.** |
 
