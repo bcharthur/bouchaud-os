@@ -127,5 +127,45 @@ class VerifieArtefacts(unittest.TestCase):
             self.ok()
 
 
+class Parties(VerifieArtefacts):
+    """BOUCHAUD_OTA_V1 : l'image publiee en parties (agent OTA)."""
+
+    def setUp(self):
+        super().setUp()
+        e = self.d / "entree"
+        (e / "system-slot.img").write_bytes(bytes(range(256)) * (3 * 1024 * 1024 // 256 + 7))
+        import shutil
+        shutil.rmtree(self.r)
+        rc = fr.main(["x", "--image", str(e / "system-slot.img"), "--version", "v1", "--sequence", "7",
+                      "--canal", "testing", "--commit", COMMIT, "--sortie", str(self.r), "--cle", str(self.prod),
+                      "--parties-mio", "1",
+                      *sum((["--joint", str(e / n)] for n in ("disque-ab.img", "disque-ab.img.sha256",
+                                                             "manifest-ab.json", "qemu-boot-evidence.json")), [])])
+        assert rc == 0
+        (self.r / "system-slot.img").write_bytes((e / "system-slot.img").read_bytes())
+
+    def test_parties_reconstituent_l_image(self):
+        self.assertEqual(self.ok()["sequence"], 7)
+        idx = (self.r / "system-slot.parts").read_text().splitlines()
+        self.assertEqual(len(idx), 4)
+        self.assertTrue(all(l.startswith(f"system-slot.img.part{k:03d} ") for k, l in enumerate(idx)))
+
+    def test_partie_alteree_refusee(self):
+        p = self.r / "system-slot.img.part001"
+        b = bytearray(p.read_bytes()); b[10] ^= 1; p.write_bytes(bytes(b))
+        self.refuse("empreinte_fausse")
+
+    def test_index_reordonne_refuse(self):
+        idx = self.r / "system-slot.parts"
+        l = idx.read_text().splitlines()
+        l[0], l[1] = l[1], l[0]
+        idx.write_text("\n".join(l) + "\n")
+        self.refuse("index_parties_mal_forme")
+
+    def test_partie_manquante_refusee(self):
+        (self.r / "system-slot.img.part003").unlink()
+        self.refuse("fichiers_inattendus")
+
+
 if __name__ == "__main__":
     unittest.main()

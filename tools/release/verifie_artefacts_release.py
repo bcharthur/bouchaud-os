@@ -19,6 +19,7 @@ Fail closed (code 2, `ARTEFACTS_REFUSES raison=...`). Exige :
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -34,10 +35,26 @@ class Refus(Exception):
     pass
 
 
+def parties_annoncees(d: Path) -> list[tuple[str, int, str]]:
+    """L'index des parties (BOUCHAUD_OTA_V1), s'il existe."""
+    idx = d / "system-slot.parts"
+    if not idx.is_file():
+        return []
+    r = []
+    for k, l in enumerate(idx.read_text().splitlines()):
+        c = l.split()
+        if len(c) != 3 or c[0] != f"system-slot.img.part{k:03d}":
+            raise Refus(f"index_parties_mal_forme ligne={k}")
+        r.append((c[0], int(c[1]), c[2]))
+    return r
+
+
 def verifie(d: Path, production: bool, cles_texte: str | None = None) -> dict:
     presents = {p.name for p in d.iterdir()}
-    if presents != ATTENDUS:
-        raise Refus(f"fichiers_inattendus manquants={sorted(ATTENDUS - presents)} en_trop={sorted(presents - ATTENDUS)}")
+    parties = parties_annoncees(d)
+    attendus = ATTENDUS | ({"system-slot.parts"} | {n for n, _, _ in parties} if parties else set())
+    if presents != attendus:
+        raise Refus(f"fichiers_inattendus manquants={sorted(attendus - presents)} en_trop={sorted(presents - attendus)}")
     if any((d / n).is_symlink() for n in presents):
         raise Refus("lien_symbolique")
     sommes = {}
@@ -46,8 +63,8 @@ def verifie(d: Path, production: bool, cles_texte: str | None = None) -> dict:
         if not nom or nom in sommes:
             raise Refus(f"sha256sums_ligne_invalide {ligne!r}")
         sommes[nom] = h
-    if set(sommes) != ATTENDUS - {"SHA256SUMS"}:
-        raise Refus(f"sha256sums_incomplet {sorted((ATTENDUS - {'SHA256SUMS'}) ^ set(sommes))}")
+    if set(sommes) != attendus - {"SHA256SUMS"}:
+        raise Refus(f"sha256sums_incomplet {sorted((attendus - {'SHA256SUMS'}) ^ set(sommes))}")
     reel = {n: fr.sha256_fichier(d / n) for n in sommes}
     faux = sorted(n for n in sommes if sommes[n] != reel[n])
     if faux:
@@ -70,6 +87,16 @@ def verifie(d: Path, production: bool, cles_texte: str | None = None) -> dict:
         raise Refus("taille_de_slot_differente_du_manifeste")
     if rel["manifeste"]["sha256"] != reel["manifest"]:
         raise Refus("release_json_ne_nomme_pas_ce_manifeste")
+    # Les parties, mises bout a bout, SONT l'image signee.
+    if parties:
+        h = hashlib.sha256()
+        for n, o, e in parties:
+            b = (d / n).read_bytes()
+            if len(b) != o or hashlib.sha256(b).hexdigest() != e:
+                raise Refus(f"partie_differente_de_l_index {n}")
+            h.update(b)
+        if h.hexdigest() != slot:
+            raise Refus("parties_ne_reconstituent_pas_l_image_signee")
 
     preuve = json.loads((d / "qemu-boot-evidence.json").read_text())
     if preuve.get("qemu_boot") != "PASS" or preuve.get("physical") != "NOT_RUN":

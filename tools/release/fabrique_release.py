@@ -5,6 +5,7 @@
                         --commit SHA40 --sortie DIR
                         [--sequence-precedente M] [--cle PRIVEE.pem | --cle-dev PRIVEE.pem]
                         [--materiel x86_64-uefi] [--essais 3] [--joint FICHIER ...]
+                        [--parties-mio 16]
 
 Produit dans DIR (qui doit etre vide ou absent : une release n'est jamais
 reecrite) :
@@ -12,6 +13,10 @@ reecrite) :
   manifest.sig    sa signature Ed25519 (64 octets)
   release.json    descripteur : version, sequence, canal, commit, materiel,
                   empreintes, cle, informations de rollback
+  system-slot.parts + system-slot.img.partNNN (--parties-mio, BOUCHAUD_OTA_V1) :
+                  l'image en parties <= N Mio (un fichier RAMFS est plafonne a
+                  64 Mio) ; index « nom octets sha256 » ; l'agent OTA verifie
+                  chaque partie ET le flux entier contre le manifeste SIGNE
   SHA256SUMS      empreintes de tous les fichiers ci-dessus, de l'image et des
                   pieces jointes (--joint, copiees dans DIR : disque A/B,
                   preuve QEMU...) -- rien de publie n'echappe a SHA256SUMS
@@ -154,9 +159,28 @@ def fabrique(a: argparse.Namespace) -> Path:
         if not j.is_file():
             raise Refus(f"joint_absent {j.name}")
 
+    if a.parties_mio is not None and not 1 <= a.parties_mio <= 32:
+        raise Refus("parties_mio_hors_bornes (1..32)")
     sortie.mkdir(parents=True, exist_ok=True)
     for j in joints:
         shutil.copyfile(j, sortie / j.name)
+    parties = []
+    if a.parties_mio:
+        taille = a.parties_mio * 1024 * 1024
+        with image.open("rb") as f:
+            k = 0
+            while True:
+                b = f.read(taille)
+                if not b:
+                    break
+                # (pas `nom` : c'est le nom de la cle de signature, plus bas)
+                nom_partie = f"system-slot.img.part{k:03d}"
+                (sortie / nom_partie).write_bytes(b)
+                parties.append((nom_partie, len(b), hashlib.sha256(b).hexdigest()))
+                k += 1
+        if k > 999:
+            raise Refus("trop_de_parties")
+        (sortie / "system-slot.parts").write_text("".join(f"{n} {o} {h}\n" for n, o, h in parties))
     (sortie / "manifest").write_bytes(texte)
     (sortie / "manifest.sig").write_bytes(signature)
     descripteur = {
@@ -172,9 +196,13 @@ def fabrique(a: argparse.Namespace) -> Path:
         "rollback": {"essais": a.essais, "sequence_precedente": a.sequence_precedente,
                      "plancher_apres_commit": a.sequence},
         "joints": {n: sha256_fichier(sortie / n) for n in sorted(noms)},
+        "parties": [{"fichier": n, "octets": o, "sha256": h} for n, o, h in parties],
     }
     (sortie / "release.json").write_text(json.dumps(descripteur, indent=2, sort_keys=True) + "\n")
     sommes = {f: sha256_fichier(sortie / f) for f in ("manifest", "manifest.sig", "release.json", *noms)}
+    if parties:
+        sommes["system-slot.parts"] = sha256_fichier(sortie / "system-slot.parts")
+        sommes.update({n: h for n, _, h in parties})
     sommes[image.name] = empreinte
     (sortie / "SHA256SUMS").write_text("".join(f"{h}  {f}\n" for f, h in sorted(sommes.items())))
     return sortie
@@ -192,6 +220,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--materiel", default="x86_64-uefi")
     p.add_argument("--essais", type=int, default=3)
     p.add_argument("--joint", action="append", help="fichier publie avec la release (couvert par SHA256SUMS)")
+    p.add_argument("--parties-mio", type=int, help="publie aussi l'image en parties de N Mio (agent OTA)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--cle")
     g.add_argument("--cle-dev")
