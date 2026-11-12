@@ -88,6 +88,10 @@ banc-ab-seconde-cle-sans-vidange = []
 # seule fait echouer la construction. Jamais dans `default`, jamais livree :
 # tools/verifie-cle-dev.py le verifie.
 banc-cle-dev = []
+# BOUCHAUD_CA_BANC_V1 : fait confiance a une CA de BANC (BOUCHAUD_CA_BANC_DEV,
+# chemin d'un DER genere par le banc) pour prouver l'OTA en HTTPS sous QEMU.
+# Memes regles que banc-cle-dev : jamais dans `default`, jamais livree.
+banc-ca-dev = []
 # BANC TEMOIN CONSOLE (P13_CONSOLE_DIFFEREE_CONTRE_PRESSION_V1).
 #
 # Retire la contre-pression des lignes differees : anneau du coeur plein, la

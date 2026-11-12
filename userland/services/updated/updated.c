@@ -40,6 +40,16 @@
 #define SIGNATURE   "/update/manifest.sig"
 #define IMAGE       "/update/system.img"
 #define SELFTEST    "/update/selftest"
+/* BOUCHAUD_OTA_V1: a release STAGED by the OTA agent after boot. The image
+ * comes in parts (a RAMFS file is capped at 64 MiB): system.img.part000,
+ * part001, ... read back to back as ONE stream; the signed manifest's digest
+ * still covers the whole image. `pret` is written last, by the agent. */
+#define PRET        "/update/pret"
+/* Bench witness (revue #308): the FIRST OTA install is made to fail at
+ * finish (wrong digest, refused by the kernel); the agent must offer the
+ * release again and updated must still be watching. */
+#define TEMOIN_ECHEC_OTA "/update/temoin-echec-premier"
+#define PARTIE      "/update/system.img.part"
 /* Bench only (BOUCHAUD_UPDATED_MORTS_V1): die on purpose, once in the middle
  * of the writes, once in the middle of the read-back; the third instance
  * checks it inherited nothing. The count lives in /tmp (RAM, this boot). */
@@ -349,6 +359,56 @@ static void selftest_after_begin(void)
 
 /* ---- install --------------------------------------------------------------- */
 
+/* The image as one stream: the single file, or its parts in order. */
+static bo_i64 img_fd = -1;
+static int img_parties = -1;   /* -1: single file; >= 0: index of the open part */
+
+static bo_i64 ouvre_partie(int k)
+{
+    char nom[40];
+    bo_usize n = 0;
+    const char *b = PARTIE;
+    while (*b) nom[n++] = *b++;
+    nom[n++] = (char)('0' + (k / 100) % 10);
+    nom[n++] = (char)('0' + (k / 10) % 10);
+    nom[n++] = (char)('0' + k % 10);
+    nom[n] = 0;
+    return bo_posix_open(nom, 0);
+}
+
+static bo_i64 image_ouvre(const char *chemin)
+{
+    img_fd = bo_posix_open(chemin, 0);
+    img_parties = -1;
+    if (img_fd < 0) {
+        img_fd = ouvre_partie(0);
+        if (img_fd >= 0) img_parties = 0;
+    }
+    return img_fd;
+}
+
+static bo_i64 image_lit(char *dst, bo_u64 want)
+{
+    bo_u64 lu = 0;
+    while (lu < want) {
+        bo_i64 got = bo_posix_read(img_fd, dst + lu, want - lu);
+        if (got < 0) return got;
+        if (got == 0) {
+            if (img_parties < 0) break;
+            bo_posix_close(img_fd);
+            img_fd = ouvre_partie(++img_parties);
+            if (img_fd < 0) break;          /* no more parts */
+            continue;
+        }
+        lu += (bo_u64)got;
+    }
+    return (bo_i64)lu;
+}
+
+static void image_ferme(void) { if (img_fd >= 0) bo_posix_close(img_fd); img_fd = -1; }
+
+static int echec_voulu_ota;   /* bench: corrupt the digest at THIS finish */
+
 static int install(const struct manifest *m, int target)
 {
     bo_u64 off = 0;
@@ -361,23 +421,23 @@ static int install(const struct manifest *m, int target)
     BATTEMENT();
     if (rc != 0) return 0;
     if (m->selftest) { selftest_after_begin(); BATTEMENT(); }
-    fd = bo_posix_open(m->image, 0);
+    fd = image_ouvre(m->image);
     check("image readable", fd >= 0, fd);
     if (fd < 0) return 0;
     while (off < m->bytes) {
         bo_u64 want = m->bytes - off < CHUNK ? m->bytes - off : CHUNK;
-        if (!serve_control(0)) { bo_posix_close(fd); return 0; }   /* before the read, too */
+        if (!serve_control(0)) { image_ferme(); return 0; }   /* before the read, too */
         bo_u64 t0 = (bo_u64)bo_time_now_ns();
-        bo_i64 got = bo_posix_read(fd, chunk, want), pad;
+        bo_i64 got = image_lit(chunk, want), pad;
         note(m_lecture, &n_lecture, (bo_u64)bo_time_now_ns() - t0);
-        if (got <= 0) { check("image shorter than its manifest", 0, (bo_i64)off); bo_posix_close(fd); return 0; }
+        if (got <= 0) { check("image shorter than its manifest", 0, (bo_i64)off); image_ferme(); return 0; }
         /* Block-aligned writes: the tail is zero-padded; the hash covers
          * exactly `bytes`. */
         for (pad = got; pad % 4096; pad++) chunk[pad] = 0;
         t0 = (bo_u64)bo_time_now_ns();
         rc = bo_update_install_write(cap, off, chunk, (bo_u64)pad);
         note(m_ecriture, &n_ecriture, (bo_u64)bo_time_now_ns() - t0);
-        if (rc != 0) { check("write into the inactive slot", 0, rc); bo_posix_close(fd); return 0; }
+        if (rc != 0) { check("write into the inactive slot", 0, rc); image_ferme(); return 0; }
         off += (bo_u64)got;
         if (mort_voulue && morts == 0 && off >= (1u << 20)) meurt_volontairement("write");
         if (off % (16u << 20) < (bo_u64)got) {
@@ -388,9 +448,9 @@ static int install(const struct manifest *m, int target)
             bo_line_kv(&l, "t_ms", bo_time_now_ns() / 1000000);
             bo_line_end(&l);
         }
-        if (!serve_control(0)) { bo_posix_close(fd); return 0; }
+        if (!serve_control(0)) { image_ferme(); return 0; }
     }
-    bo_posix_close(fd);
+    image_ferme();
     /* Read back from the DISK, chunk by chunk, still answering heartbeats. */
     do {
         bo_u64 t0 = (bo_u64)bo_time_now_ns();
@@ -420,6 +480,21 @@ static int install(const struct manifest *m, int target)
         faux[31] ^= 1;
         rc = bo_update_install_finish(cap, faux, m->bytes, (bo_u32)m->attempts);
         check("a digest other than the signed one is refused", rc == -BO_E_ACCESS_DENIED, rc);
+    }
+    if (echec_voulu_ota) {
+        bo_u8 faux[32];
+        int k;
+        for (k = 0; k < 32; k++) faux[k] = m->sha256[k];
+        faux[0] ^= 0x80;
+        echec_voulu_ota = 0;
+        bo_say("UPDATED_OTA_ECHEC_VOLONTAIRE etape=finish\n");
+        rc = bo_update_install_finish(cap, faux, m->bytes, (bo_u32)m->attempts);
+        bo_line_begin(&l);
+        bo_line_str(&l, rc == 0 ? "UPDATED_INSTALL_OK" : "UPDATED_INSTALL_FAIL");
+        bo_line_kv(&l, "target", target);
+        bo_line_str(&l, " temoin=echec_voulu");
+        bo_line_end(&l);
+        return rc == 0;
     }
     rc = bo_update_install_finish(cap, m->sha256, m->bytes, (bo_u32)m->attempts);
     check("finish: read back, SHA-256 matches, candidate declared", rc == 0, rc);
@@ -499,6 +574,49 @@ int bo_main(const struct bo_start *start)
         }
     } else if (rc == 0) {
         bo_say("UPDATED_IDLE no_pending_update\n");
+        /* BOUCHAUD_OTA_V1: a release may be STAGED later by the OTA agent,
+         * which writes PRET last. Same checks as at boot; the kernel
+         * re-verifies everything (signature, hardware, floor, digest). */
+        /* Revue #308: NEVER stop watching -- a failed install must not
+         * leave the machine unable to take the next offer. Each generation
+         * written by the agent ("pret generation=N") is handled ONCE;
+         * "en_cours" (parts being written) is never handled. */
+        {
+            static char vu[64], lu[64];
+            int temoin = 0;
+            bo_i64 ft = bo_posix_open(TEMOIN_ECHEC_OTA, 0);
+            if (ft >= 0) { temoin = 1; bo_posix_close(ft); }
+            vu[0] = 0;
+            for (;;) {
+                bo_i64 fp, n;
+                int k, pareil;
+                if (!serve_control(1000000000UL)) return 0;
+                fp = bo_posix_open(PRET, 0);
+                if (fp < 0) continue;
+                n = bo_posix_read(fp, lu, sizeof(lu) - 1);
+                bo_posix_close(fp);
+                if (n <= 0) continue;
+                lu[n] = 0;
+                if (!prefix(lu, (bo_usize)n, "pret ")) continue;
+                pareil = 1;
+                for (k = 0; k <= n; k++) if (lu[k] != vu[k]) { pareil = 0; break; }
+                if (pareil) continue;
+                for (k = 0; k <= n; k++) vu[k] = lu[k];
+                rc = parse_manifest(&m);
+                /* `lu` is "pret generation=N\n": each generation is named. */
+                bo_say(rc == 1 ? "UPDATED_OTA_RELEASE_STAGED " : "UPDATED_OTA_STAGED_INVALID ");
+                bo_say(lu);
+                if (rc == 1 && bo_update_state(cap, &st) == 0) {
+                    int running = (int)st.booted_slot;
+                    if (st.state_a == 1 || st.state_b == 1) bo_say("UPDATED_SKIP candidate_already_pending\n");
+                    else if (st.active_slot != st.booted_slot) bo_say("UPDATED_SKIP not_running_the_active_slot\n");
+                    else {
+                        if (temoin) { echec_voulu_ota = 1; temoin = 0; }
+                        install(&m, 1 - running);
+                    }
+                }
+            }
+        }
     } else {
         bo_say("UPDATED_IDLE manifest_invalid\n");
     }

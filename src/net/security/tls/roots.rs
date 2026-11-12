@@ -44,13 +44,40 @@ pub static ROOTS_DER: &[&[u8]] = &[
     include_bytes!("ca/Certum_Trusted_Network_CA.der"),
 ];
 
+// BOUCHAUD_CA_BANC_V1 -- une autorite de BANC, pour prouver le telechargement
+// OTA en HTTPS sous QEMU (tools/ci/run_ab_rollback.sh ota-complet). Elle n'est
+// compilee qu'avec la feature `banc-ca-dev` ET la variable
+// BOUCHAUD_CA_BANC_DEV (chemin ABSOLU d'un certificat DER genere par le banc,
+// detruit a la fin). La variable seule fait echouer la construction ; la
+// feature n'est jamais dans `default` ni dans un chemin de livraison
+// (tools/verifie-cle-dev.py).
+#[cfg(feature = "banc-ca-dev")]
+static BANC: &[&[u8]] = &[include_bytes!(env!("BOUCHAUD_CA_BANC_DEV"))];
+#[cfg(not(feature = "banc-ca-dev"))]
+static BANC: &[&[u8]] = {
+    if option_env!("BOUCHAUD_CA_BANC_DEV").is_some() {
+        panic!("BOUCHAUD_CA_BANC_DEV is set but feature banc-ca-dev is not: refusing to build \
+                a kernel that would silently ignore (or later trust) a bench CA");
+    }
+    &[]
+};
+
+/// Les racines de confiance : le magasin public, plus la CA de banc dans une
+/// construction de banc seulement.
+fn racines() -> impl Iterator<Item = &'static &'static [u8]> {
+    ROOTS_DER.iter().chain(BANC.iter())
+}
+
 /// Nombre de racines embarquees.
-pub fn count() -> usize { ROOTS_DER.len() }
+pub fn count() -> usize { ROOTS_DER.len() + BANC.len() }
+
+/// Nombre de racines de BANC (0 dans toute construction livrable).
+pub fn racines_de_banc() -> usize { BANC.len() }
 
 /// Cherche une racine dont le `subject` correspond a l'`issuer` donne et qui
 /// signe valablement `child`. Renvoie sa cle publique si trouvee.
 pub fn find_issuer_for(child: &Certificate) -> Option<Certificate> {
-    for der in ROOTS_DER {
+    for der in racines() {
         if let Some(root) = x509::parse(der) {
             if root.subject == child.issuer
                 && x509::verify_signed_by(child, &root.pubkey)
@@ -80,7 +107,7 @@ fn meme_cle_publique(a: &PubKey, b: &PubKey) -> bool {
 /// meme Subject DER + meme cle publique. C'est le cas standard d'une racine
 /// cross-signee partageant la cle de la racine self-signee du magasin.
 pub fn find_equivalent_anchor(cert: &Certificate) -> Option<Certificate> {
-    for der in ROOTS_DER {
+    for der in racines() {
         if let Some(root) = x509::parse(der) {
             if root.subject == cert.subject && meme_cle_publique(&root.pubkey, &cert.pubkey) {
                 return Some(root);
@@ -92,7 +119,7 @@ pub fn find_equivalent_anchor(cert: &Certificate) -> Option<Certificate> {
 /// Toutes les racines parsees (pour diagnostics).
 pub fn parsed() -> Vec<Certificate> {
     let mut v = Vec::new();
-    for der in ROOTS_DER {
+    for der in racines() {
         if let Some(c) = x509::parse(der) { v.push(c); }
     }
     v
@@ -100,5 +127,5 @@ pub fn parsed() -> Vec<Certificate> {
 
 /// Renvoie la cle publique d'une racine par index (diagnostic).
 pub fn root_pubkey(i: usize) -> Option<PubKey> {
-    x509::parse(ROOTS_DER.get(i)?).map(|c| c.pubkey)
+    x509::parse(racines().nth(i)?).map(|c| c.pubkey)
 }

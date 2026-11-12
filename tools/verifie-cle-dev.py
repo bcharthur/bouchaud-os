@@ -24,6 +24,11 @@ cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
 m = re.search(r"^default\s*=\s*\[(.*?)\]", cargo, re.M | re.S)
 if m and "banc-cle-dev" in m.group(1):
     errors.append("Cargo.toml: banc-cle-dev est dans default")
+# BOUCHAUD_CA_BANC_V1 : la CA de banc (OTA HTTPS sous QEMU), memes regles.
+if m and "banc-ca-dev" in m.group(1):
+    errors.append("Cargo.toml: banc-ca-dev est dans default")
+if "banc-ca-dev = []" not in cargo:
+    errors.append("Cargo.toml: feature banc-ca-dev absente (le garde des racines en depend)")
 if "banc-cle-dev = []" not in cargo:
     errors.append("Cargo.toml: feature banc-cle-dev absente (le garde noyau en depend)")
 
@@ -37,7 +42,7 @@ for rel in SHIPPING:
     p = ROOT / rel
     if p.exists():
         t = p.read_text(encoding="utf-8", errors="replace")
-        for needle in ("banc-cle-dev", "BOUCHAUD_CLE_VERSION_DEV", "--cle-dev"):
+        for needle in ("banc-cle-dev", "BOUCHAUD_CLE_VERSION_DEV", "--cle-dev", "banc-ca-dev", "BOUCHAUD_CA_BANC_DEV"):
             if needle in t:
                 errors.append(f"{rel}: chemin de livraison qui mentionne {needle}")
 
@@ -88,7 +93,7 @@ for rel in tracked:
         continue
     if re.search(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", t) and rel != "tools/verifie-cle-dev.py":
         errors.append(f"{rel}: bloc PEM de cle privee commite")
-    if re.search(r"(export\s+|^\s*)BOUCHAUD_CLE_VERSION_DEV=", t, re.M) and rel.endswith((".sh", ".yml", ".yaml")):
+    if re.search(r"(export\s+|^\s*)BOUCHAUD_(CLE_VERSION|CA_BANC)_DEV=", t, re.M) and rel.endswith((".sh", ".yml", ".yaml")):
         setters.append(rel)
 for rel in setters:
     if rel != "tools/ci/run_ab_rollback.sh":
@@ -96,6 +101,10 @@ for rel in setters:
 banc = (ROOT / "tools/ci/run_ab_rollback.sh").read_text(encoding="utf-8")
 if "CLES=$(mktemp -d)" not in banc or 'rm -rf "$TRAVAIL" "$CLES"' not in banc:
     errors.append("tools/ci/run_ab_rollback.sh: la cle de banc doit naitre et mourir dans un repertoire temporaire")
+
+racines = (ROOT / "src/net/security/tls/roots.rs").read_text(encoding="utf-8")
+if 'cfg(not(feature = "banc-ca-dev"))' not in racines or "refusing to build" not in racines:
+    errors.append("src/net/security/tls/roots.rs: garde de construction de la CA de banc absent")
 
 mod = (ROOT / "src/kernel/update/mod.rs").read_text(encoding="utf-8")
 if 'cfg(not(feature = "banc-cle-dev"))' not in mod or "refusing to build" not in mod:
