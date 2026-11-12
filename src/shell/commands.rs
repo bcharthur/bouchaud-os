@@ -484,75 +484,55 @@ pub fn ls(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     0
 }
 
-// BOUCHAUD_STAGE2_TREE_LOCK_SAFE
-pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) {
+/// Lignes maximales d'un `tree` : le RAMFS compte 4096 noeuds.
+const TREE_LIGNES_MAX: usize = 8192;
+
+/// `tree [CHEMIN]`.
+///
+/// BOUCHAUD_TREE_ITERATIF_V1. L'ancienne version (BOUCHAUD_STAGE2_TREE_LOCK_SAFE)
+/// reprenait le verrou du RAMFS une fois PAR REPERTOIRE en balayant ses 4096
+/// noeuds (quadratique), se rappelait recursivement, et dessinait
+/// l'indentation avec un `print!` PAR NIVEAU : 15 Mo de console pour 3 860
+/// niveaux, plus de 180 s sous KVM (banc Unix, etape tree-profond). Ici, comme
+/// `find` : verrou pris UNE fois (resolution + lignes, parcours pur iteratif
+/// `fs::parcours::lignes_arbre`), rendu avant d'imprimer ; une ecriture par
+/// ligne ; indentation bornee (au-dela, `[niveau N]`).
+pub fn tree(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
     let path = if argc >= 2 { argv[1] } else { "." };
-
-    // Resolve et affiche la racine sous un seul emprunt VFS, puis le relache
-    // AVANT la recursion. Le precedent code gardait ce verrou vivant pendant
-    // `tree_rec()`, qui tentait de reprendre ramfs::fs() : LOCKDEP detectait
-    // alors une inversion rank 50 -> rank 50 et paniquait le noyau.
-    let idx = {
+    let resultat = {
         let fs = ramfs::fs();
-        let idx = match fs.resolve_checked(path, cwd) {
-            Ok(i) => i,
-            Err(e) => {
-                println!("tree: {}", e);
-                return;
-            }
-        };
-        ramfs::print_path(&fs, idx);
-        idx
+        match fs.resolve_checked(path, cwd) {
+            Ok(idx) => Ok((ramfs::path_string(&fs, idx),
+                           crate::fs::parcours::lignes_arbre(&*fs, idx, TREE_LIGNES_MAX))),
+            Err(e) => Err(e),
+        }
     };
-    println!("");
-
-    tree_rec(idx, 0);
-}
-
-fn tree_rec(idx: usize, depth: usize) {
-    // Snapshot minimal des enfants. Aucun appel recursif ni println! n'est fait
-    // tant que le garde VFS est detenu.
-    let children: Vec<(usize, bool, String)> = {
-        let fs = ramfs::fs();
-        if fs.nodes[idx].kind != NodeKind::Dir {
-            return;
+    let (racine, (lignes, tronque)) = match resultat {
+        Ok(r) => r,
+        Err(e) => {
+            println!("tree: {}: {}", path, e);
+            return 1;
         }
-
-        if !fs.can(idx, PERM_R) {
-            drop(fs);
-            for _ in 0..depth {
-                print!("  ");
-            }
-            println!("|- [permission denied]");
-            return;
-        }
-
-        let mut children = Vec::new();
-        for i in 0..MAX_NODES {
-            if fs.nodes[i].used && i != idx && fs.nodes[i].parent == idx {
-                children.push((
-                    i,
-                    fs.nodes[i].kind == NodeKind::Dir,
-                    String::from(fs.nodes[i].name_str()),
-                ));
-            }
-        }
-        children
     };
-
-    for (child, is_dir, name) in children {
-        for _ in 0..depth {
-            print!("  ");
-        }
-        if is_dir {
+    println!("{}", racine);
+    let mut refus = false;
+    for l in &lignes {
+        let debut = crate::fs::parcours::prefixe(l.profondeur);
+        if l.refuse {
+            refus = true;
+            println!("{}|- [permission denied]", debut);
+        } else if l.dossier {
             vga::set_color(COLOR_CYAN);
-            println!("|- {}/", name);
+            println!("{}|- {}/", debut, l.nom);
             vga::set_color(COLOR_DEFAULT);
-            tree_rec(child, depth + 1);
         } else {
-            println!("|- {}", name);
+            println!("{}|- {}", debut, l.nom);
         }
     }
+    if tronque {
+        println!("tree: sortie tronquee a {} lignes", TREE_LIGNES_MAX);
+    }
+    if refus || tronque { 1 } else { 0 }
 }
 
 
