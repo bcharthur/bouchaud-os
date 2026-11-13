@@ -1651,7 +1651,10 @@ pub fn enable_scheduler() {
     // la difference entre « seize coeurs en ligne » et « seize coeurs qui
     // battent » -- deux affirmations que la machine de reference a montre
     // etre distinctes.
-    if schedulable_cpus() > 1 {
+    // BOUCHAUD_WHPX_CPU_V1 : aussi en monocoeur. Sans elle, SMP1 n'a aucune
+    // preuve que son timer local se declenche : un banc qui exige « chaque
+    // coeur bat » rendait un faux rouge, ou devait l'exempter sans preuve.
+    if schedulable_cpus() >= 1 {
         let _ = mesure_battement_par_coeur(200);
     }
 }

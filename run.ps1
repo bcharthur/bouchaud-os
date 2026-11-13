@@ -1425,7 +1425,9 @@ if ($Accel -eq "auto" -and $LadybirdMode -and $CpuCount -gt 1 -and (Test-Path -L
     try {
         $q = Get-Content -LiteralPath $Preuve -Raw | ConvertFrom-Json
         $empreinte = (Get-FileHash -LiteralPath $BootImage -Algorithm SHA256).Hash.ToLower()
-        if ($q.bootimage_sha256 -eq $empreinte -and [int]$q.smp_max_qualifie -ge $CpuCount -and $q.irqchip -eq $WhpxIrqchip) {
+        # Ladybird en SMP : la qualification B (navigateur reellement lance,
+        # premiere trame, HTTPS), pas seulement A (SMP).
+        if ($q.bootimage_sha256 -eq $empreinte -and [int]$q.ladybird_smp_max_qualifie -ge $CpuCount -and $q.irqchip -eq $WhpxIrqchip) {
             $WhpxQualifie = $true
         }
     }
