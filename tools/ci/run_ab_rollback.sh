@@ -680,7 +680,11 @@ if [ "$OTA_COMPLET" = 1 ]; then
            "BOUCHAUD_PERSIST_DEMARRAGES n=$n slot=A"; do
     grep -aF "$m" <<< "$bi" >/dev/null || echec "boot=$n marqueur_absent=$m"
   done
-  [ "$(grep -ac 'BOUCHAUD_OTA_PARTIE n=' <<< "$bi")" = "$NB_PARTIES" ] || echec "boot=$n raison=nombre_de_parties"
+  # Parties DISTINCTES, de 0 a NB_PARTIES-1 : l'agent est en anneau 3, et la
+  # console d'un noyau reference-desktop recopie aujourd'hui chaque ligne de
+  # l'anneau 3 deux fois sur COM1 (defaut connu, corrige a part).
+  [ "$(grep -aoE 'BOUCHAUD_OTA_PARTIE n=[0-9]+ ' <<< "$bi" | sort -u | wc -l)" = "$NB_PARTIES" ] \
+    && grep -aqE "BOUCHAUD_OTA_PARTIE n=$((NB_PARTIES - 1)) " <<< "$bi" || echec "boot=$n raison=nombre_de_parties"
   # La coupure volontaire a eu lieu, et la partie 5 a ete REPRISE.
   grep -q "COUPURE_VOLONTAIRE /rel/system-slot.img.part005" "$OUT/https.log" || echec "raison=temoin_de_coupure_absent"
   grep -aE "BOUCHAUD_OTA_REPRISE url=https://10.0.2.2:$PORT_OTA/rel/system-slot.img.part005 essai=[2-4] resultat=ok" <<< "$b1" >/dev/null \
