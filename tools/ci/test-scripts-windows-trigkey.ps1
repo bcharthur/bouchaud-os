@@ -78,9 +78,79 @@ try { & $mesure -Bootimage "$t/absent.bin" -DryRun *> $null; Write-Host 'ECHEC m
 catch { if ($_.Exception.Message -match 'bootimage absent') { Write-Host 'ok    mesure : refus sans bootimage' } else { Write-Host "ECHEC mesure : $($_.Exception.Message)"; $echecs++ } }
 $sortie = & $mesure -Bootimage $img -DryRun -Repetitions 2 -WhpxIrqchip on *>&1 | Out-String
 $plans = ([regex]::Matches($sortie, 'PLAN ')).Count
-if ($plans -eq 10 -and $sortie -match 'PLAN whpx-smp4 #2 : .*-smp 4 .*-accel whpx,kernel-irqchip=on -cpu max' -and $sortie -match 'PLAN tcg-smp1 #1 : .*-accel tcg -cpu max') {
-    Write-Host 'ok    mesure : plan TCG/WHPX SMP1..4, -cpu max, irqchip transmis'
+# BOUCHAUD_WHPX_CPU_V1 : WHPX ne recoit JAMAIS `-cpu max` (QEMU 11 : MPX + APX,
+# `WHPX: Unexpected VP exit code 4`) ; TCG le garde (SSE4.1 emule).
+$cpuWhpx = [regex]::Escape('-cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt')
+if ($plans -eq 10 -and $sortie -match "PLAN whpx-smp4 #2 : .*-smp 4 .*-accel whpx,kernel-irqchip=on $cpuWhpx" -and $sortie -match 'PLAN tcg-smp1 #1 : .*-accel tcg -cpu max' -and $sortie -notmatch 'whpx,kernel-irqchip=\w+ -cpu max') {
+    Write-Host 'ok    mesure : plan TCG (-cpu max) / WHPX (qemu64+SSE4) SMP1..4, irqchip transmis'
 } else { Write-Host "ECHEC mesure : plan inattendu ($plans) $sortie"; $echecs++ }
+
+# --- BOUCHAUD_WHPX_CPU_V1 : BouchaudQemu.psm1 -------------------------------
+Import-Module (Join-Path $racine 'tools/windows/BouchaudQemu.psm1') -Force
+function Verifie([string]$Nom, [bool]$Condition, [string]$Detail = '') {
+    if ($Condition) { Write-Host "ok    $Nom" } else { Write-Host "ECHEC $Nom $Detail"; $script:echecs++ }
+}
+# L'analyseur PowerShell sur les scripts touches : une erreur de syntaxe dans
+# run.ps1 ne se verrait sinon que sur Windows.
+foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1')) {
+    $jetons = $null; $erreursAnalyse = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $racine $f), [ref]$jetons, [ref]$erreursAnalyse)
+    Verifie "analyse $f" ($erreursAnalyse.Count -eq 0) (($erreursAnalyse | ForEach-Object { $_.Message }) -join ' ; ')
+}
+# Matrice des accelerateurs : aucun repli silencieux, jamais `max` sous WHPX.
+$a = Get-BouchaudAccelQemu -Accel 'whpx' -CpuCount 4 -Ladybird $true -WhpxIrqchip 'off'
+Verifie 'accel whpx : qemu64+SSE4, sans repli' (($a.arguments -join ' ') -eq '-accel whpx,kernel-irqchip=off -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt' -and -not $a.repli_tcg_explicite) ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'whpx' -CpuCount 1 -Ladybird $false -WhpxIrqchip 'on'
+Verifie 'accel whpx hors Ladybird : meme modele' (($a.arguments -join ' ') -eq '-accel whpx,kernel-irqchip=on -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt') ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'auto' -CpuCount 1 -Ladybird $true
+Verifie 'accel auto SMP1 : WHPX, repli annonce' ($a.accel -eq 'whpx' -and $a.repli_tcg_explicite -and ($a.arguments -notcontains 'tcg') -and ($a.arguments -notcontains 'max')) ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'auto' -CpuCount 4 -Ladybird $true -WhpxQualifie $false
+Verifie 'accel auto SMP4 Ladybird non qualifie : TCG max' (($a.arguments -join ' ') -eq '-accel tcg -cpu max' -and $a.accel -eq 'tcg') ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'auto' -CpuCount 4 -Ladybird $true -WhpxQualifie $true
+Verifie 'accel auto SMP4 qualifie : WHPX qemu64+SSE4' ($a.accel -eq 'whpx' -and ($a.arguments -contains 'qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt')) ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'tcg' -CpuCount 4 -Ladybird $true
+Verifie 'accel tcg Ladybird : max' (($a.arguments -join ' ') -eq '-accel tcg -cpu max') ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'tcg' -CpuCount 1 -Ladybird $false
+Verifie 'accel tcg hors Ladybird : inchange' (($a.arguments -join ' ') -eq '-accel tcg') ($a.arguments -join ' ')
+$a = Get-BouchaudAccelQemu -Accel 'none' -CpuCount 1 -Ladybird $true
+Verifie 'accel none : aucun argument' (@($a.arguments).Count -eq 0)
+$rs = Get-Content -LiteralPath (Join-Path $racine 'run.ps1') -Raw
+Verifie 'run.ps1 : plus de -cpu max en dur ni de chaine whpx+tcg' ($rs -notmatch '"-cpu",\s*"max"' -and $rs -match 'Get-BouchaudAccelQemu' -and $rs -match 'Invoke-BouchaudQemu' -and $rs -match 'logfile=')
+
+# Verdict : ce que les journaux prouvent.
+$serieTcg = Join-Path $t 'serie-tcg.log'
+Set-Content -LiteralPath $serieTcg -Value ("$([char]27)[90m[x]$([char]27)[0mBOUCHAUD_CPU_ISA hyperviseur=TCGTCGTCGTCG fournisseur=AuthenticAMD sse3=1 ssse3=1 sse41=1 sse42=1 popcnt=1 xsave=1 osxsave=0 avx=1 avx2=1 avx512f=0 mpx=1 apxf=0 la57=1")
+$serieWhpx = Join-Path $t 'serie-whpx.log'
+Set-Content -LiteralPath $serieWhpx -Value 'BOUCHAUD_CPU_ISA hyperviseur=VMwareVMware fournisseur=AuthenticAMD sse3=1 ssse3=1 sse41=1 sse42=1 popcnt=1 xsave=0 osxsave=0 avx=0 avx2=0 avx512f=0 mpx=0 apxf=0 la57=0'
+$errVide = Join-Path $t 'qemu-vide.log'; Set-Content -LiteralPath $errVide -Value ''
+$errVp = Join-Path $t 'qemu-vp.log'
+Set-Content -LiteralPath $errVp -Value @('qemu-system-x86_64.exe: warning: this feature conflicts with APX: CPUID[eax=07h,ecx=00h].EBX.mpx [bit 14]', 'WHPX: Unexpected VP exit code 4')
+$errInit = Join-Path $t 'qemu-init.log'; Set-Content -LiteralPath $errInit -Value 'qemu-system-x86_64.exe: -accel whpx,kernel-irqchip=off: failed to initialize whpx: Invalid argument'
+$v = Get-BouchaudVerdictQemu -JournalSerie $serieTcg -JournalErreurs $errVide
+Verifie 'verdict : signature TCG => TCG' ($v.noyau -and $v.accel_reel -eq 'TCG' -and $v.isa.sse41 -eq 1 -and $v.isa.mpx -eq 1)
+$code = Write-BouchaudVerdictQemu -Verdict $v -AccelDemande 'whpx' -JournalSerie $serieTcg -JournalErreurs $errVide 6>$null
+Verifie 'verdict : TCG jamais presente comme WHPX (code 4)' ($code -eq 4) "code=$code"
+$v = Get-BouchaudVerdictQemu -JournalSerie $serieWhpx -JournalErreurs $errVide
+$code = Write-BouchaudVerdictQemu -Verdict $v -AccelDemande 'whpx' -JournalSerie $serieWhpx -JournalErreurs $errVide 6>$null
+Verifie 'verdict : WHPX reel, aucun defaut (code 0)' ($v.accel_reel -eq 'materiel' -and $code -eq 0) "code=$code"
+$v = Get-BouchaudVerdictQemu -JournalSerie (Join-Path $t 'absent.log') -JournalErreurs $errVp
+$code = Write-BouchaudVerdictQemu -Verdict $v -AccelDemande 'whpx' -JournalSerie '' -JournalErreurs $errVp 6>$null
+Verifie 'verdict : VP exit 4 + conflit MPX/APX remontes (code 3)' (-not $v.noyau -and $v.vp_exit -eq 4 -and $v.conflit_mpx_apx -and $code -eq 3) "code=$code"
+$v = Get-BouchaudVerdictQemu -JournalSerie (Join-Path $t 'absent.log') -JournalErreurs $errInit
+Verifie 'verdict : WHPX indisponible detecte' ($v.whpx_indisponible -and -not $v.noyau)
+
+# Lancement : stderr recopie dans le journal, arguments intacts, code rendu.
+if ($IsLinux -or $IsMacOS) {
+    $faux = Join-Path $t 'faux-qemu.sh'
+    Set-Content -LiteralPath $faux -Value @('#!/bin/sh', 'for a in "$@"; do printf ''ARG[%s]\n'' "$a" >&2; done', 'echo ''WHPX: Unexpected VP exit code 4'' >&2', 'exit 7')
+    & chmod +x $faux
+    $errLance = Join-Path $t 'qemu-lance.log'
+    $codeLance = Invoke-BouchaudQemu -Exe $faux -Arguments @('-drive', 'format=raw,file=C:\Mes Images\boot.bin', 'x"y', 'c:\p\', '', 'simple') -JournalErreurs $errLance 2>$null
+    $journalLance = Get-Content -LiteralPath $errLance -Raw
+    $attendus = @('ARG[-drive]', 'ARG[format=raw,file=C:\Mes Images\boot.bin]', 'ARG[x"y]', 'ARG[c:\p\]', 'ARG[]', 'ARG[simple]', 'WHPX: Unexpected VP exit code 4')
+    $manquants = @($attendus | Where-Object { -not $journalLance.Contains($_) })
+    Verifie 'lancement : stderr journalise, arguments intacts, code de sortie' ($codeLance -eq 7 -and $manquants.Count -eq 0) "code=$codeLance manquants=$($manquants -join ',') journal=$journalLance"
+}
 
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }

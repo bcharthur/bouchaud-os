@@ -28,6 +28,14 @@
     dans target\whpx-qualification.json, liee a l'empreinte du bootimage :
     `run.ps1 -Accel auto` ne choisit WHPX en SMP que sur cette preuve.
 
+    BOUCHAUD_WHPX_CPU_V1 : le modele CPU vient de BouchaudQemu.psm1 (TCG :
+    max ; WHPX : qemu64 + SSSE3/SSE4.1/SSE4.2/POPCNT, jamais `max`, qui fait
+    sortir le VP en code 4 sous QEMU 11). Une repetition n'est OK que si le
+    CPUID publie par le noyau (`BOUCHAUD_CPU_ISA`) prouve l'accelerateur :
+    signature TCGTCGTCGTCG pour TCG, toute autre signature pour WHPX ; et si
+    l'erreur standard de QEMU (journalisee) ne contient aucun
+    `WHPX: Unexpected VP exit`.
+
     NON QUALIFIE SUR WINDOWS par la session qui l'a ecrit (aucun Windows,
     aucun Hyper-V disponibles) : syntaxe et refus verifies sous pwsh Linux.
 
@@ -49,6 +57,7 @@ param(
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'BouchaudQemu.psm1') -Force
 $Racine = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Boot = if ($Bootimage) { $Bootimage } else { Join-Path $Racine 'target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin' }
 $Disque = Join-Path $Racine 'ladybird-browser.img'
@@ -71,8 +80,8 @@ function Arguments([string]$conf, [string]$journal) {
     $accel = $Matches[1]; $n = [int]$Matches[2]
     $a = @('-machine', 'pc', '-m', "$MemoireMio", '-smp', "$n", '-display', 'none', '-no-reboot',
            '-drive', "format=raw,file=$Boot", '-serial', "file:$journal", '-nic', 'user,model=e1000')
-    if ($accel -eq 'whpx') { $a += @('-accel', "whpx,kernel-irqchip=$WhpxIrqchip", '-cpu', 'max') }
-    else { $a += @('-accel', 'tcg', '-cpu', 'max') }
+    if ($accel -eq 'whpx') { $a += @('-accel', "whpx,kernel-irqchip=$WhpxIrqchip", '-cpu', (Get-BouchaudCpuQemu 'whpx')) }
+    else { $a += @('-accel', 'tcg', '-cpu', (Get-BouchaudCpuQemu 'tcg')) }
     if ($AvecLadybird) { $a += @('-drive', "format=raw,file=$Disque,snapshot=on") }
     return @{ accel = $accel; n = $n; args = $a }
 }
@@ -84,7 +93,8 @@ foreach ($conf in $Configurations) {
         $c = Arguments $conf $journal
         if ($DryRun) { Write-Host ("PLAN {0} #{1} : {2} {3}" -f $conf, $r, $Qemu, ($c.args -join ' ')); continue }
         $chrono = [System.Diagnostics.Stopwatch]::StartNew()
-        $p = Start-Process -FilePath $Qemu -ArgumentList $c.args -PassThru -WindowStyle Hidden
+        $erreurs = "$journal.qemu"
+        $p = Start-Process -FilePath $Qemu -ArgumentList (ConvertTo-BouchaudLigneArguments $c.args) -PassThru -NoNewWindow -RedirectStandardError $erreurs
         $jalons = @{}
         $attendus = @('SMP_NG2_SCHEDULER')
         if ($AvecLadybird) { $attendus += @('bureau-premiere-trame', 'BOUCHAUD_UI_FIRST_FRAME onglet=1') }
@@ -95,6 +105,9 @@ foreach ($conf in $Configurations) {
                 if (-not $jalons.ContainsKey($j) -and $texte.Contains($j)) { $jalons[$j] = [math]::Round($chrono.Elapsed.TotalMilliseconds) }
             }
             if ($texte -match 'KERNEL PANIC') { break }
+            # Sortie de VP WHPX : QEMU met la VM en pause et reste vivant.
+            $err = try { if (Test-Path -LiteralPath $erreurs) { [System.IO.File]::ReadAllText($erreurs) } else { '' } } catch { '' }
+            if ($err -match 'WHPX: Unexpected VP exit') { break }
             $battements = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+')).Count
             if ($jalons.Count -eq $attendus.Count -and ($battements -ge $c.n -or $c.n -eq 1)) { Start-Sleep -Seconds 2; break }
         }
@@ -106,17 +119,21 @@ foreach ($conf in $Configurations) {
         foreach ($m in [regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=(\d+) quantums=(\d+)')) { if ([int]$m.Groups[2].Value -eq 0) { $muets++ } }
         $battent = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+ quantums=[1-9]')).Count
         $panique = $texte -match 'KERNEL PANIC|DOUBLE FAULT|panicked at'
-        $ok = (-not $panique) -and $enLigne -eq $c.n -and ($c.n -eq 1 -or ($battent -ge $c.n -and $muets -eq 0)) -and $jalons.ContainsKey('SMP_NG2_SCHEDULER')
+        $v = Get-BouchaudVerdictQemu -JournalSerie $journal -JournalErreurs $erreurs
+        $accelProuve = if ($c.accel -eq 'tcg') { $v.accel_reel -eq 'TCG' } else { $v.accel_reel -eq 'materiel' }
+        $ok = (-not $panique) -and $accelProuve -and ($null -eq $v.vp_exit) -and $enLigne -eq $c.n -and ($c.n -eq 1 -or ($battent -ge $c.n -and $muets -eq 0)) -and $jalons.ContainsKey('SMP_NG2_SCHEDULER')
         if ($AvecLadybird) { $ok = $ok -and $jalons.ContainsKey('BOUCHAUD_UI_FIRST_FRAME onglet=1') }
         $ligne = [pscustomobject]@{
             configuration = $conf; repetition = $r; ok = $ok; decouverte = $source; en_ligne = $enLigne
+            accel_reel = $v.accel_reel; signature = $v.signature; vp_exit = $v.vp_exit
+            sse41 = $(if ($v.isa) { $v.isa.sse41 } else { $null })
             coeurs_qui_battent = $battent; coeurs_muets = $muets; panique = [bool]$panique
             ordonnanceur_ms = $jalons['SMP_NG2_SCHEDULER']; bureau_ms = $jalons['bureau-premiere-trame']
             ladybird_premiere_trame_ms = $jalons['BOUCHAUD_UI_FIRST_FRAME onglet=1']
         }
         $resultats += $ligne
-        Write-Host ("MESURE {0} #{1} ok={2} decouverte={3} en_ligne={4} battent={5} muets={6} ordonnanceur_ms={7} bureau_ms={8} ladybird_ms={9}" -f `
-            $conf, $r, $ok, $source, $enLigne, $battent, $muets, $ligne.ordonnanceur_ms, $ligne.bureau_ms, $ligne.ladybird_premiere_trame_ms)
+        Write-Host ("MESURE {0} #{1} ok={2} accel_reel={10} signature={11} vp_exit={12} decouverte={3} en_ligne={4} battent={5} muets={6} ordonnanceur_ms={7} bureau_ms={8} ladybird_ms={9}" -f `
+            $conf, $r, $ok, $source, $enLigne, $battent, $muets, $ligne.ordonnanceur_ms, $ligne.bureau_ms, $ligne.ladybird_premiere_trame_ms, $v.accel_reel, $v.signature, $v.vp_exit)
     }
 }
 if ($DryRun) { Remove-Item -Recurse -Force $Travail; return }

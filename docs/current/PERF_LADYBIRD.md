@@ -35,6 +35,14 @@ Passage 1 (SHA deb5028), même protocole :
 - présentation moyenne : 7 185 (avant-simple), 6 079 (après-simple) et 9 249 µs (après-double) ;
 - démarrage → bureau : le **même noyau** a donné 10,86 s (après-simple) et 9,52 s (après-double).
 
+Passage 3 (SHA b0a354d, même protocole), p50 :
+
+- démarrage → bureau : 9 056 / 10 176 / 9 297 ms (avant-simple / après-simple / après-double) ;
+- lancement → 1re image : 6 483 / 8 302 / 6 714 ms ;
+- présentation moyenne : 7 188 / 6 535 / 8 543 µs ; pire cas : 47 620 / 30 114 / 36 092 µs.
+
+Dans les trois passages, après-simple est plus lent au démarrage et au lancement, alors qu'après-double, avec le même noyau, ne l'est pas. Ce n'est donc pas imputable au noyau ; l'écart reste inexpliqué.
+
 ## Conclusions
 
 - **Bruit.** Sous TCG, les écarts de démarrage d'environ 1 s sont du bruit de runner : le même noyau varie de 1,3 s.
@@ -56,7 +64,7 @@ Passage 1 (SHA deb5028), même protocole :
 
 | Sujet | État |
 |---|---|
-| WHPX SMP1, SMP2, SMP4 | **NOT_RUN**. Cause du « 1 seul CPU » corrigée : découverte par la MADT (`BOUCHAUD_SMP_MADT_V1`), démontrée sous TCG avec `-smp 4,sockets=4` (`main` : 1 CPU ; correctif : 4). À lancer sur Windows : `tools\windows\Mesure-Acceleration.ps1 -Repetitions 3`. |
+| WHPX SMP1, SMP2, SMP4 | **NOT_RUN**. `-cpu max` sous WHPX arrêtait le processeur virtuel (code 4) : remplacé par `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt` (`BOUCHAUD_WHPX_CPU_V1`, voir [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)). Cause du « 1 seul CPU » corrigée : découverte par la MADT (`BOUCHAUD_SMP_MADT_V1`), démontrée sous TCG avec `-smp 4,sockets=4` (`main` : 1 CPU ; correctif : 4). À lancer sur Windows : `tools\windows\Mesure-Acceleration.ps1 -Repetitions 3`. |
 | Latence entrée → présentation, défilement, onglets, redimensionnement | non instrumentés dans le smoke |
 | KVM, Trigkey | non mesurés par ce banc |
 
