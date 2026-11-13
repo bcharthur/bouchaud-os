@@ -50,6 +50,19 @@ fn regle(ordo: &str, courant: &str) -> Result<(), String> {
     if garde > cas {
         return Err("prepare_switch_handoff : publication avant la verification IF".into());
     }
+    // P13_COMPLETION_SOUS_IF_COUPE_V1 (#264, recidive) : la completion est
+    // atomique vis-a-vis des IRQ, QUEL QUE SOIT l'appelant (trampolines des
+    // fils noyau et de l'idle du BSP, entree de schedule(), IF=1).
+    let cs = corps(courant, "fn complete_switch_handoff()");
+    if !cs.contains("interrupts::without_interrupts(complete_switch_handoff_if_coupe)") {
+        return Err("complete_switch_handoff : completion interruptible (IRQ imbriquee sur la meme passation)".into());
+    }
+    let ci = corps(courant, "fn complete_switch_handoff_if_coupe()");
+    let g = pos(ci, "!interrupts::are_enabled()")?;
+    let lu = pos(ci, "SWITCH_PENDING[cpu].load(")?;
+    if g > lu {
+        return Err("complete_switch_handoff_if_coupe : SWITCH_PENDING lu avant la verification IF".into());
+    }
     Ok(())
 }
 
@@ -78,4 +91,15 @@ fn temoins_negatifs() {
     // 4. sortie definitive sans coupure
     let m4 = ordo.replacen("    // P13_PASSATION_SOUS_IF_COUPE_V1 : idem `switch_to_kernel`.\n    interrupts::disable();\n", "", 1);
     assert!(regle(&m4, &courant).is_err(), "reprend_continuation sans coupure non detecte");
+    // 5. completion de nouveau interruptible (l'etat d'avant la recidive)
+    let m5 = courant.replacen(
+        "interrupts::without_interrupts(complete_switch_handoff_if_coupe);",
+        "complete_switch_handoff_if_coupe();",
+        1,
+    );
+    assert!(regle(&ordo, &m5).is_err(), "completion interruptible non detectee");
+    // 6. garde IF de la completion retiree
+    let ci = corps(&courant, "fn complete_switch_handoff_if_coupe()").to_string();
+    let m6 = courant.replacen(&ci, &ci.replacen("!interrupts::are_enabled()", "true", 1), 1);
+    assert!(regle(&ordo, &m6).is_err(), "garde IF de la completion retiree non detectee");
 }
