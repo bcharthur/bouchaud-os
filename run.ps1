@@ -961,6 +961,15 @@ if ($LadybirdMode) {
         Write-Host "DOOM: added ring3 game and Freedoom IWAD to Atelier disk" -ForegroundColor Green
     }
 
+    # Python (16,4 Mo) n'est plus embarque dans le noyau : il vit sur ce
+    # disque et `python` le lit au premier usage (src/lang/python.rs).
+    $PythonWasm = Join-Path $RepoRoot "src\assets\python\rustpython.wasm"
+    if (Test-Path -LiteralPath $PythonWasm -PathType Leaf) {
+        $PythonDir = Join-Path $ScenarioDir "usr\lib\python"
+        New-Item -ItemType Directory -Path $PythonDir -Force | Out-Null
+        Copy-Item -LiteralPath $PythonWasm -Destination (Join-Path $PythonDir "rustpython.wasm") -Force
+    }
+
 
     # =========================================================================
     # Fabrication USTAR native Windows

@@ -303,6 +303,33 @@ jobs:
             fixture.log
           if-no-files-found: warn
 
+  python-disque:
+    # BOUCHAUD_PYTHON_DISQUE_V1 : l'interpreteur Python (16,4 Mo) n'est plus
+    # dans le noyau. Prouve qu'il calcule depuis le disque, qu'un disque sans
+    # lui donne un refus nomme sans panique, et que l'image de boot a maigri.
+    name: qemu / python depuis le disque
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Python lu sur le disque de donnees
+        run: tools/ci/run_python_disque.sh image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-python-disque
+          path: python-disque/*.log
+          if-no-files-found: warn
+
   os-primitives:
     name: qemu / os primitives
     needs: [gate, kernel-build]
@@ -663,7 +690,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -673,6 +700,7 @@ jobs:
           BOOT: ${{ needs.qemu-smoke.result }}
           NVME: ${{ needs.nvme-gpt.result }}
           HEALTH: ${{ needs.system-health.result }}
+          PYDISK: ${{ needs.python-disque.result }}
           PRIMITIVES: ${{ needs.os-primitives.result }}
           MM: ${{ needs.mm-ng6.result }}
           QT: ${{ needs.qt-pixel.result }}
@@ -689,7 +717,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -699,7 +727,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -708,7 +736,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

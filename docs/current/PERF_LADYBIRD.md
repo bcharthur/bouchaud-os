@@ -111,7 +111,7 @@ Le banc rend deux qualifications indépendantes :
 - Ces durées sont du **temps mural hôte** depuis le lancement de QEMU. Elles comprennent QEMU, le BIOS et le chargeur, que le noyau ne voit pas.
 - Hors banc, sous WHPX, le noyau compte 4,3 à 4,5 s de `kernel-main` au bureau. L'essentiel de l'écart se situe donc hors de l'horloge du noyau, ou dans une configuration différente : 8 Gio et 2 CPU hors banc, contre 4 Gio dans le banc.
 - **Non établi.** Pistes à mesurer, toutes des sorties de VM vers QEMU, coûteuses sous WHPX et gratuites sous TCG :
-  - lectures disque du chargeur en mode réel via le BIOS ;
+  - lectures disque du chargeur en mode réel via le BIOS : **mesuré sous TCG, voir ci-dessous** ;
   - chaque octet écrit sur le port série : le journal fait environ 1 Mo ;
   - l'APIC émulé dans QEMU (`kernel-irqchip=off`).
 - Le banc sépare désormais :
@@ -122,6 +122,28 @@ Le banc rend deux qualifications indépendantes :
   - **latence d'entrée** : `NON_MESURABLE`, aucune entrée injectée.
 - **Rien ne permet de dire que WHPX est plus rapide ou plus lent en usage interactif** : rien n'a été mesuré.
 - Les deux environnements ne sont pas directement comparables : CPU différents (TCG `max`, WHPX `qemu64` + SSE4), et un temps hôte incluant des phases que TCG et WHPX traitent très différemment.
+
+### Avant le noyau : 16,4 Mo de Python retirés de l'image de boot (13/11)
+
+La première piste, les lectures disque du chargeur via le BIOS, est **mesurée sous TCG**. L'image de boot pesait 29,3 Mo, dont 16,4 Mo pour l'interpréteur Python (`rustpython.wasm`, `include_bytes!`), que le BIOS charge secteur par secteur avant toute ligne du noyau.
+
+Mesure : temps mural hôte entre le lancement de QEMU et le premier octet du noyau sur COM1. QEMU TCG, SMP2, 2 Gio, même machine, essais **entrelacés**, sans disque de données.
+
+| Image | Taille | Essais | Premier octet du noyau |
+|---|---|---|---|
+| `main` (Python embarqué) | 29,3 Mo | 8 | 10,0 à 11,6 s |
+| témoin : même arbre, interpréteur remplacé par un fichier vide | 12,9 Mo | 4 | 4,8 à 5,2 s |
+| `claude/python-hors-noyau` (Python lu sur le disque) | 12,9 Mo | 4 | 5,1 à 5,6 s |
+
+- Gain sous TCG : **environ 5,5 s par démarrage**, soit environ 0,33 s par Mo chargé par le BIOS.
+- Le coût n'est pas déplacé vers le démarrage : l'interpréteur n'est lu qu'au premier `python`, en **29 à 38 ms** par le pilote de disque du noyau (`BOUCHAUD_PYTHON_INTERPRETE_CHARGE`), puis gardé en mémoire.
+- **WHPX : non mesuré.** On s'attend à un gain au moins aussi grand, puisque chaque lecture BIOS en mode réel y est une sortie de VM, mais rien ne le prouve. La commande `Mesure-Acceleration.ps1` le mesurera : la colonne hôte → noyau doit baisser.
+- KVM et matériel : non mesurés.
+- Banc de non-régression : `tools/ci/run_python_disque.sh` (job `qemu / python depuis le disque`). Il vérifie :
+  - le calcul réel de Python depuis le disque ;
+  - un interpréteur lu une seule fois ;
+  - le refus nommé sur un disque qui ne le porte pas ;
+  - l'image de boot sous 20 Mo.
 
 ## HTTPS de Ladybird (`BOUCHAUD_CA_COMPLET_V2`)
 
