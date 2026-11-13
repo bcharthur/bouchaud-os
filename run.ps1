@@ -768,7 +768,10 @@ if ($LadybirdMode) {
         # chemin decide a la compilation, qui n'existe pas ici : chaque poignee
         # de main TLS echoue, et le symptome ressemble a une panne reseau. On le
         # fabrique donc au lieu d'attendre que l'utilisateur devine.
-        if (-not (Test-Path -LiteralPath $PublicCABundle -PathType Leaf)) {
+        # BOUCHAUD_CA_COMPLET_V2 : appele a CHAQUE lancement -- le script rend
+        # la main aussitot si le bundle est a jour, et reconstruit un bundle de
+        # l'ancien schema (magasin local seul, incomplet : `verify=20`).
+        if ($true) {
             $Fabrique = Join-Path `
                 $RepoRoot `
                 "tools\ladybird\certs\fabrique-bundle.ps1"
