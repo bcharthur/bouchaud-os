@@ -2226,6 +2226,19 @@ pub struct Document {
 /// Recupere une URL HTTP(S) et renvoie le document brut (corps decode), en
 /// suivant les redirections. Utilise par le moteur de rendu graphique.
 pub fn fetch_document(url: &str) -> Document {
+    fetch_document_avec(url, false)
+}
+
+/// BOUCHAUD_TLS_CONFIANCE_V1 -- comme `fetch_document`, mais une URL `https`
+/// exige une chaine de confiance a CHAQUE saut (`tls::https_fetch_confiance`),
+/// et une redirection d'`https` vers `http` est refusee. Pour l'agent OTA : un
+/// certificat non fiable n'est pas un transport, meme si la decision repose
+/// sur la signature du manifeste.
+pub fn fetch_document_confiance(url: &str) -> Document {
+    fetch_document_avec(url, true)
+}
+
+fn fetch_document_avec(url: &str, exige_confiance: bool) -> Document {
     use alloc::string::ToString;
     use crate::diag::Cat;
     let t0 = crate::kernel::timer::cycles_since_boot();
@@ -2252,8 +2265,13 @@ pub fn fetch_document(url: &str) -> Document {
     }
 
     let mut current = String::from(url);
+    let depart_https = split_url(url).0 == "https";
     for hop in 0..8u32 {
         let (scheme, hostname, port, path) = split_url(&current);
+        if exige_confiance && depart_https && scheme != "https" {
+            banner.push(format!("TLS_REFUS redirection_vers_{} {}", scheme, current));
+            return Document { banner, final_url: current, content_type: String::new(), body: alloc::vec::Vec::new(), is_html: false, ok: false };
+        }
         let (mut b, raw) = if scheme == "https" {
             // La resolution, le raccordement et la poignee vivent dans
             // `https_fetch` : on ne peut pas les separer d'ici sans le
@@ -2261,7 +2279,7 @@ pub fn fetch_document(url: &str) -> Document {
             navigation::entre(Etape::Dns, horloge());
             navigation::entre(Etape::Tcp, horloge());
             navigation::entre(Etape::Tls, horloge());
-            let r = tls::https_fetch(&hostname, port, &path);
+            let r = if exige_confiance { tls::https_fetch_confiance(&hostname, port, &path) } else { tls::https_fetch(&hostname, port, &path) };
             if r.raw.is_empty() {
                 navigation::echoue(Etape::Tls, horloge());
             } else {

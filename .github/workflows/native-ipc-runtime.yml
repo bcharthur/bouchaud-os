@@ -259,12 +259,13 @@ jobs:
     name: ab-rollback (${{ matrix.scenario }}, ${{ matrix.support }})
     runs-on: ubuntu-latest
     # BOUCHAUD_OTA_V1 : ota-complet / ota-rollback construisent DEUX noyaux et
-    # telechargent ~100 Mo en TLS sous TCG ; les autres scenarios gardent 40.
+    # telechargent ~100 Mo en TLS sous TCG (ota-reseau : deux fois, plus une
+    # relance de 60 s) ; les autres scenarios gardent 40.
     timeout-minutes: ${{ startsWith(matrix.scenario, 'ota-') && matrix.scenario != 'ota-verifie' && 90 || 40 }}
     strategy:
       fail-fast: false
       matrix:
-        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, mise-a-jour-morts, sans-cle, ota-verifie, ota-complet, ota-rollback, recovery-requise, recovery-rollback, echecs-repetes]
+        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, mise-a-jour-morts, sans-cle, ota-verifie, ota-complet, ota-rollback, ota-reseau, recovery-requise, recovery-rollback, echecs-repetes]
         support: [nvme]
         # BOUCHAUD_USB_VIDANGE_REELLE_V1 / BOUCHAUD_USB_LIAISON_SUPPORT_V1 : le
         # disque A/B sur une cle USB. sante : commit accepte (vidange prouvee) ;

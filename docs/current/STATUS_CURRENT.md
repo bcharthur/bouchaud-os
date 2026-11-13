@@ -33,7 +33,13 @@
 - **Artefact** du run : illisible depuis la session (proxy 403 sur l'hôte de blobs).
 - **Reproductions ciblées** sur le noyau exact `21fca026` : `tools/ci/run_sigchld_repetition.sh`. 30 exécutions isolées en SMP4, 30 sous `strace echecs` à chacun de SMP1, SMP2 et SMP4, et 5 rejeux du banc `run_os_primitives.sh` complet, soit **125 exécutions, 0 échec**.
 - **Code relu** : zombie posé avant SIGCHLD sur les deux chemins (`exit_current`, `tue_processus`), récolte unique sous `PROCESS_TABLE`.
-- **Hypothèse non réfutée** : un fil condamné qui mourrait sans décrémenter `threads`, et le processus ne deviendrait jamais zombie.
+- **Hypothèse réfutée par l'occurrence 2** : un fil condamné qui mourrait sans décrémenter `threads`, et le processus ne deviendrait jamais zombie.
+- **Occurrence 2** (`main@b3d4077`, job 131536326101, passe TCG ; les trois passes KVM sont vertes ; suivi dans **#311**) :
+  - le cas fautif est `boucle` ;
+  - le fil qui attend n'est réveillé qu'à 10 s, par la borne du test (`EINTR`), avec `sigchld_ms=-1` ;
+  - l'enfant était pourtant **zombie et récoltable** (`waitpid=60`).
+  - Ce qui manque est donc la **livraison de SIGCHLD au parent** quand l'un de ses fils tourne en boucle, sous TCG.
+  - Même arbre vert au SHA 85cd1af. **Non résolu.**
 - **Diagnostic ajouté** : `run_os_primitives.sh` publie désormais dans le journal du job le cas fautif, son réveil, et les sorties et morts des fils de la racine en échec. Une prochaine occurrence sera attribuable sans l'artefact.
 
 Si ce même échec réapparaît sur la PR : **non prêt à fusionner** tant qu'il n'est pas classé.

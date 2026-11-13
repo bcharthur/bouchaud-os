@@ -58,8 +58,10 @@
 # not start, or a kernel started under RECOVERY_REQUIRED is red.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|mise-a-jour-morts|sans-cle|ota-verifie|ota-complet|ota-rollback|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
-OTA_COMPLET=0; case "$1" in ota-complet|ota-rollback) OTA_COMPLET=1 ;; esac
+SCENARIO=${1:?usage: run_ab_rollback.sh panique|gel|meta-0|meta-1|meta-2|sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|mise-a-jour-morts|sans-cle|ota-verifie|ota-complet|ota-rollback|ota-reseau|recovery-requise|recovery-rollback|echecs-repetes [OUT]}
+OTA_COMPLET=0; case "$1" in ota-complet|ota-rollback|ota-reseau) OTA_COMPLET=1 ;; esac
+# Demarrage ou l'agent installe et redemarre vers B (ota-reseau : le second).
+BOOT_INSTALLE=1; [ "$1" = ota-reseau ] && BOOT_INSTALLE=2
 RECOVERY=0
 # mise-a-jour-morts = mise-a-jour + updated dies on purpose twice (during the
 # writes, during the read-back); the third instance must inherit nothing.
@@ -106,6 +108,15 @@ case "$SCENARIO" in
   # trois demarrages B refuses, retour automatique a A, STATE intacte, et la
   # release en echec n'est PLUS jamais telechargee.
   ota-rollback) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A* B- B- B- A="; BOOT_DELAI_S=${BO_AB_BOOT_S:-1500}; export BO_AB_STATE_MIO=256 ;;
+  # BOUCHAUD_OTA_RESEAU_V1 (campagne D) : la meme release 1001, servie par un
+  # reseau hostile. Demarrage 1 (A) : une source au certificat d'une CA
+  # INCONNUE et une source en erreur HTTP 500 sont refusees ; la bonne source
+  # sert d'abord une partie ALTEREE (refus, relance bornee a 60 s), puis une
+  # partie TRONQUEE (reprise), puis le lien tombe 20 s (set_link, reprise),
+  # puis l'ALIMENTATION est coupee en plein telechargement (A~). Demarrage 2
+  # (A, META intact) : le telechargement interrompu est vu dans STATE, tout
+  # recommence sous signature, installe, redemarre (A*). Demarrage 3 : B+.
+  ota-reseau) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A~ A* B+"; BOOT_DELAI_S=${BO_AB_BOOT_S:-1500}; export BO_AB_STATE_MIO=256 ;;
   recovery-requise) MAUVAIS=bon; META_SPEC=corrompu:2; ATTENDU="R"; RECOVERY=1 ;;
   recovery-rollback) MAUVAIS=bon; META_SPEC=b-bon; ATTENDU="R B="; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
   echecs-repetes) MAUVAIS=bon; META_SPEC=a-bon; ATTENDU="A- A- A- R"; RECOVERY=1; BOOT_DELAI_S=${BO_AB_BOOT_S:-300} ;;
@@ -142,6 +153,15 @@ if [ "$OTA_COMPLET" = 1 ]; then
   openssl x509 -req -in "$CLES/srv.csr" -CA "$CLES/ca.pem" -CAkey "$CLES/ca.key" -CAcreateserial -days 2 \
     -extfile "$CLES/srv.ext" -out "$CLES/srv.pem" 2>/dev/null
   export BOUCHAUD_CA_BANC_DEV="$CLES/ca.der"
+  if [ "$SCENARIO" = ota-reseau ]; then
+    # Une SECONDE CA, que le noyau ne connait pas, et un serveur qu'elle signe
+    # (meme nom, meme adresse) : seul le certificat le distingue.
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+      -subj "/CN=Bouchaud banc CA INCONNUE" -keyout "$CLES/ca-inconnue.key" -out "$CLES/ca-inconnue.pem" \
+      -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
+    openssl x509 -req -in "$CLES/srv.csr" -CA "$CLES/ca-inconnue.pem" -CAkey "$CLES/ca-inconnue.key" -CAcreateserial -days 2 \
+      -extfile "$CLES/srv.ext" -out "$CLES/srv-inconnu.pem" 2>/dev/null
+  fi
 fi
 
 # --- build: shim, kernels, payloads, metadata, disk ------------------------
@@ -222,7 +242,7 @@ with tarfile.open(out, "w", format=tarfile.USTAR_FORMAT) as t:
         t.addfile(i, io.BytesIO(data))
 PY
 }
-case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|ota-verifie|ota-complet|ota-rollback|recovery-rollback|echecs-repetes)
+case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|ota-verifie|ota-complet|ota-rollback|ota-reseau|recovery-rollback|echecs-repetes)
   # The system userland of each slot: serviced (system supervisor) and its
   # critical services (health contract v3: healthd, updated, logd). In sante-ko the
   # CANDIDATE's critical service fails.
@@ -246,6 +266,11 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
     # publie (fabrique_release.py, parties de 16 Mio), servie en HTTPS.
     PORT_OTA=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
     printf 'source=https://10.0.2.2:%s/rel\ntelechargement=consenti\nredemarrage=consenti\n' "$PORT_OTA" > "$OUT/ota.conf"
+    if [ "$SCENARIO" = ota-reseau ]; then
+      PORT_CA=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+      printf 'source=https://10.0.2.2:%s/rel\nsource=https://10.0.2.2:%s/erreur\nsource=https://10.0.2.2:%s/rel\ntelechargement=consenti\nredemarrage=consenti\n' \
+        "$PORT_CA" "$PORT_OTA" "$PORT_OTA" > "$OUT/ota.conf"
+    fi
     ramdisk "$OUT/slot-b/ramdisk" $systeme "bin/healthd=$critique_b" "etc/bouchaud/ota.conf=$OUT/ota.conf"
     "$BUILDER" --image-slot "$OUT/slot-b" "$OUT/system-b.img"
     python3 tools/release/fabrique_release.py --image "$OUT/system-b.img" --version "ota-v2-$(git rev-parse --short HEAD)" \
@@ -394,12 +419,22 @@ if [ "$OTA_COMPLET" = 1 ]; then
   # Le serveur HTTPS de banc (tools/ci/serveur_ota_banc.py) : coupure
   # volontaire de la partie 5 ; poignee TLS dans le fil de CHAQUE connexion,
   # avec delai -- une connexion figee ne bloque plus les suivantes (run
-  # 43301393229 : partie 13 « reponse vide » quatre fois, verdict A!).
-  python3 tools/ci/serveur_ota_banc.py "$PORT_OTA" "$OUT/srv" "$CLES/srv.pem" "$CLES/srv.key" > "$OUT/https.log" 2>&1 &
+  # 43301393229 : partie 13 « reponse vide » quatre fois, verdict A!) ; en
+  # ota-reseau, erreur 500, partie alteree, partie tronquee, et un SECOND
+  # serveur au certificat d'une CA inconnue.
+  modes=(); [ "$SCENARIO" = ota-reseau ] && modes=(--reseau)
+  python3 tools/ci/serveur_ota_banc.py "$PORT_OTA" "$OUT/srv" "$CLES/srv.pem" "$CLES/srv.key" "${modes[@]}" > "$OUT/https.log" 2>&1 &
   PID_HTTP=$!
+  if [ "$SCENARIO" = ota-reseau ]; then
+    python3 tools/ci/serveur_ota_banc.py "$PORT_CA" "$OUT/srv" "$CLES/srv-inconnu.pem" "$CLES/srv.key" > "$OUT/https-ca-inconnue.log" 2>&1 &
+    PID_HTTP="$PID_HTTP $!"
+    # Le lien reseau est coupe puis retabli par le moniteur (set_link) :
+    # une carte nommee.
+    RESEAU=(-netdev user,id=n0 -device e1000,netdev=n0,id=e0 -rtc "base=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%S)")
+  fi
   # Ajoute l'arret du serveur a la trap du banc, SANS la remplacer : le
   # diagnostic d'echec et le nettoyage doivent toujours avoir lieu.
-  trap 'rc=$?; kill "$PID_HTTP" 2>/dev/null; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
+  trap 'rc=$?; kill $PID_HTTP 2>/dev/null; [ "$rc" -ne 0 ] && diagnostic_echec; rm -rf "$TRAVAIL" "$CLES"' EXIT
 elif [ "$SCENARIO" = ota-verifie ]; then
   RESEAU=(-nic user,model=e1000)
   python3 -m http.server "$PORT_OTA" --bind 127.0.0.1 --directory "$OUT/srv" > "$OUT/http.log" 2>&1 &
@@ -436,12 +471,17 @@ for i in $(seq 1 "$nb"); do
   else
     SERIE=(-serial file:"$log")
   fi
+  # ota-reseau : un moniteur QEMU par demarrage, pour couper le LIEN (set_link).
+  # (un chemin de socket UNIX tient en 108 octets : un repertoire court)
+  MONITEUR=(); moniteur="$TRAVAIL/m$i.sock"
+  [ "$SCENARIO" = ota-reseau ] && MONITEUR=(-monitor "unix:$moniteur,server=on,wait=off")
+  lien=actif; t_coupe=0
   qemu-system-x86_64 -machine q35 -m 2048 -smp 2 -cpu max \
     -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,unit=1,file="$OUT/vars.fd" \
     -drive if=none,id=disque,format=raw,file="$OUT/disque-ab.img" \
-    "${SUPPORT[@]}" "${RESEAU[@]}" \
-    -display none -no-reboot "${SERIE[@]}" >/dev/null 2>&1 &
+    "${SUPPORT[@]}" "${RESEAU[@]}" "${MONITEUR[@]}" \
+    -display none -no-reboot "${SERIE[@]}" >/dev/null 2>"$OUT/qemu-$i.err" &
   pid=$!
   verdict=""
   fin=$((SECONDS + BOOT_DELAI_S))
@@ -476,9 +516,33 @@ for i in $(seq 1 "$nb"); do
       fi
       break
     fi
-    # ota-complet / ota-rollback, boot 1 (A): the agent downloads, updated
-    # installs, the agent reboots into the candidate (QEMU -no-reboot exits).
-    if [ "$OTA_COMPLET" = 1 ] && [ "$slot" = A ] && [ "$i" = 1 ]; then
+    # BOUCHAUD_OTA_RESEAU_V1, demarrage 1 : refus, relance, troncature, puis,
+    # dans le SECOND telechargement (apres BOUCHAUD_OTA_RELANCE) : lien coupe
+    # 20 s apres la partie 3, ALIMENTATION coupee apres la partie 5 (A~).
+    if [ "$SCENARIO" = ota-reseau ] && [ "$i" = 1 ]; then
+      apres=$(awk '/BOUCHAUD_OTA_RELANCE/ { f = 1 } f' <<< "$propre")
+      if [ "$lien" = actif ] && grep -aq "BOUCHAUD_OTA_PARTIE n=3 " <<< "$apres"; then
+        envoie "$moniteur" $'set_link e0 off\n'; lien=coupe; t_coupe=$SECONDS
+        echo "AB_RESEAU lien=coupe apres_partie=3"
+      fi
+      if [ "$lien" = coupe ] && (( SECONDS - t_coupe >= 20 )); then
+        envoie "$moniteur" $'set_link e0 on\n'; lien=retabli
+        echo "AB_RESEAU lien=retabli duree_s=$(( SECONDS - t_coupe ))"
+      fi
+      if grep -aqE "UPDATED_INSTALL|BOUCHAUD_UPDATE_INSTALL_CANDIDAT|BOUCHAUD_OTA_TELECHARGE " <<< "$propre"; then
+        verdict="A!"; break
+      fi
+      if [ "$lien" = retabli ] && grep -aq "BOUCHAUD_OTA_PARTIE n=5 " <<< "$apres"; then
+        echo "AB_RESEAU alimentation=coupee pendant=telechargement apres_partie=5"
+        verdict="A~"; break
+      fi
+      if ! kill -0 "$pid" 2>/dev/null; then break; fi
+      sleep 1; continue
+    fi
+    # ota-complet / ota-rollback, boot 1 (A) -- ota-reseau, boot 2: the agent
+    # downloads, updated installs, the agent reboots into the candidate (QEMU
+    # -no-reboot exits).
+    if [ "$OTA_COMPLET" = 1 ] && [ "$slot" = A ] && [ "$i" = "$BOOT_INSTALLE" ]; then
       if grep -aq "BOUCHAUD_OTA_REDEMARRAGE consentement=configuration" <<< "$propre"; then
         for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
         if grep -aq "UPDATED_INSTALL_OK" <<< "$propre"; then verdict="A*"; else verdict="A!"; fi
@@ -511,7 +575,7 @@ for i in $(seq 1 "$nb"); do
       if ! kill -0 "$pid" 2>/dev/null; then break; fi
       sleep 1; continue
     fi
-    case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|ota-complet|ota-rollback|recovery-rollback|echecs-repetes)
+    case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle|ota-complet|ota-rollback|ota-reseau|recovery-rollback|echecs-repetes)
       if [ -n "$slot" ] && grep -aq "result=committed" <<< "$propre"; then
         # Couper à la première ligne détruisait la seconde (run 41898808040,
         # #248 : `B+ B=` puis etat_apres_commit en échec). Si elle ne vient
@@ -537,6 +601,8 @@ for i in $(seq 1 "$nb"); do
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   [ -n "$verdict" ] || verdict="AUCUN(slot=${slot:-?})"
+  # QEMU qui refuse ses arguments n'ecrit rien sur la serie : sa raison ici.
+  [ -s "$OUT/qemu-$i.err" ] && awk -v n="$i" 'NR <= 5 { print "AB_QEMU_ERR n=" n " " $0 }' "$OUT/qemu-$i.err"
   raison=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | tr -d '\r' | grep -aoE "BOUCHAUD_AB_(BOOT slot=[AB] raison=[a-z_]+|RECOVERY_REQUIRED raison=[a-z_]+)" | tail -1 || true)
   echo "AB_BOOT n=$i verdict=$verdict ${raison}"
   sequence+=("$verdict")
@@ -597,20 +663,20 @@ fi
 if [ "$OTA_COMPLET" = 1 ]; then
   P() { sed 's/\x1b\[[0-9;]*m//g' "$OUT/boot-$1.log" | tr -d '\r'; }
   echec() { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO $*" >&2; exit 1; }
-  b1=$(P 1)
-  # Boot 1 (A, release 1000) : HTTPS, parties, empreinte SIGNEE, installation, redemarrage consenti.
+  b1=$(P 1); bi=$(P "$BOOT_INSTALLE"); n=$BOOT_INSTALLE
+  # Boot n (A, release 1000) : HTTPS, parties, empreinte SIGNEE, installation, redemarrage consenti.
   # Deux versions DISTINCTES : le noyau de A n'est pas celui de la release.
-  grep -aq "BOUCHAUD_BUILD commit=" <<< "$b1" || echec "boot=1 raison=identite_de_construction_absente"
-  grep -aqF "BOUCHAUD_BUILD commit=$V2" <<< "$b1" && echec "boot=1 raison=A_porte_deja_la_version_2"
-  for m in "BOUCHAUD_AB_BOOT slot=A" \
+  grep -aq "BOUCHAUD_BUILD commit=" <<< "$bi" || echec "boot=$n raison=identite_de_construction_absente"
+  grep -aqF "BOUCHAUD_BUILD commit=$V2" <<< "$bi" && echec "boot=$n raison=A_porte_deja_la_version_2"
+  for m in "BOUCHAUD_AB_BOOT slot=A raison=actif" \
            "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_OTA/rel resultat=disponible" \
            "BOUCHAUD_OTA_TELECHARGE source=https://10.0.2.2:$PORT_OTA/rel sequence=$RELEASE_SEQ" "empreinte=signee_verifiee" \
            "UPDATED_OTA_RELEASE_STAGED" "UPDATED_INSTALL_OK" "BOUCHAUD_UPDATE_INSTALL_CANDIDAT cible=B" \
            "BOUCHAUD_OTA_CANDIDAT_PRET sequence=$RELEASE_SEQ" "BOUCHAUD_OTA_REDEMARRAGE consentement=configuration" \
-           "BOUCHAUD_PERSIST_DEMARRAGES n=1 slot=A"; do
-    grep -aF "$m" <<< "$b1" >/dev/null || echec "boot=1 marqueur_absent=$m"
+           "BOUCHAUD_PERSIST_DEMARRAGES n=$n slot=A"; do
+    grep -aF "$m" <<< "$bi" >/dev/null || echec "boot=$n marqueur_absent=$m"
   done
-  [ "$(grep -ac 'BOUCHAUD_OTA_PARTIE n=' <<< "$b1")" = "$NB_PARTIES" ] || echec "boot=1 raison=nombre_de_parties"
+  [ "$(grep -ac 'BOUCHAUD_OTA_PARTIE n=' <<< "$bi")" = "$NB_PARTIES" ] || echec "boot=$n raison=nombre_de_parties"
   # La coupure volontaire a eu lieu, et la partie 5 a ete REPRISE.
   grep -q "COUPURE_VOLONTAIRE /rel/system-slot.img.part005" "$OUT/https.log" || echec "raison=temoin_de_coupure_absent"
   grep -aE "BOUCHAUD_OTA_REPRISE url=https://10.0.2.2:$PORT_OTA/rel/system-slot.img.part005 essai=[2-4] resultat=ok" <<< "$b1" >/dev/null \
@@ -641,6 +707,78 @@ if [ "$OTA_COMPLET" = 1 ]; then
     done
     grep -aq "BOUCHAUD_OTA_TELECHARGE" <<< "$b3" && echec "boot=3 raison=retelechargement"
     echo "AB_OTA_COMPLET_OK https=TLSv1.3 parties=$NB_PARTIES v1=1000 v2=$RELEASE_SEQ build_v2=$V2 sante=committe plancher=$RELEASE_SEQ state=1,2,3"
+  elif [ "$SCENARIO" = ota-reseau ]; then
+    # BOUCHAUD_OTA_RESEAU_V1 -- demarrage 1 : chaque defaut du reseau a SA
+    # consequence, et rien n'est installe ni ecrit dans un slot.
+    u="https://10.0.2.2:$PORT_OTA"
+    for m in "BOUCHAUD_OTA_TLS_REFUS url=https://10.0.2.2:$PORT_CA/rel/manifest TLS_REFUS confiance=false" \
+             "BOUCHAUD_OTA_VERIFIE source=https://10.0.2.2:$PORT_CA/rel resultat=refuse raison=certificat_non_fiable" \
+             "BOUCHAUD_OTA_HTTP_STATUT url=$u/erreur/manifest statut=500" \
+             "BOUCHAUD_OTA_VERIFIE source=$u/erreur resultat=refuse raison=manifeste_http_erreur" \
+             "BOUCHAUD_OTA_VERIFIE source=$u/rel resultat=disponible" \
+             "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE source=$u/rel raison=partie_empreinte_differente" \
+             "BOUCHAUD_OTA_HISTORIQUE telechargement_refuse sequence=$RELEASE_SEQ raison=partie_empreinte_differente" \
+             "BOUCHAUD_OTA_RELANCE dans_s=60 echecs_consecutifs=1 raison=partie_empreinte_differente"; do
+      grep -aF "$m" <<< "$b1" >/dev/null || echec "boot=1 marqueur_absent=$m"
+    done
+    # La partie alteree n'est PAS reprise dans le meme telechargement (le
+    # contenu, pas le transport) ; la partie tronquee l'est.
+    grep -aE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part001 " <<< "$b1" >/dev/null \
+      && echec "boot=1 raison=partie_alteree_reprise_au_lieu_d_etre_refusee"
+    tronq=$(grep -aoE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part002 essai=1 raison=[a-z_]+" <<< "$b1" | sed 's/.*raison=//' | head -1 || true)
+    [ -n "$tronq" ] || echec "boot=1 raison=troncature_non_vue"
+    grep -aE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part002 essai=[2-4] resultat=ok" <<< "$b1" >/dev/null \
+      || echec "boot=1 raison=partie_tronquee_non_reprise"
+    # Lien coupe 20 s apres la partie 3 du second telechargement. EXIGENCE :
+    # le telechargement survit -- ni abandon, ni recommencement -- et la
+    # coupure a bien frappe un transfert. Deux preuves possibles, selon
+    # l'instant ou la coupure tombe (non deterministe) :
+    #   - REPRISE applicative : une partie >= 4 echoue puis est reprise
+    #     (local, 12/11) ;
+    #   - reprise TCP : aucune requete n'echoue, mais deux parties
+    #     consecutives apres la coupure sont separees de >= 15 s, la duree
+    #     de la coupure absorbee par les retransmissions (CI, run
+    #     43307643098 : partie 4 a 00:38:34, partie 5 a 00:38:55).
+    apres1=$(awk '/BOUCHAUD_OTA_RELANCE/ { f = 1 } f' <<< "$b1")
+    apres_coupe=$(awk '/BOUCHAUD_OTA_PARTIE n=3 / { f = 1 } f' <<< "$apres1")
+    grep -aqE "BOUCHAUD_OTA_TELECHARGEMENT_REFUSE|BOUCHAUD_OTA_RELANCE" <<< "$apres_coupe" \
+      && echec "boot=1 raison=telechargement_abandonne_apres_la_perte_du_lien"
+    if grep -aqE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part00[4-5] essai=[2-4] resultat=ok" <<< "$apres_coupe"; then
+      perte_lien=reprise_applicative
+    else
+      ecart=$(grep -aE "BOUCHAUD_OTA_PARTIE n=[3-5] " <<< "$apres_coupe" \
+        | sed -nE 's/^\[([0-9]+):([0-9]+):([0-9]+)\].*/\1 \2 \3/p' \
+        | awk '{ t = $1 * 3600 + $2 * 60 + $3; if (NR > 1 && t - p > m) m = t - p; p = t } END { print m + 0 }')
+      [ "${ecart:-0}" -ge 15 ] || echec "boot=1 raison=pas_de_reprise_apres_la_perte_du_lien ecart_max_s=${ecart:-0}"
+      perte_lien="reprise_tcp(ecart_s=$ecart)"
+    fi
+    if grep -aqE "UPDATED_INSTALL|BOUCHAUD_UPDATE_INSTALL_(BEGIN|CANDIDAT)|BOUCHAUD_OTA_TELECHARGE " <<< "$b1"; then
+      echec "boot=1 raison=installation_pendant_un_telechargement_incomplet"
+    fi
+    # Le serveur l'atteste (le transport n'est pas simule).
+    # Le client refuse AVANT d'envoyer une requete : le serveur a la CA
+    # inconnue n'en recoit aucune (premier essai du banc : il avait tout servi).
+    grep -q '"GET ' "$OUT/https-ca-inconnue.log" && echec "raison=ca_inconnue_a_servi_une_requete"
+    grep -q 'PRET port=' "$OUT/https-ca-inconnue.log" || echec "raison=serveur_ca_inconnue_absent"
+    for m in "ERREUR_VOLONTAIRE /erreur/manifest 500" "ALTERATION_VOLONTAIRE /rel/system-slot.img.part001" \
+             "TRONCATURE_VOLONTAIRE /rel/system-slot.img.part002"; do
+      grep -qF "$m" "$OUT/https.log" || echec "raison=temoin_serveur_absent=$m"
+    done
+    # Demarrage 2 : A, META intact (le slot actif, pas un candidat) ; la
+    # coupure est VUE dans STATE, tout recommence depuis la partie 0.
+    b2=$(P 2); b3=$(P 3)
+    for m in "BOUCHAUD_OTA_TELECHARGEMENT_INTERROMPU sequence=$RELEASE_SEQ" "consequence=reprise_depuis_la_premiere_partie" \
+             "BOUCHAUD_OTA_HISTORIQUE telechargement_interrompu sequence=$RELEASE_SEQ" "BOUCHAUD_PERSIST_MONTAGE etat=restaure" \
+             "BOUCHAUD_OTA_PARTIE n=0 "; do
+      grep -aF "$m" <<< "$b2" >/dev/null || echec "boot=2 marqueur_absent=$m"
+    done
+    # Demarrage 3 : B, l'AUTRE noyau, commit de sante, plancher 1001.
+    for m in "BOUCHAUD_AB_BOOT slot=B" "BOUCHAUD_BUILD commit=$V2" "result=committed" \
+             "BOUCHAUD_UPDATE_ANTI_RETOUR evenement=plancher_avance etat=valide plancher=$RELEASE_SEQ" \
+             "BOUCHAUD_PERSIST_MONTAGE etat=restaure" "BOUCHAUD_PERSIST_DEMARRAGES n=3 slot=B"; do
+      grep -aF "$m" <<< "$b3" >/dev/null || echec "boot=3 marqueur_absent=$m"
+    done
+    echo "AB_OTA_RESEAU_OK ca_inconnue=refusee http500=refusee partie_alteree=refusee+relance_60s troncature=reprise($tronq) lien_coupe=$perte_lien alimentation_coupee=telechargement_repris state=1,2,3 v2=$RELEASE_SEQ build_v2=$V2"
   else
     # ota-rollback : B (release 1001) echoue sa sante, retour a A ; STATE
     # traverse tout ; la release en echec n'est PLUS jamais telechargee.
@@ -666,7 +804,7 @@ if [ "$SCENARIO" = ota-verifie ]; then
            "BOUCHAUD_OTA_VERIFIE source=$b/vieux resultat=refuse raison=version_retrograde" \
            "BOUCHAUD_OTA_VERIFIE source=$b/arm resultat=refuse raison=materiel_incompatible" \
            "BOUCHAUD_OTA_VERIFIE source=$b/autre resultat=refuse raison=signature_non_fiable" \
-           "BOUCHAUD_OTA_VERIFIE source=$b/absent resultat=refuse raison=manifeste_injoignable" \
+           "BOUCHAUD_OTA_VERIFIE source=$b/absent resultat=refuse raison=manifeste_http_erreur" \
            "BOUCHAUD_OTA_CYCLE sources=6"; do
     grep -aF "$m" <<< "$propre1" >/dev/null || { echo "AB_ROLLBACK_FAIL scenario=$SCENARIO marqueur_absent=$m" >&2; exit 1; }
   done

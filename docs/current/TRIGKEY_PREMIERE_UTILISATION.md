@@ -34,6 +34,12 @@ Remarques :
   - Elle est compilée avec `cle-usb-test` : aucune écriture, vidange, formatage ni effacement vers un disque **interne** (ATA, NVMe).
   - Seule la clé elle-même, reconnue par son GUID GPT, est inscriptible.
   - Détails : `TRIGKEY_CLE_USB_TEST.md`.
+  - Construction : `tools/release/build_cle_validation.sh`, le même script pour le script Windows et pour la CI.
+  - **Testée en QEMU** (`tools/release/test_cle_validation_qemu.py`, CI `trigkey-ab-preflight`) :
+    - démarrage comme clé USB, à côté d'un NVMe interne rempli d'octets connus ;
+    - bureau, règle active, clé reconnue comme média autorisé, DHCP, Terminal et DOOM ;
+    - **empreinte du NVMe interne identique avant et après**.
+  - Résultat : `CLE_VALIDATION_QEMU_OK`. Rien n'a été fait sur le matériel.
 
 ## 2. Ce qui exige ta présence physique
 
@@ -53,6 +59,7 @@ Pour chaque ligne, conserve la **preuve** dans `target/physique/<date>/` : photo
 | P9 | Ladybird : page d'accueil, puis un site HTTPS | photo | NOT_RUN |
 | P10 | `bo-update status` (version, commit, canal stable) | photo | NOT_RUN |
 | P11 | Arrêt et redémarrage par le menu | constat | NOT_RUN |
+| P11b | `bo-update verifier`, puis `bo-update status`. Chaîne TLS **réelle** de GitHub en mode strict : `derniere_verification` doit montrer `a_jour`, `disponible` ou `aucune_cle_de_confiance`, **jamais** `certificat_non_fiable`. Jamais vérifié depuis la session : son proxy intercepte TLS. | photo | NOT_RUN |
 | P12 | Disques internes **intacts** après la session (ex. Windows du Trigkey démarre toujours) | constat | NOT_RUN |
 
 | # | Installation sur SSD dédié | Preuve | Résultat |
@@ -75,7 +82,7 @@ Le Trigkey possède **un seul emplacement NVMe** : le SSD dédié remplace tempo
 | Check requis « Unix & Filesystem Reliability » | `BLOCKED_HUMAN` | Droits administrateur du dépôt. |
 | Matériel Trigkey (RTL8168, affichage, USB, NVMe réel, coupure secteur) | `BLOCKED_PHYSICAL` | §2. |
 | Canal `testing` automatique | non fait | GitHub n'offre pas d'URL « dernière prerelease » : seul le canal **stable** est automatique. |
-| Reprise d'un téléchargement à travers un redémarrage | non fait | Les parties téléchargées vivent en RAM : un redémarrage pendant un téléchargement le recommence, après vérification. |
+| Reprise d'un téléchargement à travers un redémarrage | partiel | L'interruption est détectée dans STATE (`bo-update historique` : `telechargement_interrompu`), et le téléchargement recommence depuis la première partie, sous signature (QEMU : `ota-reseau`). La reprise **d'octets** n'est pas faite : les parties vivent en RAM. |
 | Politique OTA en ring 3 | en cours | L'agent est encore dans le noyau (`src/kernel/update/ota.rs`). Il installe via `updated`, en ring 3, seul détenteur de la capacité. |
 | Incident intermittent `ota-complet` (ec0ea87) | surveillé | Voir `TRIGKEY_INSTALL_UPDATE.md`. |
 
