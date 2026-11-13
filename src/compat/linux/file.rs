@@ -185,10 +185,14 @@ fn console_write(data: &[u8]) {
     while !reste.is_empty() {
         let fin = reste.iter().position(|&o| o == b'\n').map_or(reste.len(), |i| i + 1);
         let (ligne, suite) = reste.split_at(fin);
-        if !crate::drivers::vga::serial_mirror() {
-            crate::drivers::serial::ecris_lignes(ligne);
-        }
-        crate::print!("{}", String::from_utf8_lossy(ligne));
+        // BOUCHAUD_SERIE_UNE_COPIE_V1 : UNE emission COM1 par ligne, ici, et
+        // l'ecran (ou la capture du terminal) sans seconde copie serie.
+        // `print!` recopiait la ligne sur COM1 en mode miroir ET dans tout
+        // noyau `reference-desktop` : chaque ligne de l'anneau 3 y passait
+        // deux fois (banc ota-complet, run local du 13/11 : 48 lignes pour 24
+        // parties ; updated, serviced et Ladybird de meme).
+        crate::drivers::serial::ecris_lignes(ligne);
+        crate::drivers::vga::_print_sans_serie(format_args!("{}", String::from_utf8_lossy(ligne)));
         reste = suite;
         if !reste.is_empty() {
             let _ = crate::kernel::scheduler::preempt::safe_point();
