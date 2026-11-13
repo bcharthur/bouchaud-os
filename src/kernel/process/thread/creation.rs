@@ -39,6 +39,8 @@ impl Task {
             kernel_cpu_ns: EcheanceAtomique::neuf(0),
             cpu_ns: [const { EcheanceAtomique::neuf(0) }; MAX_CPUS],
             in_kernel: DrapeauAtomique::neuf(false),
+            en_appel_systeme: DrapeauAtomique::neuf(false),
+            attente_signalable: DrapeauAtomique::neuf(false),
             context_switches: EcheanceAtomique::neuf(0),
             migrations: EcheanceAtomique::neuf(0),
             frame,

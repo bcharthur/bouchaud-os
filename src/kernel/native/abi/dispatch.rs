@@ -286,6 +286,8 @@ fn waitset_wait(args: [u64; 6]) -> Result<u64> {
     };
     let timeout = args[3];
     let deadline = crate::kernel::timer::monotonic_ns().saturating_add(timeout);
+    // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : cette attente rend la main sur signal.
+    let _signalable = crate::kernel::task::AttenteSignalable::entre();
     loop {
         let ticket = crate::kernel::native::activite::ticket();
         let ready = waitset.poll(cap);

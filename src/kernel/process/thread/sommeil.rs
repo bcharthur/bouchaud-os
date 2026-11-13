@@ -140,6 +140,8 @@ pub fn sleep_ns_signalable(ns: u64) -> Option<u64> {
 }
 
 fn sleep_jusqua_signalable(deadline: u64, ticks: u64) -> Option<u64> {
+    // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : ce sommeil rend la main sur signal.
+    let _signalable = AttenteSignalable::entre();
     loop {
         // Parking refuse : la tache ne peut plus dormir -- elle est morte
         // (`exit_group` d'un autre fil). Rendre la main tout de suite, comme
