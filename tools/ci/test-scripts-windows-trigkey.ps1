@@ -219,3 +219,7 @@ Verifie 'mesure -AvecLadybird : la copie de banc est montee, jamais ladybird-bro
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }
 Write-Host 'SCRIPTS_WINDOWS_TRIGKEY_OK'
+# Code explicite : le dernier programme natif lance (le disque de banc refuse,
+# code 2, a dessein) laisserait $LASTEXITCODE non nul, et l'etape echouerait
+# sur un succes.
+exit 0
