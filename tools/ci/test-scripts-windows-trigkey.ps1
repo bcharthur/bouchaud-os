@@ -152,6 +152,70 @@ if ($IsLinux -or $IsMacOS) {
     Verifie 'lancement : stderr journalise, arguments intacts, code de sortie' ($codeLance -eq 7 -and $manquants.Count -eq 0) "code=$codeLance manquants=$($manquants -join ',') journal=$journalLance"
 }
 
+# --- Banc : qualifications A (SMP) et B (Ladybird) separees -----------------
+# Les 15 essais Windows du 13/11 etaient ok=False parce que le banc exigeait la
+# premiere trame d'un Ladybird que rien ne lancait : un faux rouge SMP.
+function SerieBanc([int]$n, [string]$sig = 'MicrosoftHv', [switch]$SansBattement, [switch]$Lance, [switch]$Trame, [switch]$Https) {
+    $l = @("BOUCHAUD_BOOT_POINT kernel-main t_ms=0 delta_ms=0",
+        "BOUCHAUD_CPU_ISA hyperviseur=$sig fournisseur=AuthenticAMD sse3=1 ssse3=1 sse41=1 sse42=1 popcnt=1 xsave=1 osxsave=0 avx=1 avx2=1 avx512f=1 mpx=0 apxf=0 la57=0",
+        "BOUCHAUD_SMP_DECOUVERTE count=$n source=madt madt_actifs=$n")
+    if ($n -gt 1) { $l += "BOUCHAUD_SMP_PHYSICAL_GREEN online=$n reported=$n" } else { $l += @('[kernel] SMP4_AP_STARTED count=0 reason=single-vcpu', '[kernel] SMP4_SCHEDULER online=1 mode=UP') }
+    $l += "[kernel] SMP_NG2_SCHEDULER online=$n mode=thread-load-balance+work-steal quantum=4ms"
+    if (-not $SansBattement) { for ($i = 0; $i -lt $n; $i++) { $l += "BOUCHAUD_SMP_BATTEMENT cpu=$i quantums=50 fenetre_ms=200 bat=1" }; $l += "BOUCHAUD_SMP_BATTEMENT_BILAN battants=$n en_ligne=$n mode=lapic-periodique" }
+    $l += 'BOUCHAUD_BOOT_POINT bureau-premiere-trame t_ms=4522 delta_ms=4462'
+    if ($Lance) { $l += '[ladybird-bouchaud] BROWSER_HOST_START architecture=UI/Bouchaud' }
+    if ($Trame) { $l += 'BOUCHAUD_UI_FIRST_FRAME onglet=1 page=1 zone=1100x538 source=compositor' }
+    if ($Https) { $l += '[LB:NAV] onglet=1 document_charge url=https://example.com/' }
+    $l += '[LB:PERF] onglet=1 trames=40 present_us_moy=812 present_us_pire=9001'
+    $l += '[PROC-STAT] capacite_ms=40000 occupe_ms=10000 depassements=0'
+    return ($l -join "`n")
+}
+$jal = @{ noyau = 13000; ordonnanceur = 15000; bureau = 17500; navigateur = 18000; premiere_trame = 21000; https = 22500 }
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal
+Verifie 'banc A : WHPX SMP4 sans Ladybird = A OK, B NOT_RUN (plus de faux rouge)' ($a.smp.statut -eq 'OK' -and $a.ladybird.statut -eq 'NOT_RUN') "$($a.smp.causes) / $($a.ladybird.statut)"
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 1) -Erreurs '' -Accel 'whpx' -N 1 -Jalons $jal
+Verifie 'banc A : SMP1 avec battement mesure = OK' ($a.smp.statut -eq 'OK' -and $a.smp.coeurs_qui_battent -eq 1) "$($a.smp.causes)"
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 1 -SansBattement) -Erreurs '' -Accel 'whpx' -N 1 -Jalons $jal
+Verifie 'banc A : SMP1 sans preuve d''activite = ECHEC (pas de faux vert)' ($a.smp.statut -eq 'ECHEC' -and ($a.smp.causes -contains 'coeurs_qui_battent=0/1')) "$($a.smp.causes)"
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4 -sig 'TCGTCGTCGTCG') -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal
+Verifie 'banc A : signature TCG sous configuration WHPX = ECHEC' ($a.smp.statut -eq 'ECHEC' -and ($a.smp.causes -contains 'accelerateur-reel=TCG'))
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4) -Erreurs 'WHPX: Unexpected VP exit code 4' -Accel 'whpx' -N 4 -Jalons $jal
+Verifie 'banc A : sortie de VP = ECHEC' ($a.smp.statut -eq 'ECHEC' -and ($a.smp.causes -contains 'whpx-vp-exit=4'))
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4 -Lance -Trame -Https) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal -LadybirdStatut 'PRET' -LadybirdRaison ''
+Verifie 'banc B : lance, 1re trame, HTTPS = OK, metriques separees' ($a.ladybird.statut -eq 'OK' -and $a.navigation.lancement_premiere_trame_ms -eq 3000 -and $a.navigation.lancement_document_https_ms -eq 4500 -and $a.demarrage.hote_jusqu_au_noyau_ms -eq 13000 -and $a.demarrage.noyau_jusqu_au_bureau_ms_invite -eq 4522 -and $a.composition.present_us_moy -eq 812 -and $a.charge_cpu.occupation_pct -eq 25) ($a | ConvertTo-Json -Depth 4 -Compress)
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4 -Lance) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal -LadybirdStatut 'PRET' -LadybirdRaison ''
+Verifie 'banc B : lance sans 1re trame = ECHEC avec cause, A reste OK' ($a.ladybird.statut -eq 'ECHEC' -and ($a.ladybird.causes -contains 'premiere-trame-absente') -and $a.smp.statut -eq 'OK') "$($a.ladybird.causes)"
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4 -Lance -Trame) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal -LadybirdStatut 'PRET' -LadybirdRaison ''
+Verifie 'banc B : 1re trame sans HTTPS = ECHEC distinct' ($a.ladybird.statut -eq 'ECHEC' -and ($a.ladybird.causes -contains 'document-https-non-charge') -and $a.ladybird.premiere_trame) "$($a.ladybird.causes)"
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal -LadybirdStatut 'PRET' -LadybirdRaison ''
+Verifie 'banc B : navigateur jamais lance = ECHEC nomme' ($a.ladybird.causes -contains 'navigateur-non-lance-malgre-BO_AUTOSTART_BROWSER')
+$a = Get-BouchaudAnalyseRepetition -Serie (SerieBanc 4) -Erreurs '' -Accel 'whpx' -N 4 -Jalons $jal -LadybirdStatut 'NON_MESURABLE' -LadybirdRaison 'python-introuvable'
+Verifie 'banc B : NON_MESURABLE garde sa cause' ($a.ladybird.statut -eq 'NON_MESURABLE' -and ($a.ladybird.causes -contains 'python-introuvable'))
+
+# Disque de banc : copie avec BO_AUTOSTART_BROWSER=1, source intacte.
+$py = Get-BouchaudPython
+if ($py) {
+    $scen = Join-Path $t 'scen'; New-Item -ItemType Directory -Force -Path $scen | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $scen 'autorun'), "uname`nexport BOUCHAUD_M9_URL='https://example.com'`ngui-surface simple`ndesktop`n")
+    [System.IO.File]::WriteAllText((Join-Path $scen 'bo-navigateur'), 'ELF')
+    $src = Join-Path $t 'ladybird-browser.img'
+    & $py[0] @($py | Select-Object -Skip 1) -c "import tarfile,sys; t=tarfile.open(sys.argv[1],'w',format=tarfile.USTAR_FORMAT); t.add(sys.argv[2]+'/autorun',arcname='./autorun'); t.add(sys.argv[2]+'/bo-navigateur',arcname='./bo-navigateur'); t.close()" $src $scen
+    $avant = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash
+    $d = New-BouchaudDisqueBanc -Source $src -Cible (Join-Path $t 'banc.img')
+    $apres = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash
+    $autorunBanc = & $py[0] @($py | Select-Object -Skip 1) -c "import tarfile,sys; print(tarfile.open(sys.argv[1]).extractfile('./autorun').read().decode())" (Join-Path $t 'banc.img') | Out-String
+    Verifie 'disque de banc : autostart avant desktop, source intacte' ($d.statut -eq 'PRET' -and $avant -eq $apres -and $autorunBanc -match "BO_AUTOSTART_BROWSER=1\s+desktop") "$($d.statut) $($d.raison) $autorunBanc"
+    $d = New-BouchaudDisqueBanc -Source (Join-Path $t 'absent.img') -Cible (Join-Path $t 'b2.img')
+    Verifie 'disque de banc : disque absent = NON_MESURABLE avec cause' ($d.statut -eq 'NON_MESURABLE' -and $d.raison -match 'disque-absent')
+    [System.IO.File]::WriteAllText((Join-Path $scen 'autorun'), "uname`n")
+    & $py[0] @($py | Select-Object -Skip 1) -c "import tarfile,sys; t=tarfile.open(sys.argv[1],'w',format=tarfile.USTAR_FORMAT); t.add(sys.argv[2]+'/autorun',arcname='./autorun'); t.close()" (Join-Path $t 'sans-bureau.img') $scen
+    $d = New-BouchaudDisqueBanc -Source (Join-Path $t 'sans-bureau.img') -Cible (Join-Path $t 'b3.img')
+    Verifie 'disque de banc : autorun inconnu = NON_MESURABLE avec cause' ($d.statut -eq 'NON_MESURABLE' -and $d.raison -eq 'autorun-sans-ligne-desktop') "$($d.raison)"
+}
+else { Write-Host 'ECHEC disque de banc : python introuvable sur le runner'; $echecs++ }
+$sortie = & $mesure -Bootimage $img -DryRun -Repetitions 1 -AvecLadybird -Configurations @('whpx-smp4') *>&1 | Out-String
+Verifie 'mesure -AvecLadybird : la copie de banc est montee, jamais ladybird-browser.img' ($sortie -match 'ladybird-banc\.img,snapshot=on' -and $sortie -notmatch 'ladybird-browser\.img,snapshot') $sortie
+
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }
 Write-Host 'SCRIPTS_WINDOWS_TRIGKEY_OK'

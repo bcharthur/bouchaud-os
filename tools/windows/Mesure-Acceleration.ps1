@@ -8,25 +8,37 @@
 
         tcg-smp1  tcg-smp4  whpx-smp1  whpx-smp2  whpx-smp4
 
-    et releve sur la liaison serie (rien n'est deduit) :
+    et rend DEUX qualifications independantes (BOUCHAUD_WHPX_CPU_V1) :
 
-      - le nombre de processeurs DECOUVERTS et sa source
-        (`BOUCHAUD_SMP_DECOUVERTE ... source=madt|cpuid`) ;
-      - les processeurs EN LIGNE (`BOUCHAUD_SMP_PHYSICAL_GREEN online=N`) ;
-      - que CHAQUE coeur fait tourner des quantums
-        (`BOUCHAUD_SMP_BATTEMENT cpu=K quantums=Q`, Q > 0) -- en ligne ne
-        suffit pas, un coeur peut etre en ligne et muet ;
-      - le temps mural jusqu'a l'ordonnanceur SMP (`SMP_NG2_SCHEDULER`) ;
-      - avec -AvecLadybird (disque `ladybird-browser.img` fabrique par
-        run.ps1) : premiere trame du bureau et premiere trame de Ladybird.
+    A -- WHPX/SMP, lue sur la liaison serie (rien n'est deduit) :
+      - l'accelerateur REEL (signature CPUID `BOUCHAUD_CPU_ISA`) ;
+      - les processeurs DECOUVERTS (`BOUCHAUD_SMP_DECOUVERTE count=N`) ;
+      - les processeurs EN LIGNE (`BOUCHAUD_SMP_PHYSICAL_GREEN online=N`,
+        ou `SMP4_SCHEDULER online=1 mode=UP` en monocoeur) ;
+      - que CHAQUE coeur bat (`BOUCHAUD_SMP_BATTEMENT cpu=K quantums=Q`,
+        Q > 0) -- aussi en SMP1, le noyau la mesure desormais sur un coeur ;
+      - l'ordonnanceur (`SMP_NG2_SCHEDULER`), ni panique ni sortie de VP.
+      Une application non lancee n'entre JAMAIS dans A.
 
-    Medianes et P95 par configuration, jamais melangees : TCG, WHPX, KVM et
-    materiel reel sont des environnements DIFFERENTS.
+    B -- Ladybird (-AvecLadybird) : sur une COPIE de banc de
+      ladybird-browser.img dont l'autorun lance le navigateur
+      (`BO_AUTOSTART_BROWSER=1`, tools\windows\disque-banc-ladybird.py ; le
+      disque d'origine et scenario-m9 ne sont pas touches) : lancement
+      (`BROWSER_HOST_START`), premiere trame (`BOUCHAUD_UI_FIRST_FRAME
+      onglet=1`) et, SEPAREMENT, document HTTPS charge (`[LB:NAV] onglet=1
+      document_charge url=https://`). Statuts : OK, ECHEC (cause), NOT_RUN
+      (non demande), NON_MESURABLE (cause : disque absent, Python absent,
+      autorun inconnu).
 
-    Une configuration WHPX SMPn est QUALIFIEE si toutes ses repetitions ont n
-    coeurs en ligne qui battent tous, sans panique. La plus grande est ecrite
-    dans target\whpx-qualification.json, liee a l'empreinte du bootimage :
-    `run.ps1 -Accel auto` ne choisit WHPX en SMP que sur cette preuve.
+    Metriques separees : demarrage (hote -> noyau, noyau -> bureau selon
+    l'horloge de l'invite, hote -> bureau), navigation (lancement -> 1re
+    trame, lancement -> HTTPS), composition (`[LB:PERF]`), charge CPU
+    (`[PROC-STAT]`) ; latence d'entree : NON_MESURABLE (aucune entree
+    injectee). Medianes et P95 par configuration, jamais melangees.
+
+    target\whpx-qualification.json (lie a l'empreinte du bootimage) porte
+    `smp_max_qualifie` (A) et `ladybird_smp_max_qualifie` (A et B) :
+    `run.ps1 -Accel auto` ne choisit WHPX pour Ladybird en SMP que sur B.
 
     BOUCHAUD_WHPX_CPU_V1 : le modele CPU vient de BouchaudQemu.psm1 (TCG :
     max ; WHPX : qemu64 + SSSE3/SSE4.1/SSE4.2/POPCNT, jamais `max`, qui fait
@@ -36,8 +48,9 @@
     l'erreur standard de QEMU (journalisee) ne contient aucun
     `WHPX: Unexpected VP exit`.
 
-    NON QUALIFIE SUR WINDOWS par la session qui l'a ecrit (aucun Windows,
-    aucun Hyper-V disponibles) : syntaxe et refus verifies sous pwsh Linux.
+    Execute sous Windows PowerShell 5.1 en CI avec un faux QEMU
+    (tools/ci/test-mesure-acceleration-windows.ps1) ; WHPX reel : sur la
+    machine de l'utilisateur seulement.
 
 .EXAMPLE
     .\run.ps1 -Doom -Audio none           # construit le bootimage
@@ -62,11 +75,21 @@ $Racine = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Boot = if ($Bootimage) { $Bootimage } else { Join-Path $Racine 'target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin' }
 $Disque = Join-Path $Racine 'ladybird-browser.img'
 if (-not (Test-Path -LiteralPath $Boot)) { throw "bootimage absent : $Boot (lancer run.ps1 une fois)" }
-if ($AvecLadybird -and -not (Test-Path -LiteralPath $Disque)) { throw "disque Ladybird absent : $Disque (lancer run.ps1 -Ladybird une fois)" }
 if ($Repetitions -lt 1) { throw "Repetitions >= 1" }
 $Empreinte = (Get-FileHash -LiteralPath $Boot -Algorithm SHA256).Hash.ToLower()
 $Travail = Join-Path ([System.IO.Path]::GetTempPath()) ("bouchaud-accel-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $Travail | Out-Null
+
+# B -- Ladybird : une COPIE de banc du disque, dont l'autorun lance le
+# navigateur (BO_AUTOSTART_BROWSER=1). ladybird-browser.img et scenario-m9 ne
+# sont jamais modifies. Sans -AvecLadybird : NOT_RUN ; copie impossible :
+# NON_MESURABLE, avec sa cause.
+$Ladybird = @{ statut = 'NOT_RUN'; raison = '-AvecLadybird absent'; chemin = $null }
+if ($AvecLadybird) {
+    if ($DryRun) { $Ladybird = @{ statut = 'PRET'; raison = 'simulation'; chemin = (Join-Path $Travail 'ladybird-banc.img') } }
+    else { $Ladybird = New-BouchaudDisqueBanc -Source $Disque -Cible (Join-Path $Travail 'ladybird-banc.img') }
+    Write-Host ("Ladybird   : {0} ({1})" -f $Ladybird.statut, $Ladybird.raison)
+}
 
 function Quantile([double[]]$v, [double]$q) {
     if (-not $v -or $v.Count -eq 0) { return $null }
@@ -82,11 +105,13 @@ function Arguments([string]$conf, [string]$journal) {
            '-drive', "format=raw,file=$Boot", '-serial', "file:$journal", '-nic', 'user,model=e1000')
     if ($accel -eq 'whpx') { $a += @('-accel', "whpx,kernel-irqchip=$WhpxIrqchip", '-cpu', (Get-BouchaudCpuQemu 'whpx')) }
     else { $a += @('-accel', 'tcg', '-cpu', (Get-BouchaudCpuQemu 'tcg')) }
-    if ($AvecLadybird) { $a += @('-drive', "format=raw,file=$Disque,snapshot=on") }
+    if ($Ladybird.statut -eq 'PRET') { $a += @('-drive', "format=raw,file=$($Ladybird.chemin),snapshot=on") }
     return @{ accel = $accel; n = $n; args = $a }
 }
 
 $resultats = @()
+$JalonsBanc = Get-BouchaudJalonsBanc
+try {
 foreach ($conf in $Configurations) {
     for ($r = 1; $r -le $Repetitions; $r++) {
         $journal = Join-Path $Travail "$conf-$r.log"
@@ -95,8 +120,10 @@ foreach ($conf in $Configurations) {
         $chrono = [System.Diagnostics.Stopwatch]::StartNew()
         $erreurs = "$journal.qemu"
         $jalons = @{}
-        $attendus = @('SMP_NG2_SCHEDULER')
-        if ($AvecLadybird) { $attendus += @('bureau-premiere-trame', 'BOUCHAUD_UI_FIRST_FRAME onglet=1') }
+        # Fin d'une repetition : A prouvee (bilan des battements) et, si
+        # Ladybird est demande, document HTTPS charge -- ou le delai.
+        $fin = @('battement')
+        if ($Ladybird.statut -eq 'PRET') { $fin += 'https' }
         $p = $null
         # QEMU n'est JAMAIS laisse orphelin (erreur, Ctrl+C) : un QEMU restant
         # garde le bootimage ouvert et `cargo bootimage` echoue ensuite
@@ -106,66 +133,107 @@ foreach ($conf in $Configurations) {
             while ($chrono.Elapsed.TotalSeconds -lt $DelaiS -and -not $p.HasExited) {
                 Start-Sleep -Milliseconds 250
                 $texte = Read-BouchaudJournal $journal
-                foreach ($j in $attendus) {
-                    if (-not $jalons.ContainsKey($j) -and $texte.Contains($j)) { $jalons[$j] = [math]::Round($chrono.Elapsed.TotalMilliseconds) }
+                foreach ($k in $JalonsBanc.Keys) {
+                    if (-not $jalons.ContainsKey($k) -and $texte.Contains($JalonsBanc[$k])) { $jalons[$k] = [math]::Round($chrono.Elapsed.TotalMilliseconds) }
                 }
                 if ($texte -match 'KERNEL PANIC') { break }
                 # Sortie de VP WHPX : QEMU met la VM en pause et reste vivant.
                 if ((Read-BouchaudJournal $erreurs) -match 'WHPX: Unexpected VP exit') { break }
-                $battements = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+')).Count
-                if ($jalons.Count -eq $attendus.Count -and ($battements -ge $c.n -or $c.n -eq 1)) { Start-Sleep -Seconds 2; break }
+                if (@($fin | Where-Object { -not $jalons.ContainsKey($_) }).Count -eq 0) { Start-Sleep -Seconds 2; break }
             }
         }
         finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; $p.WaitForExit(10000) | Out-Null }
         }
-        $texte = Read-BouchaudJournal $journal
-        $enLigne = if ($texte -match 'BOUCHAUD_SMP_PHYSICAL_(GREEN|PARTIAL) online=(\d+)') { [int]$Matches[2] } elseif ($texte -match 'reason=single-vcpu') { 1 } else { 0 }
-        $source = if ($texte -match 'BOUCHAUD_SMP_DECOUVERTE count=(\d+) source=(\w+)') { "$($Matches[1])/$($Matches[2])" } else { '?' }
-        $muets = 0
-        foreach ($m in [regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=(\d+) quantums=(\d+)')) { if ([int]$m.Groups[2].Value -eq 0) { $muets++ } }
-        $battent = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+ quantums=[1-9]')).Count
-        $panique = $texte -match 'KERNEL PANIC|DOUBLE FAULT|panicked at'
-        $v = Get-BouchaudVerdictQemu -JournalSerie $journal -JournalErreurs $erreurs
-        $accelProuve = if ($c.accel -eq 'tcg') { $v.accel_reel -eq 'TCG' } else { $v.accel_reel -eq 'materiel' }
-        $ok = (-not $panique) -and $accelProuve -and ($null -eq $v.vp_exit) -and $enLigne -eq $c.n -and ($c.n -eq 1 -or ($battent -ge $c.n -and $muets -eq 0)) -and $jalons.ContainsKey('SMP_NG2_SCHEDULER')
-        if ($AvecLadybird) { $ok = $ok -and $jalons.ContainsKey('BOUCHAUD_UI_FIRST_FRAME onglet=1') }
-        $ligne = [pscustomobject]@{
-            configuration = $conf; repetition = $r; ok = $ok; decouverte = $source; en_ligne = $enLigne
-            accel_reel = $v.accel_reel; signature = $v.signature; vp_exit = $v.vp_exit
-            sse41 = $(if ($v.isa) { $v.isa.sse41 } else { $null })
-            coeurs_qui_battent = $battent; coeurs_muets = $muets; panique = [bool]$panique
-            ordonnanceur_ms = $jalons['SMP_NG2_SCHEDULER']; bureau_ms = $jalons['bureau-premiere-trame']
-            ladybird_premiere_trame_ms = $jalons['BOUCHAUD_UI_FIRST_FRAME onglet=1']
-        }
+        $a = Get-BouchaudAnalyseRepetition -Serie (Read-BouchaudJournal $journal) -Erreurs (Read-BouchaudJournal $erreurs) `
+            -Accel $c.accel -N $c.n -Jalons $jalons -LadybirdStatut $Ladybird.statut -LadybirdRaison $Ladybird.raison
+        $ligne = [pscustomobject][ordered]@{ configuration = $conf; repetition = $r; journal = $journal; analyse = $a }
         $resultats += $ligne
-        Write-Host ("MESURE {0} #{1} ok={2} accel_reel={10} signature={11} vp_exit={12} decouverte={3} en_ligne={4} battent={5} muets={6} ordonnanceur_ms={7} bureau_ms={8} ladybird_ms={9}" -f `
-            $conf, $r, $ok, $source, $enLigne, $battent, $muets, $ligne.ordonnanceur_ms, $ligne.bureau_ms, $ligne.ladybird_premiere_trame_ms, $v.accel_reel, $v.signature, $v.vp_exit)
+        Write-Host ("MESURE {0} #{1} smp={2} accel_reel={3} signature={4} vp_exit={5} decouverte={6}/{7} en_ligne={8} battent={9} muets={10} ladybird={11} causes_smp=[{12}] causes_ladybird=[{13}]" -f `
+            $conf, $r, $a.smp.statut, $a.smp.accel_reel, $a.smp.signature, $a.smp.vp_exit, $a.smp.decouverts, $a.smp.source, $a.smp.en_ligne,
+            $a.smp.coeurs_qui_battent, $a.smp.coeurs_muets, $a.ladybird.statut, ($a.smp.causes -join ','), ($a.ladybird.causes -join ','))
+        Write-Host ("  demarrage hote->noyau={0} hote->ordonnanceur={1} hote->bureau={2} noyau->bureau(invite)={3} | navigation lancement->1re_trame={4} lancement->https={5} | presentation_us moy={6} pire={7} | cpu={8}% | serie={9} o" -f `
+            $a.demarrage.hote_jusqu_au_noyau_ms, $a.demarrage.hote_jusqu_a_l_ordonnanceur_ms, $a.demarrage.hote_jusqu_au_bureau_ms, $a.demarrage.noyau_jusqu_au_bureau_ms_invite,
+            $a.navigation.lancement_premiere_trame_ms, $a.navigation.lancement_document_https_ms, $a.composition.present_us_moy, $a.composition.present_us_pire,
+            $a.charge_cpu.occupation_pct, $a.octets_serie)
     }
+}
+}
+finally {
+    # La copie de banc du disque est grosse et jetable ; les journaux restent.
+    if ($Ladybird.chemin -and (Test-Path -LiteralPath $Ladybird.chemin)) { Remove-Item -LiteralPath $Ladybird.chemin -Force -ErrorAction SilentlyContinue }
 }
 if ($DryRun) { Remove-Item -Recurse -Force $Travail; return }
 
+function Resume-Mesure([object[]]$l, [scriptblock]$valeur) {
+    $v = @($l | ForEach-Object { & $valeur $_ } | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+    if ($v.Count) { return "{0} / {1} ({2})" -f (Quantile $v 0.5), (Quantile $v 0.95), $v.Count }
+    return 'n/m'
+}
+
 Write-Host ""
-Write-Host "| Configuration | OK | Ordonnanceur SMP p50 / p95 (ms) | Bureau p50 / p95 (ms) | Ladybird 1re trame p50 / p95 (ms) |"
-Write-Host "|---|---|---|---|---|"
-$qualifie = 0
+Write-Host "A -- Qualification WHPX/SMP (accelerateur reel, CPU decouverts, en ligne, battants, ordonnanceur, sans panique)"
+Write-Host "| Configuration | A OK | Ordonnanceur, hote p50 / p95 (n) ms | Causes |"
+Write-Host "|---|---|---|---|"
+$qualifieSmp = 0
 foreach ($conf in $Configurations) {
     $l = @($resultats | Where-Object configuration -eq $conf)
-    $okN = @($l | Where-Object ok).Count
-    $f = { param($cle) $v = @($l | Where-Object { $_.$cle } | ForEach-Object { [double]$_.$cle }); if ($v.Count) { "{0} / {1}" -f (Quantile $v 0.5), (Quantile $v 0.95) } else { 'n/m' } }
-    Write-Host ("| {0} | {1}/{2} | {3} | {4} | {5} |" -f $conf, $okN, $l.Count, (& $f 'ordonnanceur_ms'), (& $f 'bureau_ms'), (& $f 'ladybird_premiere_trame_ms'))
-    if ($conf -match '^whpx-smp(\d+)$' -and $okN -eq $l.Count -and $l.Count -ge 1) { $qualifie = [math]::Max($qualifie, [int]$Matches[1]) }
+    $okN = @($l | Where-Object { $_.analyse.smp.statut -eq 'OK' }).Count
+    $causes = (@($l | ForEach-Object { $_.analyse.smp.causes }) | Sort-Object -Unique) -join ', '
+    Write-Host ("| {0} | {1}/{2} | {3} | {4} |" -f $conf, $okN, $l.Count, (Resume-Mesure $l { $args[0].analyse.demarrage.hote_jusqu_a_l_ordonnanceur_ms }), $causes)
+    if ($conf -match '^whpx-smp(\d+)$' -and $okN -eq $l.Count -and $l.Count -ge 1) { $qualifieSmp = [math]::Max($qualifieSmp, [int]$Matches[1]) }
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $Racine 'target') | Out-Null
-$resultats | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Racine 'target\mesure-acceleration.json') -Encoding UTF8
-if ($qualifie -ge 1) {
-    [pscustomobject]@{ schema = 'bouchaud-whpx-qualification/1'; bootimage_sha256 = $Empreinte; smp_max_qualifie = $qualifie
-        irqchip = $WhpxIrqchip; repetitions = $Repetitions; date = (Get-Date).ToString('s'); environnement = 'WHPX (Windows Hypervisor Platform), cette machine' } |
-        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Racine 'target\whpx-qualification.json') -Encoding UTF8
-    Write-Host ("WHPX_QUALIFIE smp_max={0} irqchip={1} -> run.ps1 -Accel auto l'utilisera pour ce noyau" -f $qualifie, $WhpxIrqchip) -ForegroundColor Green
+
+Write-Host ""
+Write-Host "Demarrage (ms ; hote = temps mural depuis le lancement de QEMU, BIOS et chargeur compris ; invite = horloge du noyau)"
+Write-Host "| Configuration | hote -> noyau | noyau -> bureau (invite) | hote -> bureau |"
+Write-Host "|---|---|---|---|"
+foreach ($conf in $Configurations) {
+    $l = @($resultats | Where-Object configuration -eq $conf)
+    Write-Host ("| {0} | {1} | {2} | {3} |" -f $conf, (Resume-Mesure $l { $args[0].analyse.demarrage.hote_jusqu_au_noyau_ms }),
+        (Resume-Mesure $l { $args[0].analyse.demarrage.noyau_jusqu_au_bureau_ms_invite }), (Resume-Mesure $l { $args[0].analyse.demarrage.hote_jusqu_au_bureau_ms }))
+}
+
+$qualifieLb = 0
+Write-Host ""
+Write-Host ("B -- Ladybird ({0}) : lancement automatique, premiere trame, document HTTPS, separement" -f $Ladybird.statut)
+if ($Ladybird.statut -eq 'PRET') {
+    Write-Host "| Configuration | B OK | lancement -> 1re trame (ms) | lancement -> document HTTPS (ms) | presentation moy (us) | CPU occupe (%) | Causes |"
+    Write-Host "|---|---|---|---|---|---|---|"
+    foreach ($conf in $Configurations) {
+        $l = @($resultats | Where-Object configuration -eq $conf)
+        $okN = @($l | Where-Object { $_.analyse.ladybird.statut -eq 'OK' }).Count
+        $causes = (@($l | ForEach-Object { $_.analyse.ladybird.causes }) | Sort-Object -Unique) -join ', '
+        Write-Host ("| {0} | {1}/{2} | {3} | {4} | {5} | {6} | {7} |" -f $conf, $okN, $l.Count,
+            (Resume-Mesure $l { $args[0].analyse.navigation.lancement_premiere_trame_ms }), (Resume-Mesure $l { $args[0].analyse.navigation.lancement_document_https_ms }),
+            (Resume-Mesure $l { $args[0].analyse.composition.present_us_moy }), (Resume-Mesure $l { $args[0].analyse.charge_cpu.occupation_pct }), $causes)
+        $smpOk = @($l | Where-Object { $_.analyse.smp.statut -eq 'OK' }).Count
+        if ($conf -match '^whpx-smp(\d+)$' -and $okN -eq $l.Count -and $smpOk -eq $l.Count -and $l.Count -ge 1) { $qualifieLb = [math]::Max($qualifieLb, [int]$Matches[1]) }
+    }
 }
 else {
-    Remove-Item -LiteralPath (Join-Path $Racine 'target\whpx-qualification.json') -ErrorAction SilentlyContinue
-    Write-Host "WHPX_NON_QUALIFIE -> run.ps1 -Accel auto reste en TCG pour le SMP" -ForegroundColor Yellow
+    Write-Host ("LADYBIRD_{0} raison={1}" -f $Ladybird.statut, $Ladybird.raison) -ForegroundColor Yellow
 }
+Write-Host "Latence entree -> presentation : NON_MESURABLE (aucune entree injectee, -display none)."
+Write-Host "Comparabilite : meme bootimage, meme disque, meme memoire, meme -smp ; CPU differents (TCG : max ; WHPX : qemu64+SSE4) ;"
+Write-Host "  le temps hote inclut QEMU, le BIOS et le chargeur, que le noyau ne voit pas : comparer TCG et WHPX colonne par colonne."
+
+New-Item -ItemType Directory -Force -Path (Join-Path $Racine 'target') | Out-Null
+$resultats | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Racine 'target\mesure-acceleration.json') -Encoding UTF8
+$Preuve = Join-Path $Racine 'target\whpx-qualification.json'
+if ($qualifieSmp -ge 1) {
+    [pscustomobject][ordered]@{ schema = 'bouchaud-whpx-qualification/2'; bootimage_sha256 = $Empreinte; smp_max_qualifie = $qualifieSmp
+        ladybird_smp_max_qualifie = $qualifieLb; ladybird = $Ladybird.statut
+        irqchip = $WhpxIrqchip; repetitions = $Repetitions; date = (Get-Date).ToString('s'); environnement = 'WHPX (Windows Hypervisor Platform), cette machine' } |
+        ConvertTo-Json | Set-Content -LiteralPath $Preuve -Encoding UTF8
+    Write-Host ("WHPX_SMP_QUALIFIE smp_max={0} irqchip={1}" -f $qualifieSmp, $WhpxIrqchip) -ForegroundColor Green
+}
+else {
+    Remove-Item -LiteralPath $Preuve -ErrorAction SilentlyContinue
+    Write-Host "WHPX_SMP_NON_QUALIFIE" -ForegroundColor Yellow
+}
+if ($Ladybird.statut -ne 'PRET') { Write-Host ("LADYBIRD_WHPX_{0} raison={1}" -f $Ladybird.statut, $Ladybird.raison) -ForegroundColor Yellow }
+elseif ($qualifieLb -ge 1) { Write-Host ("LADYBIRD_WHPX_QUALIFIE smp_max={0} -> run.ps1 -Accel auto l'utilisera pour Ladybird SMP{0} et moins" -f $qualifieLb) -ForegroundColor Green }
+else { Write-Host "LADYBIRD_WHPX_NON_QUALIFIE -> run.ps1 -Accel auto reste en TCG pour Ladybird en SMP" -ForegroundColor Yellow }
+Write-Host ("bilan    : {0}" -f (Join-Path $Racine 'target\mesure-acceleration.json'))
 Write-Host "journaux : $Travail"

@@ -9,6 +9,7 @@ on:
       - tools/ci/test-ladybird-selector-v7.ps1
       - tools/windows/BouchaudQemu.psm1
       - tools/windows/Mesure-Acceleration.ps1
+      - tools/windows/disque-banc-ladybird.py
       - tools/ci/test-mesure-acceleration-windows.ps1
       - .github/workflows/ladybird-run-selector-v7.yml
 permissions:

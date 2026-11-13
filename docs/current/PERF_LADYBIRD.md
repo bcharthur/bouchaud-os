@@ -64,9 +64,64 @@ Dans les trois passages, après-simple est plus lent au démarrage et au lanceme
 
 | Sujet | État |
 |---|---|
-| WHPX SMP1, SMP2, SMP4 | **SMP2 : démarre** sous Windows (Ryzen 7 7800X3D, deux démarrages : bureau 4,3 et 4,5 s après le noyau, Ladybird fonctionnel) ; **non chronométré** par le banc. SMP1 et SMP4 : **NOT_RUN**. `-cpu max` sous WHPX arrêtait le processeur virtuel (code 4) : remplacé par `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt` (`BOUCHAUD_WHPX_CPU_V1`, voir [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)). Cause du « 1 seul CPU » corrigée : découverte par la MADT (`BOUCHAUD_SMP_MADT_V1`), démontrée sous TCG avec `-smp 4,sockets=4` (`main` : 1 CPU ; correctif : 4). À lancer sur Windows : `tools\windows\Mesure-Acceleration.ps1 -Repetitions 3`. |
+| WHPX SMP1, SMP2, SMP4 | Voir « WHPX sous Windows » ci-dessous : SMP **observé** sur 3 démarrages par configuration, **non qualifié** par le banc (faux rouge corrigé, à relancer) ; Ladybird sous le banc : **NOT_RUN**. |
 | Latence entrée → présentation, défilement, onglets, redimensionnement | non instrumentés dans le smoke |
 | KVM, Trigkey | non mesurés par ce banc |
+
+## WHPX sous Windows (`BOUCHAUD_WHPX_CPU_V1`)
+
+Machine de l'utilisateur : Windows, QEMU 11.0.50, Ryzen 7 7800X3D. Rien de cette section n'a été exécuté en CI ; la CI exécute le banc avec un faux QEMU.
+
+### Observé, banc `Mesure-Acceleration.ps1 -Repetitions 3 -AvecLadybird` (13/11, `main@8f246db`)
+
+| Configuration | CPU en ligne | Cœurs qui battent | Démarrages | Bureau, temps mural hôte |
+|---|---:|---:|---:|---|
+| TCG SMP1 | 1 | 1 | 3/3 | 12 à 15 s |
+| TCG SMP4 | 4 | 4 | 3/3 | 12 à 15 s |
+| WHPX SMP1 | 1 | 1 | 3/3 | 17 à 19 s |
+| WHPX SMP2 | 2 | 2 | 3/3 | 17 à 19 s |
+| WHPX SMP4 | 4 | 4 | 3/3 | 17 à 19 s |
+
+- Sous WHPX : signature `MicrosoftHv`, aucune `Unexpected VP exit`.
+- Verdict du banc : **15 sur 15 `ok=False`, `WHPX_NON_QUALIFIE`**. C'est un **faux rouge du protocole**, pas du système.
+  - Avec `-AvecLadybird`, le banc exigeait `BOUCHAUD_UI_FIRST_FRAME`.
+  - Mais il montait `ladybird-browser.img`, dont l'autorun normal n'exporte pas `BO_AUTOSTART_BROWSER` : le navigateur s'ouvre au double-clic. Sous `-display none`, personne ne clique.
+  - `ladybird_ms` est donc resté vide dans les 15 essais, TCG compris.
+- Avant cela, le banc s'arrêtait sur une `IOException` et laissait QEMU orphelin (corrigé par #316).
+
+Observé hors banc, avec `run.ps1 -Doom -Accel whpx -CpuCount 2` (deux démarrages, navigateur ouvert à la main) :
+
+- 2 CPU en ligne, bureau 4,3 et 4,5 s après `kernel-main` (horloge du noyau) ;
+- Ladybird : première trame, `document_charge url=https://example.com/` ;
+- aucune panique, aucun SIGILL.
+
+### Corrigé dans le banc
+
+Le banc rend deux qualifications indépendantes :
+
+- **A, WHPX/SMP** : accélérateur réel, CPU découverts, CPU en ligne, chaque cœur bat, ordonnanceur, aucune panique, aucune sortie de VP.
+  - En SMP1, le noyau mesure désormais aussi le battement : `BOUCHAUD_SMP_BATTEMENT cpu=0`. Avant, la preuve monocœur n'existait pas.
+- **B, Ladybird** : lancé sur une **copie de banc** du disque dont l'autorun exporte `BO_AUTOSTART_BROWSER=1`. Le disque d'origine et `scenario-m9` ne sont pas touchés.
+  - Le banc relève la première trame, puis, séparément, le document HTTPS chargé.
+  - Statuts : `OK`, `ECHEC` (avec cause), `NOT_RUN`, `NON_MESURABLE` (avec cause).
+- `run.ps1 -Accel auto` ne choisit WHPX pour Ladybird en SMP que si B est qualifié (`ladybird_smp_max_qualifie`).
+
+### Démarrage : 17 à 19 s (WHPX) contre 12 à 15 s (TCG), ce que cela dit et ne dit pas
+
+- Ces durées sont du **temps mural hôte** depuis le lancement de QEMU. Elles comprennent QEMU, le BIOS et le chargeur, que le noyau ne voit pas.
+- Hors banc, sous WHPX, le noyau compte 4,3 à 4,5 s de `kernel-main` au bureau. L'essentiel de l'écart se situe donc hors de l'horloge du noyau, ou dans une configuration différente : 8 Gio et 2 CPU hors banc, contre 4 Gio dans le banc.
+- **Non établi.** Pistes à mesurer, toutes des sorties de VM vers QEMU, coûteuses sous WHPX et gratuites sous TCG :
+  - lectures disque du chargeur en mode réel via le BIOS ;
+  - chaque octet écrit sur le port série : le journal fait environ 1 Mo ;
+  - l'APIC émulé dans QEMU (`kernel-irqchip=off`).
+- Le banc sépare désormais :
+  - **démarrage** : hôte → noyau, noyau → bureau (horloge de l'invité), hôte → bureau ;
+  - **navigation** : lancement → première trame, lancement → document HTTPS ;
+  - **composition** : `[LB:PERF]` ;
+  - **charge CPU** : `[PROC-STAT]` ;
+  - **latence d'entrée** : `NON_MESURABLE`, aucune entrée injectée.
+- **Rien ne permet de dire que WHPX est plus rapide ou plus lent en usage interactif** : rien n'a été mesuré.
+- Les deux environnements ne sont pas directement comparables : CPU différents (TCG `max`, WHPX `qemu64` + SSE4), et un temps hôte incluant des phases que TCG et WHPX traitent très différemment.
 
 ## HTTPS de Ladybird (`BOUCHAUD_CA_COMPLET_V2`)
 
