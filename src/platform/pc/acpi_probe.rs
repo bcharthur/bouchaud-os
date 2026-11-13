@@ -206,7 +206,42 @@ unsafe fn parse_mcfg(table: u64) -> Vec<McfgEntry> {
 }
 
 pub fn probe(boot: &BootInfo) -> Summary {
-    let Some(rsdp) = boot.rsdp_address else {
+    probe_rsdp(boot.rsdp_address)
+}
+
+/// BOUCHAUD_SMP_MADT_V1 -- le RSDP d'un amorcage BIOS : le chargeur 0.9 ne le
+/// transmet pas. Recherche de la specification ACPI (5.2.5.1) : le premier
+/// Kio de l'EBDA, puis 0xE0000..0xFFFFF, sur des frontieres de 16 octets,
+/// signature ET somme des 20 premiers octets. Lecture seule.
+pub fn rsdp_bios() -> Option<u64> {
+    unsafe {
+        let ebda = (read16(0x40E) as u64) << 4;
+        let mut zones: [(u64, u64); 2] = [(0xE0000, 0x100000), (0, 0)];
+        if (0x80000..0xA0000).contains(&ebda) { zones = [(ebda, ebda + 1024), (0xE0000, 0x100000)]; }
+        for (debut, fin) in zones {
+            let mut p = debut;
+            while p + 20 <= fin {
+                if read64(p) == u64::from_le_bytes(*b"RSD PTR ") && checksum_ok(p, 20) {
+                    return Some(p);
+                }
+                p += 16;
+            }
+        }
+    }
+    None
+}
+
+/// Le RSDP de cet amorcage : transmis par UEFI, ou cherche en memoire BIOS.
+pub fn rsdp(boot: &BootInfo) -> Option<u64> {
+    match boot.rsdp_address {
+        Some(r) => Some(r),
+        None if boot.firmware == crate::boot::FirmwareKind::LegacyBios => rsdp_bios(),
+        None => None,
+    }
+}
+
+fn probe_rsdp(rsdp: Option<u64>) -> Summary {
+    let Some(rsdp) = rsdp else {
         return Summary::absent(None);
     };
 
@@ -268,5 +303,53 @@ pub fn probe(boot: &BootInfo) -> Summary {
             }
         }
         summary
+    }
+}
+
+/// BOUCHAUD_SMP_MADT_V1 -- les processeurs que le micrologiciel DECLARE
+/// (MADT, entrees Local APIC et x2APIC « Enabled »).
+///
+/// `CPUID.1:EBX[23:16]` n'est PAS un nombre de processeurs : c'est le nombre
+/// maximal d'identifiants logiques adressables dans UN boitier. Il vaut 1 sous
+/// WHPX (Hyper-V le fixe), 1 sous QEMU `-smp N,sockets=N`, et sur un vrai
+/// multi-socket ; il peut DEPASSER le nombre reel de coeurs sur un processeur
+/// grand public. La MADT est la liste que l'OS doit demarrer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcesseursMadt {
+    /// Entrees Local APIC / x2APIC avec le bit Enabled.
+    pub actifs: usize,
+    /// Entrees seulement « Online Capable » (branchables plus tard) : comptees
+    /// a part, jamais demarrees a l'amorcage.
+    pub branchables: usize,
+}
+
+pub fn processeurs_madt(boot: &BootInfo) -> Option<ProcesseursMadt> {
+    let summary = probe_rsdp(rsdp(boot));
+    let table = summary.madt_address?;
+    unsafe {
+        let len = sdt_length(table)?;
+        if !checksum_ok(table, len) { return None; }
+        let mut out = ProcesseursMadt::default();
+        let mut vus: [u32; 64] = [u32::MAX; 64];
+        let mut n_vus = 0usize;
+        let mut offset = SDT_HEADER_LEN + 8;
+        while offset + 2 <= len {
+            let p = table + offset as u64;
+            let kind = read8(p);
+            let entry_len = read8(p + 1) as usize;
+            if entry_len < 2 || offset + entry_len > len { break; }
+            let (id, flags) = match (kind, entry_len) {
+                (0, l) if l >= 8 => (read8(p + 3) as u32, read32(p + 4)),
+                (9, l) if l >= 16 => (read32(p + 4), read32(p + 8)),
+                _ => { offset += entry_len; continue; }
+            };
+            // Une meme unite decrite deux fois (Local APIC et x2APIC) ne compte qu'une fois.
+            if !vus[..n_vus].contains(&id) {
+                if n_vus < vus.len() { vus[n_vus] = id; n_vus += 1; }
+                if flags & 1 != 0 { out.actifs += 1; } else if flags & 2 != 0 { out.branchables += 1; }
+            }
+            offset += entry_len;
+        }
+        Some(out)
     }
 }

@@ -118,6 +118,19 @@ const TRAMPOLINE: [u8; 174] = [
 ];
 
 static DISCOVERED: AtomicUsize = AtomicUsize::new(1);
+/// BOUCHAUD_SMP_MADT_V1 : processeurs actifs declares par la MADT (0 : pas de
+/// MADT lisible ; la decouverte retombe alors sur CPUID).
+static MADT_ACTIFS: AtomicUsize = AtomicUsize::new(0);
+static MADT_BRANCHABLES: AtomicUsize = AtomicUsize::new(0);
+
+/// Releve la MADT AVANT `init_probe` (les tables ACPI sont lues pendant que la
+/// pagination est prete et que rien n'a encore d'effet de bord).
+pub fn note_madt(boot: &crate::boot::BootInfo) {
+    if let Some(m) = crate::platform::pc::acpi_probe::processeurs_madt(boot) {
+        MADT_ACTIFS.store(m.actifs, Ordering::Release);
+        MADT_BRANCHABLES.store(m.branchables, Ordering::Release);
+    }
+}
 static ONLINE_CPUS: AtomicUsize = AtomicUsize::new(1);
 static ONLINE_MASK: AtomicUsize = AtomicUsize::new(1);
 static SCHEDULER_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1649,11 +1662,20 @@ pub fn init_probe() {
     let bsp = cpu_local::register_bsp();
     cpu_local::mark_online(bsp, true);
 
-    let exposed = (((__cpuid(1).ebx >> 16) & 0xff) as usize)
-        .max(1)
-        .min(MAX_CPUS);
+    // BOUCHAUD_SMP_MADT_V1 : la MADT d'abord, CPUID en repli seulement.
+    // CPUID.1:EBX[23:16] n'est pas un nombre de processeurs (voir
+    // acpi_probe::processeurs_madt) : sous WHPX il vaut 1 avec quatre vCPU,
+    // et le noyau ne demarrait aucun AP (« SMP4_DISCOVERED count=1 »).
+    let cpuid_logiques = ((__cpuid(1).ebx >> 16) & 0xff) as usize;
+    let madt = MADT_ACTIFS.load(Ordering::Acquire);
+    let (brut, source) = if madt >= 1 { (madt, "madt") } else { (cpuid_logiques, "cpuid") };
+    let exposed = brut.max(1).min(MAX_CPUS);
     DISCOVERED.store(exposed, Ordering::Release);
     dmesg::log_fmt(format_args!("SMP4_DISCOVERED count={}", exposed));
+    crate::serial_println!(
+        "BOUCHAUD_SMP_DECOUVERTE count={} source={} madt_actifs={} madt_branchables={} cpuid_logiques={} plafond={}",
+        exposed, source, madt, MADT_BRANCHABLES.load(Ordering::Acquire), cpuid_logiques, MAX_CPUS,
+    );
 
     if exposed <= 1 {
         dmesg::log("SMP4_AP_STARTED count=0 reason=single-vcpu");
