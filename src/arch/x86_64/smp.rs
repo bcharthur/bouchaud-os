@@ -1661,6 +1661,8 @@ pub fn init_probe() {
     // CpuId 0 is always the BSP; APIC IDs are stored as hardware metadata.
     let bsp = cpu_local::register_bsp();
     cpu_local::mark_online(bsp, true);
+    // BOUCHAUD_CPU_ISA_V1 : le CPUID vu par l'invite, avant tout choix SMP.
+    crate::arch::x86_64::cpu::publie_isa();
 
     // BOUCHAUD_SMP_MADT_V1 : la MADT d'abord, CPUID en repli seulement.
     // CPUID.1:EBX[23:16] n'est pas un nombre de processeurs (voir

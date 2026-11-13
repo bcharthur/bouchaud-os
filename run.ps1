@@ -81,11 +81,12 @@ param(
     # Muet    : "none"
     [string]$Audio = "dsound",
 
-    # Acceleration QEMU.
+    # Acceleration QEMU (BOUCHAUD_WHPX_CPU_V1).
     #
     # auto :
-    #   WHPX puis fallback TCG.
-    #
+    #   WHPX ; si QEMU ne peut pas initialiser WHPX, relance ANNONCEE en TCG.
+    #   Ladybird en SMP : TCG tant que WHPX SMPn n'est pas qualifie.
+    # whpx : WHPX seul, sans repli. tcg : TCG seul.
     # none :
     #   pas d'acceleration explicite.
     [string]$Accel = "auto",
@@ -129,6 +130,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = $PSScriptRoot
+# BOUCHAUD_WHPX_CPU_V1 : modele CPU par accelerateur, lancement journalise,
+# verdict lu dans les journaux (tools\windows\BouchaudQemu.psm1).
+Import-Module (Join-Path $RepoRoot 'tools\windows\BouchaudQemu.psm1') -Force
 # The default Windows DirectSound capture driver is unavailable on some hosts.
 # Unless explicitly overridden, -Doom opts into QEMU's safe silent backend.
 if ($Doom -and -not $PSBoundParameters.ContainsKey('Audio')) { $Audio = 'none' }
@@ -1351,9 +1355,17 @@ if ($Gate0SerialPort -gt 0) {
     ) -ForegroundColor Yellow
 }
 else {
+    # BOUCHAUD_WHPX_CPU_V1 : la serie reste sur la console ET est copiee dans
+    # un journal (diagnostic apres coup, verdict de l'accelerateur reel).
+    $JournauxQemu = Join-Path $RepoRoot "target\journaux-qemu"
+    New-Item -ItemType Directory -Force -Path $JournauxQemu | Out-Null
+    $Horodatage = Get-Date -Format "yyyyMMdd-HHmmss"
+    $JournalSerie = Join-Path $JournauxQemu "$Horodatage-serie.log"
     $qemuArgs += @(
+        "-chardev",
+        ("stdio,id=serie0,logfile={0}" -f ($JournalSerie -replace ',', ',,')),
         "-serial",
-        "stdio"
+        "chardev:serie0"
     )
 }
 
@@ -1401,85 +1413,31 @@ else {
 # Acceleration QEMU
 # =============================================================================
 
-if ($Accel -ne "none") {
-
-    if ($Accel -eq "auto") {
-
-        # BOUCHAUD_PERF_V1 : WHPX en SMP seulement si CETTE machine l'a prouve
-        # pour CE noyau (tools\windows\Mesure-Acceleration.ps1 ecrit la preuve,
-        # liee a l'empreinte du bootimage). Pas de preuve : TCG, comme avant.
-        $WhpxQualifie = $false
-        $Preuve = Join-Path $RepoRoot "target\whpx-qualification.json"
-        if ($LadybirdMode -and $CpuCount -gt 1 -and (Test-Path -LiteralPath $Preuve)) {
-            try {
-                $q = Get-Content -LiteralPath $Preuve -Raw | ConvertFrom-Json
-                $empreinte = (Get-FileHash -LiteralPath $BootImage -Algorithm SHA256).Hash.ToLower()
-                if ($q.bootimage_sha256 -eq $empreinte -and [int]$q.smp_max_qualifie -ge $CpuCount -and $q.irqchip -eq $WhpxIrqchip) {
-                    $WhpxQualifie = $true
-                }
-            }
-            catch { $WhpxQualifie = $false }
-        }
-
-        if ($WhpxQualifie) {
-            Write-Host ("accel      : WHPX SMP{0} (qualifie sur cette machine pour ce noyau : {1})" -f $CpuCount, $Preuve) `
-                -ForegroundColor Green
-            $qemuArgs += @("-accel", "whpx,kernel-irqchip=$WhpxIrqchip", "-cpu", "max")
-        }
-        elseif ($LadybirdMode -and $CpuCount -gt 1) {
-            Write-Host "accel      : WHPX non qualifie en SMP pour ce noyau -> tools\windows\Mesure-Acceleration.ps1" `
-                -ForegroundColor DarkGray
-            # TCG force pour SMP : le run local WHPX avec `-smp 4` a expose
-            # seulement un CPU au probe (`SMP4_DISCOVERED count=1`), alors que
-            # le meme bring-up est prouve sous TCG en CI. On privilegie donc
-            # la correction du test SMP tant que le chemin APIC/WHPX n'est pas
-            # valide. `-Accel whpx` reste disponible explicitement.
-            Write-Host `
-                "accel      : TCG force pour SMP ($CpuCount vCPU)" `
-                -ForegroundColor Yellow
-
-            # LADYBIRD_TCG_CPU_MAX
-            # Les runtimes Ladybird construits utilisent notamment SSE4.1
-            # (`roundsd`). Le CPU TCG implicite n'est pas un contrat suffisant.
-            $qemuArgs += @(
-                "-accel",
-                "tcg",
-                "-cpu",
-                "max"
-            )
-        }
-        else {
-            # Windows Hypervisor Platform, avec fallback TCG. `-cpu max` : sans
-            # lui, WHPX expose le modele qemu64 -- sans SSE4.1, que les
-            # runtimes Ladybird exigent (`roundsd`).
-            $qemuArgs += @(
-                "-accel",
-                "whpx,kernel-irqchip=$WhpxIrqchip",
-
-                "-accel",
-                "tcg"
-            )
-            if ($LadybirdMode) { $qemuArgs += @("-cpu", "max") }
+# BOUCHAUD_WHPX_CPU_V1 : un modele CPU par accelerateur (TCG : max ; WHPX :
+# qemu64 + SSSE3/SSE4.1/SSE4.2/POPCNT, sans MPX ni APX), aucun repli TCG
+# silencieux. Le pourquoi est dans tools\windows\BouchaudQemu.psm1.
+# BOUCHAUD_PERF_V1 : WHPX en SMP pour Ladybird seulement si CETTE machine l'a
+# prouve pour CE noyau (tools\windows\Mesure-Acceleration.ps1 ecrit la
+# preuve, liee a l'empreinte du bootimage et a l'irqchip).
+$WhpxQualifie = $false
+$Preuve = Join-Path $RepoRoot "target\whpx-qualification.json"
+if ($Accel -eq "auto" -and $LadybirdMode -and $CpuCount -gt 1 -and (Test-Path -LiteralPath $Preuve)) {
+    try {
+        $q = Get-Content -LiteralPath $Preuve -Raw | ConvertFrom-Json
+        $empreinte = (Get-FileHash -LiteralPath $BootImage -Algorithm SHA256).Hash.ToLower()
+        if ($q.bootimage_sha256 -eq $empreinte -and [int]$q.smp_max_qualifie -ge $CpuCount -and $q.irqchip -eq $WhpxIrqchip) {
+            $WhpxQualifie = $true
         }
     }
-    else {
-
-        $qemuArgs += @(
-            "-accel",
-            $(if ($Accel -eq "whpx") { "whpx,kernel-irqchip=$WhpxIrqchip" } else { $Accel })
-        )
-        if ($LadybirdMode -and $Accel -eq "whpx") { $qemuArgs += @("-cpu", "max") }
-
-        # Un -Accel tcg explicite doit offrir le meme jeu d'instructions que
-        # le chemin TCG force ci-dessus.
-        if ($LadybirdMode -and $Accel -eq "tcg") {
-            $qemuArgs += @(
-                "-cpu",
-                "max"
-            )
-        }
-    }
+    catch { $WhpxQualifie = $false }
 }
+$Acceleration = Get-BouchaudAccelQemu -Accel $Accel -CpuCount $CpuCount -Ladybird ([bool]$LadybirdMode) `
+    -WhpxIrqchip $WhpxIrqchip -WhpxQualifie $WhpxQualifie
+Write-Host ("accel      : {0}" -f $Acceleration.libelle) `
+    -ForegroundColor $(if ($Acceleration.accel -eq "whpx") { "Green" } else { "Yellow" })
+$IndexAccel = $qemuArgs.Count
+$NbAccel = @($Acceleration.arguments).Count
+$qemuArgs += $Acceleration.arguments
 
 
 # =============================================================================
@@ -1656,8 +1614,38 @@ if ($UseLocalM9Fixture) {
 }
 
 try {
-    & $QemuExe @qemuArgs
-    $QemuExitCode = $LASTEXITCODE
+    # BOUCHAUD_WHPX_CPU_V1 : stderr de QEMU recopie en direct ET journalise.
+    if (-not $JournauxQemu) {
+        $JournauxQemu = Join-Path $RepoRoot "target\journaux-qemu"
+        New-Item -ItemType Directory -Force -Path $JournauxQemu | Out-Null
+        $Horodatage = Get-Date -Format "yyyyMMdd-HHmmss"
+    }
+    $JournalErreurs = Join-Path $JournauxQemu "$Horodatage-qemu.log"
+    $QemuExitCode = Invoke-BouchaudQemu -Exe $QemuExe -Arguments $qemuArgs -JournalErreurs $JournalErreurs
+    $Verdict = Get-BouchaudVerdictQemu -JournalSerie $JournalSerie -JournalErreurs $JournalErreurs
+
+    # `auto` : WHPX ne s'est pas initialise (rien n'a demarre) -> relance en
+    # TCG, ANNONCEE comme telle. Un echec en cours de route (VP exit) n'est
+    # jamais masque par une relance.
+    if ($Acceleration.repli_tcg_explicite -and $Verdict.whpx_indisponible -and -not $Verdict.noyau) {
+        Write-Host ""
+        Write-Host "accel      : WHPX indisponible sur cette machine -> relance en TCG (ce demarrage sera TCG, pas WHPX)" `
+            -ForegroundColor Yellow
+        $Acceleration = Get-BouchaudAccelQemu -Accel "tcg" -CpuCount $CpuCount -Ladybird ([bool]$LadybirdMode)
+        $avant = if ($IndexAccel -gt 0) { @($qemuArgs[0..($IndexAccel - 1)]) } else { @() }
+        $apres = @($qemuArgs | Select-Object -Skip ($IndexAccel + $NbAccel))
+        $qemuArgs = $avant + $Acceleration.arguments + $apres
+        if ($JournalSerie) {
+            $JournalSerie = $JournalSerie -replace '-serie\.log$', '-serie-tcg.log'
+            $qemuArgs = @($qemuArgs | ForEach-Object { if ($_ -like 'stdio,id=serie0,logfile=*') { "stdio,id=serie0,logfile={0}" -f ($JournalSerie -replace ',', ',,') } else { $_ } })
+        }
+        $JournalErreurs = $JournalErreurs -replace '-qemu\.log$', '-qemu-tcg.log'
+        $QemuExitCode = Invoke-BouchaudQemu -Exe $QemuExe -Arguments $qemuArgs -JournalErreurs $JournalErreurs
+        $Verdict = Get-BouchaudVerdictQemu -JournalSerie $JournalSerie -JournalErreurs $JournalErreurs
+    }
+    $CodeVerdict = Write-BouchaudVerdictQemu -Verdict $Verdict -AccelDemande $Acceleration.accel `
+        -JournalSerie $JournalSerie -JournalErreurs $JournalErreurs
+    if ($QemuExitCode -eq 0 -and $CodeVerdict -ne 0) { $QemuExitCode = $CodeVerdict }
 }
 finally {
     if ($FixtureProcess -and -not $FixtureProcess.HasExited) {

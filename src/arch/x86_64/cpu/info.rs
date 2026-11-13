@@ -112,3 +112,71 @@ pub fn fils_par_coeur() -> Option<usize> {
 pub fn fils_par_coeur() -> Option<usize> {
     None
 }
+
+/// BOUCHAUD_CPU_ISA_V1 : ce que le CPUID montre REELLEMENT a l'invite, une
+/// ligne, une fois, au demarrage (avant le SMP).
+///
+/// - `hyperviseur=` : la signature de la feuille 0x4000_0000 (QEMU TCG publie
+///   `TCGTCGTCGTCG`, KVM `KVMKVMKVM`, QEMU sous WHPX `VMwareVMware` ou
+///   `KVMKVMKVM` selon `vmware-cpuid-freq`). `aucun` si CPUID.1:ECX[31] est
+///   nul. run.ps1 s'en sert pour ne jamais presenter un demarrage TCG comme
+///   un demarrage WHPX.
+/// - les bits d'ISA : sous TCG, une instruction dont le bit est nul leve #UD ;
+///   sous accelerateur materiel (WHPX, KVM), SSE4.1/SSE4.2/POPCNT s'executent
+///   meme si le modele CPU les masque -- seul le code qui choisit sa variante
+///   par CPUID en est affecte.
+/// - `mpx=` / `apxf=` : les deux ensemble sont la configuration que QEMU juge
+///   incompatible (`-cpu max` sous un WHPX qui ne filtre pas les fonctions).
+#[cfg(target_arch = "x86_64")]
+pub fn publie_isa() {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let b = |v: u32, i: u32| (v >> i) & 1;
+    let max = unsafe { __cpuid(0) }.eax;
+    let l1 = unsafe { __cpuid(1) };
+    let (l7b, l7c, l71d) = if max >= 7 {
+        let l7 = unsafe { __cpuid_count(7, 0) };
+        let sous = l7.eax;
+        let l71 = if sous >= 1 { unsafe { __cpuid_count(7, 1) }.edx } else { 0 };
+        (l7.ebx, l7.ecx, l71)
+    } else {
+        (0, 0, 0)
+    };
+    let mut sig = [0u8; 12];
+    let mut sig_len = 0;
+    if b(l1.ecx, 31) == 1 {
+        let s = unsafe { __cpuid(0x4000_0000) };
+        for mot in [s.ebx, s.ecx, s.edx] {
+            for o in mot.to_le_bytes() {
+                if o.is_ascii_graphic() {
+                    sig[sig_len] = o;
+                    sig_len += 1;
+                }
+            }
+        }
+    }
+    let sig = match core::str::from_utf8(&sig[..sig_len]) {
+        Ok(s) if !s.is_empty() => s,
+        _ if b(l1.ecx, 31) == 1 => "illisible",
+        _ => "aucun",
+    };
+    let v = vendor();
+    let fournisseur = core::str::from_utf8(&v).unwrap_or("?");
+    crate::serial_println!(
+        "BOUCHAUD_CPU_ISA hyperviseur={} fournisseur={} sse3={} ssse3={} sse41={} sse42={} popcnt={} xsave={} osxsave={} avx={} avx2={} avx512f={} mpx={} apxf={} la57={}",
+        sig,
+        fournisseur,
+        b(l1.ecx, 0),
+        b(l1.ecx, 9),
+        b(l1.ecx, 19),
+        b(l1.ecx, 20),
+        b(l1.ecx, 23),
+        b(l1.ecx, 26),
+        b(l1.ecx, 27),
+        b(l1.ecx, 28),
+        b(l7b, 5),
+        b(l7b, 16),
+        b(l7b, 14),
+        b(l71d, 21),
+        b(l7c, 16),
+    );
+}
