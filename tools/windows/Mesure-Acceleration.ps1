@@ -94,25 +94,32 @@ foreach ($conf in $Configurations) {
         if ($DryRun) { Write-Host ("PLAN {0} #{1} : {2} {3}" -f $conf, $r, $Qemu, ($c.args -join ' ')); continue }
         $chrono = [System.Diagnostics.Stopwatch]::StartNew()
         $erreurs = "$journal.qemu"
-        $p = Start-Process -FilePath $Qemu -ArgumentList (ConvertTo-BouchaudLigneArguments $c.args) -PassThru -NoNewWindow -RedirectStandardError $erreurs
         $jalons = @{}
         $attendus = @('SMP_NG2_SCHEDULER')
         if ($AvecLadybird) { $attendus += @('bureau-premiere-trame', 'BOUCHAUD_UI_FIRST_FRAME onglet=1') }
-        while ($chrono.Elapsed.TotalSeconds -lt $DelaiS -and -not $p.HasExited) {
-            Start-Sleep -Milliseconds 250
-            $texte = if (Test-Path $journal) { [System.IO.File]::ReadAllText($journal) } else { '' }
-            foreach ($j in $attendus) {
-                if (-not $jalons.ContainsKey($j) -and $texte.Contains($j)) { $jalons[$j] = [math]::Round($chrono.Elapsed.TotalMilliseconds) }
+        $p = $null
+        # QEMU n'est JAMAIS laisse orphelin (erreur, Ctrl+C) : un QEMU restant
+        # garde le bootimage ouvert et `cargo bootimage` echoue ensuite
+        # (llvm-objcopy : Permission denied, constate sous Windows).
+        try {
+            $p = Start-Process -FilePath $Qemu -ArgumentList (ConvertTo-BouchaudLigneArguments $c.args) -PassThru -NoNewWindow -RedirectStandardError $erreurs
+            while ($chrono.Elapsed.TotalSeconds -lt $DelaiS -and -not $p.HasExited) {
+                Start-Sleep -Milliseconds 250
+                $texte = Read-BouchaudJournal $journal
+                foreach ($j in $attendus) {
+                    if (-not $jalons.ContainsKey($j) -and $texte.Contains($j)) { $jalons[$j] = [math]::Round($chrono.Elapsed.TotalMilliseconds) }
+                }
+                if ($texte -match 'KERNEL PANIC') { break }
+                # Sortie de VP WHPX : QEMU met la VM en pause et reste vivant.
+                if ((Read-BouchaudJournal $erreurs) -match 'WHPX: Unexpected VP exit') { break }
+                $battements = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+')).Count
+                if ($jalons.Count -eq $attendus.Count -and ($battements -ge $c.n -or $c.n -eq 1)) { Start-Sleep -Seconds 2; break }
             }
-            if ($texte -match 'KERNEL PANIC') { break }
-            # Sortie de VP WHPX : QEMU met la VM en pause et reste vivant.
-            $err = try { if (Test-Path -LiteralPath $erreurs) { [System.IO.File]::ReadAllText($erreurs) } else { '' } } catch { '' }
-            if ($err -match 'WHPX: Unexpected VP exit') { break }
-            $battements = ([regex]::Matches($texte, 'BOUCHAUD_SMP_BATTEMENT cpu=\d+')).Count
-            if ($jalons.Count -eq $attendus.Count -and ($battements -ge $c.n -or $c.n -eq 1)) { Start-Sleep -Seconds 2; break }
         }
-        if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-        $texte = [regex]::Replace([System.IO.File]::ReadAllText($journal), "$([char]27)\[[0-9;]*m", '')
+        finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; $p.WaitForExit(10000) | Out-Null }
+        }
+        $texte = Read-BouchaudJournal $journal
         $enLigne = if ($texte -match 'BOUCHAUD_SMP_PHYSICAL_(GREEN|PARTIAL) online=(\d+)') { [int]$Matches[2] } elseif ($texte -match 'reason=single-vcpu') { 1 } else { 0 }
         $source = if ($texte -match 'BOUCHAUD_SMP_DECOUVERTE count=(\d+) source=(\w+)') { "$($Matches[1])/$($Matches[2])" } else { '?' }
         $muets = 0
@@ -149,6 +156,7 @@ foreach ($conf in $Configurations) {
     Write-Host ("| {0} | {1}/{2} | {3} | {4} | {5} |" -f $conf, $okN, $l.Count, (& $f 'ordonnanceur_ms'), (& $f 'bureau_ms'), (& $f 'ladybird_premiere_trame_ms'))
     if ($conf -match '^whpx-smp(\d+)$' -and $okN -eq $l.Count -and $l.Count -ge 1) { $qualifie = [math]::Max($qualifie, [int]$Matches[1]) }
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $Racine 'target') | Out-Null
 $resultats | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Racine 'target\mesure-acceleration.json') -Encoding UTF8
 if ($qualifie -ge 1) {
     [pscustomobject]@{ schema = 'bouchaud-whpx-qualification/1'; bootimage_sha256 = $Empreinte; smp_max_qualifie = $qualifie

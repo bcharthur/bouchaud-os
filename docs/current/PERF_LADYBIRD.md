@@ -64,7 +64,7 @@ Dans les trois passages, après-simple est plus lent au démarrage et au lanceme
 
 | Sujet | État |
 |---|---|
-| WHPX SMP1, SMP2, SMP4 | **NOT_RUN**. `-cpu max` sous WHPX arrêtait le processeur virtuel (code 4) : remplacé par `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt` (`BOUCHAUD_WHPX_CPU_V1`, voir [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)). Cause du « 1 seul CPU » corrigée : découverte par la MADT (`BOUCHAUD_SMP_MADT_V1`), démontrée sous TCG avec `-smp 4,sockets=4` (`main` : 1 CPU ; correctif : 4). À lancer sur Windows : `tools\windows\Mesure-Acceleration.ps1 -Repetitions 3`. |
+| WHPX SMP1, SMP2, SMP4 | **SMP2 : démarre** sous Windows (Ryzen 7 7800X3D, deux démarrages : bureau 4,3 et 4,5 s après le noyau, Ladybird fonctionnel) ; **non chronométré** par le banc. SMP1 et SMP4 : **NOT_RUN**. `-cpu max` sous WHPX arrêtait le processeur virtuel (code 4) : remplacé par `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt` (`BOUCHAUD_WHPX_CPU_V1`, voir [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)). Cause du « 1 seul CPU » corrigée : découverte par la MADT (`BOUCHAUD_SMP_MADT_V1`), démontrée sous TCG avec `-smp 4,sockets=4` (`main` : 1 CPU ; correctif : 4). À lancer sur Windows : `tools\windows\Mesure-Acceleration.ps1 -Repetitions 3`. |
 | Latence entrée → présentation, défilement, onglets, redimensionnement | non instrumentés dans le smoke |
 | KVM, Trigkey | non mesurés par ce banc |
 
