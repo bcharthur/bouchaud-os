@@ -762,6 +762,12 @@ static int system_mode(const struct bo_start *start)
     add_service("logd", "/bin/logd", -1);
     svc[2].critical = 1;
     svc[2].intake = 1;
+    /* BOUCHAUD_OTA_ANNEAU3_V1: the OTA agent (verify, download, stage for
+     * updated). NOT critical -- the health contract (v3) is unchanged: a
+     * system whose agent is absent or dead still boots healthy, it just stops
+     * fetching updates. No bootstrap capability beyond its control channel:
+     * it never installs (updated does, re-verified by the kernel). */
+    add_service("ota", "/bin/bo-ota", -1);
     bo_say("SERVICED_INSTALL_CAPABILITY");
     kv("present", install ? 1 : 0);
     bo_say("\n");

@@ -419,7 +419,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
 
     ETAPE.store(ETAPE_TLS, Ordering::Release);
     let t0 = crate::kernel::timer::monotonic_ms();
-    let session = crate::net::tls::handshake::connect(conn, HOTE);
+    let session = crate::net::tls::connecte(conn, HOTE);
     let ms = crate::kernel::timer::monotonic_ms().saturating_sub(t0);
     TLS_MS.store(ms, Ordering::Relaxed);
 
@@ -467,7 +467,7 @@ ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
         let request = b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Bouchaud-Internet-Proof/1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
         let sent = sess.send_app(request);
         HTTP_SENT.store(sent, Ordering::Relaxed);
-        if sent { sess.recv_http(1_000_000) } else { Vec::new() }
+        if sent { sess.recv_http(1_000_000, crate::net::http::is_complete) } else { Vec::new() }
     };
 
     let ms = crate::kernel::timer::monotonic_ms().saturating_sub(t0);

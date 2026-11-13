@@ -35,6 +35,9 @@ on:
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
       - 'tools/release/assemble_systeme.sh'
+      - 'tools/release/build_bo_ota.sh'
+      - 'userland/services/ota/**'
+      - 'system/tls-core/**'
       - 'tools/release/build_trigkey_ab_image.sh'
       - 'tools/release/test_livraison_qemu.py'
       - 'src/gui/window_manager.rs'
@@ -106,6 +109,9 @@ on:
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
       - 'tools/release/assemble_systeme.sh'
+      - 'tools/release/build_bo_ota.sh'
+      - 'userland/services/ota/**'
+      - 'system/tls-core/**'
       - 'tools/release/build_trigkey_ab_image.sh'
       - 'tools/release/test_livraison_qemu.py'
       - 'src/gui/window_manager.rs'

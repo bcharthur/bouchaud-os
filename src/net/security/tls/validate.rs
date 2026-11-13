@@ -13,15 +13,11 @@ pub struct ChainResult {
     pub detail: &'static str,
 }
 
-/// Convertit la date RTC courante en entier AAAAMMJJhhmmss.
-pub fn now_stamp() -> u64 {
-    let dt = crate::arch::x86_64::rtc::now_utc();
-    (dt.year as u64) * 10_000_000_000
-        + (dt.month as u64) * 100_000_000
-        + (dt.day as u64) * 1_000_000
-        + (dt.hour as u64) * 10_000
-        + (dt.minute as u64) * 100
-        + (dt.second as u64)
+/// Une date UTC en entier AAAAMMJJhhmmss, la forme que `validate` compare.
+/// L'horloge vient de l'hote (RTC du noyau, `clock_gettime` en anneau 3) :
+/// ce module n'en lit aucune (BOUCHAUD_TLS_PARTAGE_V1).
+pub fn stamp(year: u64, month: u64, day: u64, hour: u64, minute: u64, second: u64) -> u64 {
+    year * 10_000_000_000 + month * 100_000_000 + day * 1_000_000 + hour * 10_000 + minute * 100 + second
 }
 
 /// Valide la chaine `certs` (leaf en premier) pour `hostname` a l'instant `now`.

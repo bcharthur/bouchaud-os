@@ -33,6 +33,41 @@ pub mod rng;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// BOUCHAUD_TLS_PARTAGE_V1 -- la pile TLS est partagee avec l'anneau 3
+/// (`system/tls-core`, agent OTA) : les modules ci-dessus n'empruntent rien au
+/// noyau. Le noyau leur fournit son transport (TcpConn), son aleatoire et son
+/// horloge ici.
+impl handshake::Transport for crate::net::tcp::TcpConn {
+    fn fill(&mut self, want: usize) -> bool { crate::net::tcp::TcpConn::fill(self, want) }
+    fn rx(&self) -> &[u8] { &self.rx }
+    fn take(&mut self, n: usize) -> Vec<u8> { crate::net::tcp::TcpConn::take(self, n) }
+    fn send(&mut self, data: &[u8]) -> bool { crate::net::tcp::TcpConn::send(self, data) }
+    fn send_no_pump(&mut self, data: &[u8]) -> bool { crate::net::tcp::TcpConn::send_no_pump(self, data) }
+    fn etat(&self) -> handshake::EtatFlux {
+        handshake::EtatFlux { peer_fin: self.peer_fin, closed: self.closed, rst_seen: self.rst_seen, fin_seen: self.fin_seen }
+    }
+    fn close(&mut self) { crate::net::tcp::TcpConn::close(self) }
+}
+
+/// Une session TLS du noyau.
+pub type Session = handshake::Session<crate::net::tcp::TcpConn>;
+
+/// Date RTC courante, en AAAAMMJJhhmmss (`validate::stamp`).
+pub fn now_stamp() -> u64 {
+    let dt = crate::arch::x86_64::rtc::now_utc();
+    validate::stamp(dt.year as u64, dt.month as u64, dt.day as u64, dt.hour as u64, dt.minute as u64, dt.second as u64)
+}
+
+/// L'aleatoire et l'heure du noyau, pour un handshake.
+pub fn plateforme() -> handshake::Plateforme {
+    handshake::Plateforme { aleatoire: rng::fill, maintenant: now_stamp() }
+}
+
+/// Handshake client sur une connexion TCP du noyau.
+pub fn connecte(conn: crate::net::tcp::TcpConn, hostname: &str) -> Result<Session, &'static str> {
+    handshake::connect(conn, hostname, &plateforme())
+}
+
 /// Versions TLS.
 pub const TLS_1_2: u16 = 0x0303;
 pub const TLS_1_3: u16 = 0x0304;
@@ -161,11 +196,11 @@ pub fn https_fetch(hostname: &str, port: u16, path: &str) -> HttpsFetchResult {
 // lieu d'un seul par hote. On garde desormais plusieurs sessions vivantes en
 // parallele (une par hote:port recent), evincees en FIFO seulement si le pool
 // est plein. Mono-thread (boucle GUI).
-struct Pooled { host: String, port: u16, sess: handshake::Session }
+struct Pooled { host: String, port: u16, sess: Session }
 static mut HTTPS_POOL: Option<Vec<Pooled>> = None;
 const HTTPS_POOL_MAX: usize = 4;
 
-fn pool_take(host: &str, port: u16) -> Option<handshake::Session> {
+fn pool_take(host: &str, port: u16) -> Option<Session> {
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
         let pool = slot.as_mut()?;
@@ -176,7 +211,7 @@ fn pool_take(host: &str, port: u16) -> Option<handshake::Session> {
     None
 }
 
-fn pool_put(host: &str, port: u16, sess: handshake::Session) {
+fn pool_put(host: &str, port: u16, sess: Session) {
     use alloc::string::ToString;
     unsafe {
         let slot = &mut *core::ptr::addr_of_mut!(HTTPS_POOL);
@@ -256,7 +291,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str, exige_confiance: bool
         if !exige_confiance || confiance_ok(&sess.report) {
             let req = build_request(hostname, path);
             if sess.send_app(req.as_bytes()) {
-                let raw = sess.recv_http(8_000_000);
+                let raw = sess.recv_http(8_000_000, crate::net::http::is_complete);
                 if !raw.is_empty() && crate::net::http::is_complete(&raw) {
                     crate::dlog!(crate::diag::Cat::Net, "keep-alive HIT {} ({}o)", hostname, raw.len());
                     if sess.is_alive() && !wants_close(&raw) { pool_put(hostname, port, sess); }
@@ -286,7 +321,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str, exige_confiance: bool
         }
     };
 
-    let mut sess = match handshake::connect(conn, hostname) {
+    let mut sess = match connecte(conn, hostname) {
         Ok(s) => s,
         Err(e) => {
             banner.push(format!("handshake TLS echoue: {}", e));
@@ -346,7 +381,7 @@ fn https_fetch_once(hostname: &str, port: u16, path: &str, exige_confiance: bool
     ));
     // Lit une reponse HTTP complete (cadree) puis CONSERVE la session pour les
     // sous-ressources suivantes du meme hote, si le serveur garde la connexion.
-    let raw = sess.recv_http(8_000_000);
+    let raw = sess.recv_http(8_000_000, crate::net::http::is_complete);
     if !raw.is_empty() && crate::net::http::is_complete(&raw) && sess.is_alive() && !wants_close(&raw) {
         pool_put(hostname, port, sess);
     } else {

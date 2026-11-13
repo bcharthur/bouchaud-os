@@ -95,9 +95,18 @@ for rel in tracked:
         errors.append(f"{rel}: bloc PEM de cle privee commite")
     if re.search(r"(export\s+|^\s*)BOUCHAUD_(CLE_VERSION|CA_BANC)_DEV=", t, re.M) and rel.endswith((".sh", ".yml", ".yaml")):
         setters.append(rel)
+# BOUCHAUD_OTA_ANNEAU3_V1 : le test hote du TLS de l'agent OTA pose la CA de
+# banc pour construire l'agent de banc ; meme regle que le banc A/B : la CA
+# nait et meurt dans un repertoire temporaire.
+SETTERS_PERMIS = {"tools/ci/run_ab_rollback.sh", "tools/ci/test_bo_ota_tls.sh"}
 for rel in setters:
-    if rel != "tools/ci/run_ab_rollback.sh":
+    if rel not in SETTERS_PERMIS:
         errors.append(f"{rel}: pose BOUCHAUD_CLE_VERSION_DEV (seul le banc A/B le peut)")
+tls_agent = (ROOT / "tools/ci/test_bo_ota_tls.sh")
+if tls_agent.is_file():
+    t = tls_agent.read_text(encoding="utf-8")
+    if "T=$(mktemp -d)" not in t or 'rm -rf "$T"' not in t or "BOUCHAUD_CLE_VERSION_DEV" in t:
+        errors.append("tools/ci/test_bo_ota_tls.sh: la CA de banc doit naitre et mourir dans un repertoire temporaire (et aucune cle de version)")
 banc = (ROOT / "tools/ci/run_ab_rollback.sh").read_text(encoding="utf-8")
 if "CLES=$(mktemp -d)" not in banc or 'rm -rf "$TRAVAIL" "$CLES"' not in banc:
     errors.append("tools/ci/run_ab_rollback.sh: la cle de banc doit naitre et mourir dans un repertoire temporaire")
