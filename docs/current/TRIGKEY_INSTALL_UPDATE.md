@@ -127,25 +127,42 @@ Changements de comportement apportés par cette campagne :
 - **État relu sur STATE** au démarrage : le dernier téléchargement et la dernière vérification traversent les redémarrages, dans des bornes (32 champs, clés `[a-z0-9_]`).
 - **Ce qui n'existe pas encore** : la reprise **d'octets** à travers un redémarrage. Les parties vivent en RAM. Une coupure fait tout recommencer, et rien n'est jamais installé à partir d'un téléchargement incomplet.
 
-## Politique OTA vers l'anneau 3 (P4) : plan et blocage
+## Politique OTA en anneau 3 (P4, `BOUCHAUD_OTA_ANNEAU3_V1`)
 
-**Aujourd'hui.**
-- La **politique** tourne dans le noyau (`src/kernel/update/ota.rs`) : périodicité, HTTPS, reprise, consentement, fenêtre, historique.
-- **L'installation** est déjà en anneau 3 : `updated` est le seul détenteur de la capacité d'installation.
-- **L'autorité** reste dans le noyau, qui revérifie au `begin` et au `finish` : signature, matériel, anti-retour, empreinte, écriture du seul slot inactif, META, santé, rollback.
+**Fait (branche `claude/trigkey-ota-ring3`).** L'agent quitte le noyau.
 
-**Cible, par étapes** (les bancs `ota-*` restent la non-régression) :
-1. **Agent anneau 3**, processus Linux-compat statique (musl).
-   - Il a des sockets : `src/compat/linux/net.rs`, déjà utilisé par Ladybird.
-   - Il vérifie les sources, télécharge les parties dans `/update/` et écrit `pret`.
-   - Le noyau n'expose plus `fetch_document_confiance` à l'OTA.
-2. `bo-update` et l'état (`ota-etat`, `ota-historique`) passent à l'agent. Le noyau garde un journal d'autorité : refus, plancher, rollback.
-3. Le fil noyau `ota` est retiré.
+- **L'agent** : `/bin/bo-ota` (`userland/services/ota/`, Rust std, musl statique).
+  - C'est un service **non critique** de `serviced` ; le contrat de santé v3 est inchangé.
+  - Il fait ce que faisait le fil noyau `ota`, avec les mêmes lignes de journal :
+    - vérification signée et HTTPS strict ;
+    - parties avec reprise, préparation dans `/update/`, `pret generation=N` ;
+    - nouvel essai après un refus ;
+    - état et historique dans STATE.
+- **Le TLS** : la pile du **dépôt**, sans bibliothèque tierce. Le blocage « choix d'une pile TLS en anneau 3 » est donc levé sans import.
+  - `system/tls-core` compile les **fichiers** TLS du noyau (`#[path]`) : une correction s'applique aux deux dans le même commit, avec les mêmes racines.
+  - Le handshake est générique sur un `Transport` et une `Plateforme` (aléatoire, heure). `validate.rs` ne lit plus aucune horloge.
+- **Ce que le noyau garde** :
+  - **L'installation** : `updated` installe, et le noyau revérifie tout au `begin` et au `finish`.
+  - **Son état d'autorité**, publié en lecture seule et régénéré à chaque ouverture : `/proc/bouchaud/ota`. On y trouve les clés de confiance, l'anti-retour, les releases des slots, le candidat, les refus, le bail réseau, le consentement et les demandes de vérification.
+  - **Le redémarrage**. L'agent écrit `/update/redemarrage` ; le noyau ne le suit que si META porte un candidat, puis selon la politique ou le consentement.
+- **Conséquence** : un agent compromis peut gaspiller de la bande passante ou se taire. Il ne peut ni installer une image non signée, ni redescendre de version, ni redémarrer sans candidat vérifié.
 
-**Blocage.** Il faut une pile **TLS en anneau 3** pour l'agent, avec la même exigence de chaîne que `BOUCHAUD_TLS_CONFIANCE_V1`.
-- Le dépôt n'en a pas en dehors de Ladybird, qui embarque la sienne dans un artefact de 2 h de build.
-- Choisir et importer une bibliothèque tierce (licence, provenance, mises à jour de sécurité) est une **décision humaine**.
-- Rien n'a été importé.
+**Preuves.**
+- `tools/ci/test_bo_ota_tls.sh` (CI Fast) : la pile du noyau sur un socket Linux, contre de vrais serveurs TLS 1.3.
+  - CA de banc : acceptée, octets et empreinte exacts.
+  - CA inconnue et nom non couvert : refusés **avant** toute requête (le serveur n'en reçoit aucune).
+  - Serveur absent : refus de transport.
+- `ota-complet` en local, sous QEMU TCG : `A* B+ B=` et `AB_OTA_COMPLET_OK`.
+  - 24 parties en HTTPS strict depuis l'anneau 3 ;
+  - partie 5 coupée, puis reprise ;
+  - premier `finish` refusé volontairement, puis reproposé (génération 2) ;
+  - candidat, redémarrage décidé par le noyau, B commité, puis `a_jour`.
+- Les autres bancs `ota-*` sont qualifiés par la CI.
+
+**Reste à faire.**
+- Profil de sécurité dédié à l'agent. Il tourne aujourd'hui avec le profil `System` de `serviced`, comme les autres services.
+- Reprise d'octets d'un téléchargement à travers un redémarrage.
+- Chaîne TLS **réelle** de GitHub depuis l'anneau 3 : P11b, physique ; le proxy de la session intercepte TLS.
 
 ## Incident intermittent `ota-complet` (non résolu, surveillé)
 

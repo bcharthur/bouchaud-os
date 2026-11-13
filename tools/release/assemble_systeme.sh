@@ -8,6 +8,7 @@
 # certificats, polices, page d'accueil -- tools/reference/prepare-reference-ladybird.ps1)
 # plus ce qu'un systeme INSTALLE exige :
 #   bin/serviced healthd updated logd   superviseur et services critiques (sante, mise a jour, journal)
+#   bin/bo-ota                          agent OTA (anneau 3, service non critique)
 #   bin/composited                      compositeur ring 3 (disponible ; le bureau par defaut reste l'Atelier)
 #   doom, freedoom1.wad                 DOOM (doomgeneric epingle, Freedoom 0.13.0 verifie)
 #   bo-navigateur, usr/libexec/ladybird, usr/share/ladybird, etc/ssl/certs
@@ -45,6 +46,12 @@ SDK=userland/libs/bouchaud-sdk/build-program.sh
 for s in serviced healthd updated logd; do
   "$SDK" "$SORTIE/bin/$s" "userland/services/$s/$s.c"
 done
+# BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA (Rust, musl statique), JAMAIS avec la
+# CA de banc dans un systeme livre.
+if [ -n "${BOUCHAUD_CA_BANC_DEV:-}" ]; then
+  echo "SYSTEME_REFUS BOUCHAUD_CA_BANC_DEV pose : un systeme livre ne porte aucune CA de banc" >&2; exit 2
+fi
+tools/release/build_bo_ota.sh "$SORTIE/bin/bo-ota" >/dev/null
 
 # --- compositeur ring 3 ---------------------------------------------------------
 (cd userland/services/composited && OUT="$TRAVAIL/composited" bash ./build.sh >/dev/null)
@@ -84,7 +91,8 @@ chmod 755 "$SORTIE/bin/"* "$SORTIE/doom"
 printf 'version=%s\ncommit=%s\nsequence=%s\ncanal=stable\nmateriel=x86_64-uefi\n' \
   "$VERSION" "$COMMIT" "$SEQUENCE" > "$SORTIE/etc/bouchaud/version"
 cat > "$SORTIE/etc/bouchaud/ota.conf" <<EOF
-# BOUCHAUD_OTA_V1 -- agent de mise a jour (src/kernel/update/ota.rs).
+# BOUCHAUD_OTA_V1 -- agent de mise a jour (/bin/bo-ota, anneau 3 ; le noyau
+# garde l'autorite et le redemarrage : src/kernel/update/ota.rs).
 # Canal stable : la derniere release NON prerelease du depot, c'est-a-dire une
 # release promue testing -> stable (.github/workflows/release-trigkey.yml).
 canal=stable
@@ -97,7 +105,7 @@ EOF
 
 LIVRABLE=oui; [ "$LADYBIRD" = present ] || LIVRABLE=non
 {
-  printf 'services=serviced,healthd,updated,logd\ncomposited=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
+  printf 'services=serviced,healthd,updated,logd,ota\ncomposited=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
   printf 'ota=stable\nlivrable=%s\n' "$LIVRABLE"
 } > "$SORTIE/etc/bouchaud/composants"
 echo "SYSTEME_ASSEMBLE version=$VERSION commit=${COMMIT:0:12} sequence=$SEQUENCE ladybird=$LADYBIRD livrable=$LIVRABLE fichiers=$(find "$SORTIE" -type f | wc -l) octets=$(du -sb "$SORTIE" | cut -f1)"

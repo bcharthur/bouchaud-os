@@ -588,6 +588,11 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     if path == "/proc/self/fil" {
         return Some(FdKind::Instantane(Arc::new(proc_fil())));
     }
+    // BOUCHAUD_OTA_ANNEAU3_V1 : l'etat d'autorite des mises a jour, pour
+    // l'agent OTA en anneau 3 (lecture seule, regenere a chaque ouverture).
+    if path == "/proc/bouchaud/ota" {
+        return Some(FdKind::Instantane(Arc::new(crate::kernel::update::ota::instantane())));
+    }
     if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
         return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
     }

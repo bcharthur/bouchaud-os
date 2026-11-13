@@ -1,0 +1,16 @@
+[package]
+name = "bouchaud-tls"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "La pile TLS 1.3 du noyau Bouchaud, sans le noyau : memes sources, pour l'anneau 3 (agent OTA)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# BOUCHAUD_CA_BANC_V1 : memes regles que la feature du noyau -- jamais dans
+# `default`, jamais livree (tools/verifie-cle-dev.py).
+banc-ca-dev = []
+
+[dependencies]
