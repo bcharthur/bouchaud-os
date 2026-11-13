@@ -87,3 +87,6 @@ $vivants | Stop-Process -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue
 if ($echecs) { Write-Host "MESURE_ACCELERATION_WINDOWS_ECHEC echecs=$echecs"; exit 1 }
 Write-Host 'MESURE_ACCELERATION_WINDOWS_OK'
+# Code explicite : sans commande native, $LASTEXITCODE resterait $null et
+# l'etape (`if ($LASTEXITCODE -ne 0)`) echouerait sur un succes.
+exit 0
