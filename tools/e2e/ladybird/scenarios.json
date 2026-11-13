@@ -1,0 +1,152 @@
+{
+  "schema": "bouchaud-e2e-ladybird/1",
+  "description": "BOUCHAUD_E2E_LADYBIRD_V1 -- UNE definition des parcours, des criteres et des metriques, executee telle quelle par tous les adaptateurs (QEMU TCG, KVM, WHPX ; materiel plus tard). Les gestes passent par le chemin reel : souris PS/2 et clavier du moniteur QEMU -> pilotes du noyau -> gestionnaire de fenetres -> Atelier / Ladybird. Rien n'appelle le navigateur directement.",
+  "statuts": ["PASS", "FAIL", "NOT_RUN", "BLOCKED_EXTERNAL", "NON_MESURABLE"],
+  "scenarios": [
+    {
+      "id": "E2E-01",
+      "titre": "Demarrage complet : CPU, ordonnanceur, bureau Atelier",
+      "etapes": [
+        {"attend": "BOUCHAUD_CPU_ISA hyperviseur=", "delai_s": 240, "nom": "noyau"},
+        {"attend": "SMP_NG2_SCHEDULER online=", "delai_s": 240, "nom": "ordonnanceur"},
+        {"attend": "BOUCHAUD_SMP_BATTEMENT_BILAN battants=", "delai_s": 240, "nom": "battement"},
+        {"attend": "BOUCHAUD_ATELIER_DEMARRER fenetres=0 ", "delai_s": 420, "nom": "bureau"},
+        {"capture": "01-bureau"}
+      ],
+      "metriques": [
+        {"nom": "hote_jusqu_au_noyau_ms", "de": "lancement_qemu", "a": "noyau"},
+        {"nom": "hote_jusqu_au_bureau_ms", "de": "lancement_qemu", "a": "bureau"},
+        {"nom": "noyau_jusqu_au_bureau_ms_invite", "marqueur": "BOUCHAUD_BOOT_POINT bureau-premiere-trame t_ms=(\\d+)"}
+      ]
+    },
+    {
+      "id": "E2E-02",
+      "titre": "Ouverture du navigateur par le menu Demarrer, premiere trame, pixels utiles",
+      "requiert": ["E2E-01"],
+      "etapes": [
+        {"menu": "Ladybird", "nom": "clic_menu"},
+        {"attend": "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid=(?P<pid_navigateur>\\d+)", "delai_s": 120, "nom": "lance"},
+        {"attend": "BROWSER_HOST_START", "delai_s": 300, "nom": "browserhost"},
+        {"attend": "BOUCHAUD_ATELIER_CLIENT_PREMIERE_TRAME pid=${pid_navigateur} ", "delai_s": 600, "nom": "fenetre"},
+        {"attend": "BOUCHAUD_UI_FIRST_FRAME onglet=1", "delai_s": 600, "nom": "premiere_trame"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/accueil.html", "delai_s": 300, "nom": "accueil_charge"},
+        {"pause_s": 3},
+        {"capture": "02-navigateur", "couleur": "accueil", "min_px": 20000}
+      ],
+      "metriques": [
+        {"nom": "clic_jusqu_au_lancement_ms", "de": "clic_menu", "a": "lance"},
+        {"nom": "clic_jusqu_a_la_fenetre_ms", "de": "clic_menu", "a": "fenetre"},
+        {"nom": "clic_jusqu_a_la_premiere_trame_ms", "de": "clic_menu", "a": "premiere_trame"},
+        {"nom": "clic_jusqu_a_l_accueil_charge_ms", "de": "clic_menu", "a": "accueil_charge"}
+      ]
+    },
+    {
+      "id": "E2E-03",
+      "titre": "Navigation HTTPS reelle (example.com) et refus d'un certificat invalide",
+      "requiert": ["E2E-02"],
+      "externe": {"motif_blocage": "M9_RS_STATE id=\\d+ DNSLookup -> Error|RS_ECHEC url=https://example\\.com/? code=(6|7|28)\\b", "raison": "reseau externe injoignable depuis l'invite (DNS ou connexion)"},
+      "etapes": [
+        {"touches": ["ctrl-l"], "nom": "barre_adresse"},
+        {"tape": "https://example.com", "entree": true, "nom": "saisie"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=https://example\\.com/?", "delai_s": 180, "nom": "charge"},
+        {"absent": "RS_ECHEC url=https://example\\.com", "pendant_s": 1},
+        {"pause_s": 3},
+        {"capture": "03-example", "different_de": "02-navigateur"},
+        {"touches": ["ctrl-l"]},
+        {"tape": "https://expired.badssl.com", "entree": true, "nom": "saisie_invalide"},
+        {"attend": "RS_ECHEC url=https://expired\\.badssl\\.com/? code=60", "delai_s": 180, "nom": "refus"}
+      ],
+      "metriques": [
+        {"nom": "saisie_jusqu_au_document_https_ms", "de": "saisie", "a": "charge"}
+      ]
+    },
+    {
+      "id": "E2E-04",
+      "titre": "Recherche : site de reference deterministe (bloquant), puis Google reel (identifie)",
+      "requiert": ["E2E-02"],
+      "etapes": [
+        {"touches": ["ctrl-l"]},
+        {"tape": "${FIXTURE}/recherche.html", "entree": true, "nom": "saisie"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/recherche.html", "delai_s": 120, "nom": "formulaire"},
+        {"pause_s": 2},
+        {"tape": "bouchaud os navigateur", "entree": true, "nom": "requete"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/resultats\\?q=bouchaud\\+os\\+navigateur", "delai_s": 120, "nom": "resultats"},
+        {"fixture_vu": "/resultats", "q": "bouchaud os navigateur"},
+        {"pause_s": 2},
+        {"capture": "04-resultats", "couleur": "resultats", "min_px": 20000},
+        {"touches": ["ret"], "nom": "clic_resultat"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/article-1.html", "delai_s": 120, "nom": "article"},
+        {"touches": ["alt-left"], "nom": "retour"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/resultats\\?q=bouchaud\\+os\\+navigateur", "delai_s": 120, "nom": "revenu"},
+        {"touches": ["alt-right"], "nom": "avance"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/article-1.html", "delai_s": 120, "nom": "reavance"},
+        {"pause_s": 2},
+        {"capture": "04b-article", "couleur": "article-1", "min_px": 20000}
+      ],
+      "metriques": [
+        {"nom": "entree_jusqu_aux_resultats_ms", "de": "requete", "a": "resultats"},
+        {"nom": "lien_jusqu_a_l_article_ms", "de": "clic_resultat", "a": "article"},
+        {"nom": "retour_ms", "de": "retour", "a": "revenu"},
+        {"nom": "avance_ms", "de": "avance", "a": "reavance"}
+      ]
+    },
+    {
+      "id": "E2E-04G",
+      "titre": "Recherche Google reelle (reseau reel, jamais bloquante en CI)",
+      "requiert": ["E2E-02"],
+      "bloquant": false,
+      "externe": {"motif_blocage": "url=https://(consent\\.google\\.[a-z.]+|www\\.google\\.[a-z.]+/sorry)|M9_RS_STATE id=\\d+ DNSLookup -> Error|RS_ECHEC url=https://www\\.google\\.com/? code=(6|7|28)\\b", "raison": "Google indisponible, page de consentement ou CAPTCHA : probleme EXTERNE, jamais un succes"},
+      "etapes": [
+        {"touches": ["ctrl-l"]},
+        {"tape": "https://www.google.com", "entree": true, "nom": "saisie"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=https://www\\.google\\.[a-z.]+/", "delai_s": 180, "nom": "accueil_google"},
+        {"pause_s": 4},
+        {"tape": "bouchaud os navigateur", "entree": true, "nom": "requete"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=https://www\\.google\\.[a-z.]+/search\\?", "delai_s": 180, "nom": "resultats"},
+        {"pause_s": 3},
+        {"capture": "04g-google", "different_de": "02-navigateur"}
+      ],
+      "metriques": [
+        {"nom": "entree_jusqu_aux_resultats_google_ms", "de": "requete", "a": "resultats"}
+      ]
+    },
+    {
+      "id": "E2E-05",
+      "titre": "Onglets : ouverture, navigation par onglet, bascule sans rechargement, fermeture",
+      "requiert": ["E2E-02"],
+      "etapes": [
+        {"touches": ["ctrl-t"], "nom": "nouvel_onglet_2"},
+        {"attend": "\\[LB:TAB\\] ouvert onglet=(?P<onglet2>\\d+) ", "delai_s": 120, "nom": "onglet2_ouvert"},
+        {"pause_s": 2},
+        {"touches": ["ctrl-l"]},
+        {"tape": "${FIXTURE}/onglet-b.html", "entree": true},
+        {"attend": "\\[LB:NAV\\] onglet=${onglet2} document_charge url=${FIXTURE}/onglet-b.html", "delai_s": 180, "nom": "onglet2_charge"},
+        {"touches": ["ctrl-t"], "nom": "nouvel_onglet_3"},
+        {"attend": "\\[LB:TAB\\] ouvert onglet=(?P<onglet3>\\d+) ", "delai_s": 120, "nom": "onglet3_ouvert"},
+        {"pause_s": 2},
+        {"touches": ["ctrl-l"]},
+        {"tape": "${FIXTURE}/onglet-c.html", "entree": true},
+        {"attend": "\\[LB:NAV\\] onglet=${onglet3} document_charge url=${FIXTURE}/onglet-c.html", "delai_s": 180, "nom": "onglet3_charge"},
+        {"pause_s": 2},
+        {"capture": "05-onglet-c", "couleur": "onglet-c", "min_px": 20000},
+        {"touches": ["ctrl-tab"], "nom": "bascule"},
+        {"attend": "\\[LB:FRAME\\] onglet=1 seq=", "delai_s": 30, "nom": "bascule_presentee"},
+        {"absent": "\\[LB:NAV\\] onglet=1 demande", "pendant_s": 3},
+        {"capture": "05b-onglet-1", "couleur": "article-1", "min_px": 20000},
+        {"touches": ["ctrl-w"], "nom": "fermeture"},
+        {"attend": "\\[LB:TAB\\] ferme onglet=1 ", "delai_s": 60, "nom": "ferme"},
+        {"pause_s": 5}
+      ],
+      "metriques": [
+        {"nom": "ouverture_onglet_ms", "de": "nouvel_onglet_2", "a": "onglet2_ouvert"},
+        {"nom": "bascule_onglet_jusqu_a_la_trame_ms", "de": "bascule", "a": "bascule_presentee"},
+        {"nom": "fermeture_onglet_ms", "de": "fermeture", "a": "ferme"}
+      ]
+    },
+    {"id": "E2E-06", "titre": "Interactions graphiques (fenetre : deplacement, redimensionnement, reduction, plein ecran)", "non_implemente": "pilotage de la geometrie des fenetres clientes non publie par le gestionnaire de fenetres (pas de marqueur de position) : a ajouter avant de pouvoir viser la barre de titre"},
+    {"id": "E2E-07", "titre": "Multitache DOOM + Ladybird", "non_implemente": "scenario non ecrit dans cette version du banc"},
+    {"id": "E2E-08", "titre": "Endurance (cycles d'ouverture, de navigation et d'onglets)", "non_implemente": "scenario non ecrit dans cette version du banc ; les endurances existantes restent dans ladybird-native-browser.yml"},
+    {"id": "E2E-09", "titre": "Persistance (favoris apres relance et apres redemarrage)", "non_implemente": "scenario non ecrit dans cette version du banc"},
+    {"id": "E2E-10", "titre": "Resilience (arret d'un WebContent)", "non_implemente": "scenario non ecrit dans cette version du banc ; couvert hors E2E par le job crash-rendu"}
+  ]
+}
