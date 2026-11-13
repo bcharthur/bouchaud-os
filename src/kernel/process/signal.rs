@@ -123,13 +123,18 @@ impl SignalState {
             }
         }
         self.pending = 0;
+        self.leve_ns = 0;
     }
 
     /// Marque un signal en attente.
     pub fn raise(&mut self, signal: u32) {
         if signal >= 1 && (signal as usize) <= NSIG {
+            // L'age du PLUS ANCIEN signal en attente : une levee repetee ne
+            // repousse pas la reservation (revue de #319).
+            if self.pending == 0 {
+                self.leve_ns = crate::kernel::timer::monotonic_ns();
+            }
             self.pending |= 1 << (signal - 1);
-            self.leve_ns = crate::kernel::timer::monotonic_ns();
         }
     }
 
@@ -157,6 +162,9 @@ impl SignalState {
     /// Retire un signal de la file d'attente.
     pub fn clear(&mut self, signal: u32) {
         self.pending &= !(1 << (signal - 1));
+        if self.pending == 0 {
+            self.leve_ns = 0;
+        }
     }
 }
 

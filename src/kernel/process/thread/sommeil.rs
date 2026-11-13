@@ -150,7 +150,10 @@ fn sleep_jusqua_signalable(deadline: u64, ticks: u64) -> Option<u64> {
         // `sleep(30)` brulait son coeur 30 s et retardait d'autant la mort de
         // son processus (os-primitives et endurance sous KVM, run
         // 37618172578 : machine vivante, occupee, qui n'avance plus).
-        if !dort_jusqua(deadline, ticks, true) || current().state == TaskState::Zombie {
+        // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : reveil a la fin d'une reservation
+        // laissee au principal ; la boucle juge l'echeance de l'appel.
+        let reveil = borne_par_reservation(Some(deadline)).unwrap_or(deadline);
+        if !dort_jusqua(reveil, ticks, true) || current().state == TaskState::Zombie {
             return None;
         }
         let maintenant = crate::kernel::timer::monotonic_ns();

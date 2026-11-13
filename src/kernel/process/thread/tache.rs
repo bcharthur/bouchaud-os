@@ -88,6 +88,12 @@ pub struct Task {
     /// attendre. Pas `wait4` ni `futex`, qui se rendorment. Ecrit par son
     /// seul fil (garde `AttenteSignalable`).
     pub attente_signalable: DrapeauAtomique,
+    /// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : fin de la reservation d'un signal au
+    /// fil principal, posee par CE fil quand il le lui laisse ; sa prochaine
+    /// attente est bornee par elle (`borne_par_reservation`), pour qu'il
+    /// livre lui-meme si le principal ne l'a pas pris. 0 : aucune. Ecrit et
+    /// lu par son seul fil.
+    pub echeance_reservation_ns: EcheanceAtomique,
     pub context_switches: EcheanceAtomique,
     pub migrations: EcheanceAtomique,
     pub frame: TrapFrame,

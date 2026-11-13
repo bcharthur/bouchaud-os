@@ -97,6 +97,9 @@ pub(crate) fn prepare_park_current_on_detached(
     deadline_ns: Option<u64>,
     interruptible: bool,
 ) -> Parking {
+    // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : un signal laisse au principal borne
+    // cette attente (l'appelant juge son propre delai a part).
+    let deadline_ns = borne_par_reservation(deadline_ns);
     // L'assertion « sous gros verrou » a disparu parce que la PRECONDITION a
     // disparu, non pour faire passer un controle : ce chemin est justement
     // celui qu'on sort du verrou. Ce qui reste vrai, et qui compte, est que
@@ -464,9 +467,23 @@ pub fn laisse_le_signal_au_fil_principal() -> bool {
         // fil le livre -- aucun signal n'attend indefiniment un fil qui
         // calcule. Mesure : 8 vols sur 30 passages, principal en mode
         // utilisateur, sans ce delai.
+        //
+        // Le fil qui le laisse borne sa prochaine attente par la fin de la
+        // reservation : sans cela, un fil en `poll(-1)` se rendormait sans
+        // echeance et le signal pouvait attendre indefiniment un principal
+        // qui calcule (revue de #319).
         TaskState::Ready => {
-            fil.en_appel_systeme.charge()
-                || crate::kernel::timer::monotonic_ns().saturating_sub(leve_ns) < DELAI_FIL_PRINCIPAL_NS
+            if fil.en_appel_systeme.charge() {
+                true
+            } else {
+                let fin = leve_ns.saturating_add(DELAI_FIL_PRINCIPAL_NS);
+                if leve_ns != 0 && crate::kernel::timer::monotonic_ns() < fin {
+                    courant.echeance_reservation_ns.range(fin);
+                    true
+                } else {
+                    false
+                }
+            }
         }
         TaskState::Zombie => false,
     }
@@ -495,6 +512,19 @@ impl Drop for AttenteSignalable {
             t.attente_signalable.range(false);
         }
     }
+}
+
+/// L'echeance d'une attente du fil courant, bornee par la fin de la
+/// reservation qu'il a laissee au fil principal (consommee).
+/// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2.
+pub(crate) fn borne_par_reservation(deadline_ns: Option<u64>) -> Option<u64> {
+    let Some(t) = try_current() else { return deadline_ns };
+    let fin = t.echeance_reservation_ns.charge();
+    if fin == 0 {
+        return deadline_ns;
+    }
+    t.echeance_reservation_ns.range(0);
+    Some(deadline_ns.map_or(fin, |d| d.min(fin)))
 }
 
 /// Bornes d'un appel systeme pour `Task::en_appel_systeme`.

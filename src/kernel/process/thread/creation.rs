@@ -41,6 +41,7 @@ impl Task {
             in_kernel: DrapeauAtomique::neuf(false),
             en_appel_systeme: DrapeauAtomique::neuf(false),
             attente_signalable: DrapeauAtomique::neuf(false),
+            echeance_reservation_ns: EcheanceAtomique::neuf(0),
             context_switches: EcheanceAtomique::neuf(0),
             migrations: EcheanceAtomique::neuf(0),
             frame,
