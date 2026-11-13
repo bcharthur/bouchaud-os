@@ -409,6 +409,19 @@ pub fn serial_mirror() -> bool {
 
 /// Implementation reelle derriere les macros `print!` / `println!`.
 pub fn _print(args: fmt::Arguments) {
+    _print_vers(args, true);
+}
+
+/// BOUCHAUD_SERIE_UNE_COPIE_V1 -- comme `_print`, SANS la copie COM1 : pour un
+/// appelant qui a deja emis la ligne sur la liaison serie lui-meme (la sortie
+/// des programmes de l'anneau 3, `compat::linux::file::console_write`).
+/// Sans elle, un noyau `reference-desktop` (l'image UEFI, le Trigkey) envoyait
+/// CHAQUE ligne de l'anneau 3 deux fois sur COM1, a ~87 us l'octet.
+pub fn _print_sans_serie(args: fmt::Arguments) {
+    _print_vers(args, false);
+}
+
+fn _print_vers(args: fmt::Arguments, serie: bool) {
     use core::fmt::Write;
 
     // La blackbox voit la sortie AVANT la capture VGA/pipeline.
@@ -434,7 +447,9 @@ pub fn _print(args: fmt::Arguments) {
     #[cfg(feature = "reference-desktop")]
     {
         // UEFI/GOP: sortie texte de secours vers COM1 uniquement.
-        crate::drivers::serial::_print(args);
+        if serie {
+            crate::drivers::serial::_print(args);
+        }
         return;
     }
 
@@ -442,7 +457,7 @@ pub fn _print(args: fmt::Arguments) {
     {
         // COM1 hors du verrou de la console : l'emission serie dure 87 us par
         // octet, et elle a deja son propre jeton.
-        if serial_mirror() {
+        if serie && serial_mirror() {
             crate::drivers::serial::_print(args);
         }
         // BOUCHAUD_VGA_TEXTE_INVISIBLE_V1 : bureau graphique actif, la memoire
