@@ -121,9 +121,12 @@ foreach ($conf in $Configurations) {
         $erreurs = "$journal.qemu"
         $jalons = @{}
         # Fin d'une repetition : A prouvee (bilan des battements) et, si
-        # Ladybird est demande, document HTTPS charge -- ou le delai.
+        # Ladybird est demande, premiere trame ET document HTTPS -- ou le
+        # delai. Les deux sont independants (present() contre
+        # on_load_finish, tools/ladybird/ui-bouchaud/BrowserWindow.cpp) :
+        # s'arreter au premier arrive rendrait un faux `premiere-trame-absente`.
         $fin = @('battement')
-        if ($Ladybird.statut -eq 'PRET') { $fin += 'https' }
+        if ($Ladybird.statut -eq 'PRET') { $fin += @('premiere_trame', 'https') }
         $p = $null
         # QEMU n'est JAMAIS laisse orphelin (erreur, Ctrl+C) : un QEMU restant
         # garde le bootimage ouvert et `cargo bootimage` echoue ensuite

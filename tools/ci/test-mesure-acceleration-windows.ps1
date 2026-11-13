@@ -87,7 +87,14 @@ public static class FauxQemu {
                 if (autostart) {
                     Thread.Sleep(300);
                     w.WriteLine("[ladybird-bouchaud] BROWSER_HOST_START architecture=UI/Bouchaud");
-                    if (mode != "sans_trame") {
+                    if (mode == "https_avant_trame") {
+                        // Ordre inverse, possible : on_load_finish avant present().
+                        Thread.Sleep(300);
+                        w.WriteLine("[LB:NAV] onglet=1 document_charge url=https://example.com/");
+                        Thread.Sleep(3500);
+                        w.WriteLine("BOUCHAUD_UI_FIRST_FRAME onglet=1 page=1 zone=1100x538 source=compositor");
+                    }
+                    else if (mode != "sans_trame") {
                         Thread.Sleep(300);
                         w.WriteLine("BOUCHAUD_UI_FIRST_FRAME onglet=1 page=1 zone=1100x538 source=compositor");
                         w.WriteLine("[LB:NAV] onglet=1 document_charge url=https://example.com/");
@@ -140,6 +147,14 @@ Verifie 'B : preuve run.ps1 avec ladybird_smp_max_qualifie=4' ([int]$q.ladybird_
 Verifie 'B : disque d''origine intact' ($avant -eq (Get-FileHash -LiteralPath $disque -Algorithm SHA256).Hash)
 Verifie 'B : copie de banc supprimee apres le banc' (@(Get-ChildItem -Path ([System.IO.Path]::GetTempPath()) -Directory -Filter 'bouchaud-accel-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter 'ladybird-banc.img' }).Count -eq 0)
 Aucun-Orphelin 'B'
+
+# B, ordre inverse : document HTTPS 3,5 s AVANT la premiere trame -> OK, pas
+# de faux `premiere-trame-absente` (revue Codex de #317).
+$env:FAUX_QEMU_MODE = 'https_avant_trame'
+$sortie = Lance-Mesure @{ Qemu = $faux; Bootimage = $boot; Configurations = @('whpx-smp4'); Repetitions = 1; DelaiS = 60; AvecLadybird = $true }
+Write-Host $sortie
+Verifie 'B ordre inverse : HTTPS avant la 1re trame -> ladybird=OK' ($sortie -match 'MESURE whpx-smp4 #1 smp=OK .* ladybird=OK')
+Aucun-Orphelin 'B ordre inverse'
 
 # B en echec : navigateur lance, aucune trame -> ladybird=ECHEC nomme, A reste OK.
 $env:FAUX_QEMU_MODE = 'sans_trame'
