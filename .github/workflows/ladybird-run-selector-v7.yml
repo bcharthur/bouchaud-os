@@ -7,6 +7,9 @@ on:
       - run.ps1
       - tools/run/ladybird-artifact.ps1
       - tools/ci/test-ladybird-selector-v7.ps1
+      - tools/windows/BouchaudQemu.psm1
+      - tools/windows/Mesure-Acceleration.ps1
+      - tools/ci/test-mesure-acceleration-windows.ps1
       - .github/workflows/ladybird-run-selector-v7.yml
 permissions:
   contents: read
@@ -21,11 +24,18 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($path in @('run.ps1','tools/run/ladybird-artifact.ps1','tools/ci/test-ladybird-selector-v7.ps1')) {
+          foreach ($path in @('run.ps1','tools/run/ladybird-artifact.ps1','tools/ci/test-ladybird-selector-v7.ps1','tools/windows/BouchaudQemu.psm1','tools/windows/Mesure-Acceleration.ps1','tools/ci/test-mesure-acceleration-windows.ps1')) {
             $tok = $null; $errors = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tok,[ref]$errors)
             if (@($errors).Count) { throw "PowerShell parser $path : $errors" }
           }
+      # BOUCHAUD_WHPX_CPU_V1 : le banc WHPX EXECUTE sous Windows PowerShell
+      # 5.1, faux QEMU qui tient la serie comme le vrai (FILE_SHARE_READ).
+      - name: Banc d'acceleration (lecture partagee, aucun QEMU orphelin)
+        shell: powershell
+        run: |
+          & .\tools\ci\test-mesure-acceleration-windows.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Offline selectors Windows PowerShell 5.1
         shell: powershell
         run: |

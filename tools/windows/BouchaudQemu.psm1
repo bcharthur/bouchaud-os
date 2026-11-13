@@ -9,19 +9,20 @@
 #   TCG  : `max`. QEMU EMULE chaque instruction et leve #UD sur celles que le
 #          modele n'annonce pas : sans `max` (modele qemu64), pas de SSE4.1.
 #
-#   WHPX : `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt`. Sous WHPX, QEMU presente
-#          au systeme invite le CPUID de SON modele (cpu_x86_cpuid dans la
-#          sortie CPUID de target/i386/whpx). `max` y signifie "tout ce que
-#          QEMU connait" quand ce QEMU ne filtre pas selon ce que l'hyperviseur
-#          supporte : MPX et APX ensemble sur un Ryzen qui n'a aucun des deux
-#          (QEMU 11.0.50 : "conflicts with APX/MPX"), puis
+#   WHPX : `qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt`. Avec `max`, QEMU
+#          11.0.50 configure le processeur virtuel avec des fonctions que
+#          l'hote n'a pas -- MPX et APX ensemble sur un Ryzen qui n'a aucun
+#          des deux ("conflicts with APX/MPX") -- puis
 #          "WHPX: Unexpected VP exit code 4" (UnrecoverableException), aucun
-#          journal noyau. qemu64 seul demarre (constate sur Windows, SMP1).
-#          Les quatre bits ajoutes ne touchent que la feuille CPUID 1 (aucun
-#          etat XSAVE, aucun MSR) et rendent le CPUID honnete pour le code qui
-#          choisit sa variante a l'execution. Le materiel execute SSE4.1 de
-#          toute facon sous un accelerateur materiel : aucune commande de VMX
-#          ou de SVM ne fait lever #UD sur ces instructions.
+#          journal noyau. Le modele retenu demarre (constate sur Windows,
+#          Ryzen 7 7800X3D : WHPX SMP2, bureau et Ladybird).
+#          CPUID REELLEMENT vu par l'invite sur cette machine (ligne
+#          BOUCHAUD_CPU_ISA) : signature `MicrosoftHv`, sse41/sse42/popcnt=1,
+#          et AVX, AVX2, AVX-512F annonces par Hyper-V lui-meme (feuille 7 de
+#          l'hote, absente de qemu64) ; mpx=0 apxf=0. Le CPUID de l'invite
+#          n'est donc PAS seulement celui du modele QEMU : seules certaines
+#          feuilles passent par QEMU. Le materiel execute SSE4.1 de toute
+#          facon : aucune commande de VMX ou de SVM ne fait lever #UD dessus.
 #
 # Le CPUID REEL vu par l'invite est publie par le noyau :
 #   BOUCHAUD_CPU_ISA hyperviseur=... sse41=... mpx=... apxf=...
@@ -142,9 +143,18 @@ function Invoke-BouchaudQemu {
     }
 }
 
+# Lecture PARTAGEE : QEMU garde la liaison serie ouverte en ecriture
+# (CreateFile avec FILE_SHARE_READ, chardev/char-file.c) ; ReadAllText refuse
+# alors d'ouvrir le fichier ("en cours d'utilisation par un autre processus",
+# constate sous Windows). FileShare ReadWrite accepte un ecrivain present.
 function Read-BouchaudJournal([string]$Chemin) {
     if (-not $Chemin -or -not (Test-Path -LiteralPath $Chemin)) { return '' }
-    $t = [System.IO.File]::ReadAllText($Chemin)
+    $fs = New-Object System.IO.FileStream($Chemin, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try {
+        $sr = New-Object System.IO.StreamReader($fs)
+        $t = $sr.ReadToEnd()
+    }
+    finally { $fs.Dispose() }
     return [regex]::Replace($t, "$([char]27)\[[0-9;]*m", '')
 }
 
@@ -215,4 +225,4 @@ function Write-BouchaudVerdictQemu {
     return $code
 }
 
-Export-ModuleMember -Function Get-BouchaudCpuQemu, Get-BouchaudAccelQemu, ConvertTo-BouchaudLigneArguments, Invoke-BouchaudQemu, Get-BouchaudVerdictQemu, Write-BouchaudVerdictQemu
+Export-ModuleMember -Function Read-BouchaudJournal, Get-BouchaudCpuQemu, Get-BouchaudAccelQemu, ConvertTo-BouchaudLigneArguments, Invoke-BouchaudQemu, Get-BouchaudVerdictQemu, Write-BouchaudVerdictQemu
