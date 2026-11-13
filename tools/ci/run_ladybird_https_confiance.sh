@@ -9,6 +9,8 @@
 #   ok           certificat signe par la CA de banc, nom couvert -> page chargee
 #   ca_inconnue  meme nom, CA absente du bundle       -> RS_ECHEC code=60, AUCUNE requete servie
 #   nom          CA de banc, nom NON couvert          -> RS_ECHEC code=60, AUCUNE requete servie
+# (dans les deux refus, Ladybird affiche sa page d'erreur : `document_charge`
+# n'est donc pas un critere ; le serveur, si.)
 # Aucun relachement : ni -k, ni VERIFYPEER=0 ; la verification refuse seule.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -100,7 +102,11 @@ for s in $SITES; do
   if [ "$nom" = ok ]; then
     { [ "$charge" -ge 1 ] && [ "$servi" -ge 1 ] && [ -z "$code" ]; } || echecs+=("ok:non_charge")
   else
-    { [ "$code" = 60 ] && [ "$charge" = 0 ] && [ "$servi" = 0 ]; } || echecs+=("$nom:non_refuse")
+    # Ladybird charge alors sa PAGE D'ERREUR (document_charge vaut 1, run
+    # 43432150153) : ce n'est pas le critere. La preuve est que curl a
+    # refuse la chaine (code 60) et que le serveur n'a recu AUCUNE requete :
+    # le contenu protege n'a jamais quitte le serveur.
+    { [ "$code" = 60 ] && [ "$servi" = 0 ]; } || echecs+=("$nom:non_refuse")
   fi
 done
 if [ ${#echecs[@]} -eq 0 ]; then
