@@ -136,7 +136,7 @@ pub fn preempt_from_irq(anticipe: bool) {
 
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
-        deactivate_task_space(&*from_ptr, cpu_id);
+        quitte_espace(&*from_ptr, &*to_ptr, cpu_id);
         prepare_switch_handoff(cur, &mut *from_ptr, cpu_id);
         // Meme si drop(kernel) precede le switch, l'outgoing reste resident.
         finalise_task_running(&mut *to_ptr, cpu_id);

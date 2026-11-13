@@ -177,6 +177,8 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // releve de vol portera la preuve que la machine SAIT s'eteindre -- bien
     // avant qu'on le lui demande.
     kernel::acpi_s5::prepare(boot_info);
+    // BOUCHAUD_SMP_MADT_V1 : la liste des processeurs vient de la MADT.
+    arch::x86_64::smp::note_madt(boot_info);
 
     // Stage 1 UEFI: preuve memoire + vraie ecriture framebuffer, toujours
     // AVANT GDT/IDT/PIC/PCI et avant tout pilote a effets de bord.

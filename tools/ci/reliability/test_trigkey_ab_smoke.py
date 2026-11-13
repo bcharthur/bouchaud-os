@@ -34,8 +34,9 @@ FAUX_QEMU = textwrap.dedent('''\
         f.seek(4096); f.write(b"BOUCHAUD-PREBOOT.TXT ecrit par l'essai")
     cible = os.environ.get("FAUX_QEMU_ECRIT_AUSSI")
     if cible:                                # temoin : quelqu'un touche l'original
-        with open(cible, "r+b") as f:
-            f.seek(8192); f.write(b"X")
+        with open(cible, "r+b") as f:        # un octet GARANTI different : ecrire
+            f.seek(8192); o = f.read(1)[0]   # b"X" sur une image aleatoire ne changeait
+            f.seek(8192); f.write(bytes([o ^ 0xFF]))  # rien une fois sur 256
     with open(journal, "w") as j:
         j.write("BOUCHAUD_AB_BOOT slot=A\\nBOUCHAUD_HWPROBE_BEGIN\\n"
                 "SERVICED_UPDATE_STATE rc=0\\nSERVICED_HEALTH_COMMIT result=already_good\\n")

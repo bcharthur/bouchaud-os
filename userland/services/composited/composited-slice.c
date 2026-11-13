@@ -1070,7 +1070,12 @@ static int bureau(i64 affichage, u64 *pile)
                     exige(hors < 0, "bureau : relance hors configuration refusee");
                     if (h > 0) {
                         struct fen *f = &fens[1];
-                        f->poignee = h; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0; f->livrees = 0;
+                        /* Le pid du NOUVEAU client n'est connu qu'au prochain
+                         * pompage : jusque-la, 0. Garder l'ancien attribuait
+                         * le compteur remis a zero au client mort -- un releve
+                         * tombe entre les deux publiait `pid=<ancien>
+                         * trames=0` (bureau ring 3, main@35aa30e, run 43415280000). */
+                        f->poignee = h; f->pid = 0; f->vivante = 1; f->visible = 0; f->minimisee = 0; f->trames = 0; f->livrees = 0;
                         sys6(BO_WAITSET_ADD, (u64)attente, (u64)h, 2, 0, 0, 0);
                         vivantes++;
                         ecris("COMPOSITED_BUREAU_ETAPE relance fenetre=1\n");

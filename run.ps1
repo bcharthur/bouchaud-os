@@ -90,6 +90,25 @@ param(
     #   pas d'acceleration explicite.
     [string]$Accel = "auto",
 
+    # BOUCHAUD_PERF_V1 -- WHPX : APIC emule par QEMU (off, le chemin connu)
+    # ou par Hyper-V (on, moins de sorties de VM ; a qualifier).
+    [ValidateSet('off', 'on')]
+    [string]$WhpxIrqchip = 'off',
+
+    # BOUCHAUD_PERF_V1 -- surface du navigateur : un tampon (defaut) ou deux.
+    # Mesure (CI perf-surface, QEMU TCG, 3 demarrages, p50) : deux tampons
+    # suppriment la dechirure et donnent la premiere image ~22 % plus tot,
+    # MAIS la presentation moyenne est ~52 % plus lente et le pire cas double
+    # (rejeu de la zone endommagee). Pas un gain net : option, pas defaut.
+    [ValidateSet('double', 'simple')]
+    [string]$Surface = 'simple',
+
+    # BOUCHAUD_PERF_V1 -- journalisation de DIAGNOSTIC (profil RIP par tic,
+    # releves periodiques complets). Sans ce commutateur, la session
+    # interactive tourne en journalisation de PRODUCTION ; les evenements
+    # critiques, la boite noire et les refus de securite restent emis.
+    [switch]$Diagnostic,
+
     # P10 GPU : construit les fonctions VIRGL et choisit QEMU OpenGL.
     # Strictement opt-in : le lancement normal reste identique.
     [switch]$P10GPU,
@@ -768,7 +787,10 @@ if ($LadybirdMode) {
         # chemin decide a la compilation, qui n'existe pas ici : chaque poignee
         # de main TLS echoue, et le symptome ressemble a une panne reseau. On le
         # fabrique donc au lieu d'attendre que l'utilisateur devine.
-        if (-not (Test-Path -LiteralPath $PublicCABundle -PathType Leaf)) {
+        # BOUCHAUD_CA_COMPLET_V2 : appele a CHAQUE lancement -- le script rend
+        # la main aussitot si le bundle est a jour, et reconstruit un bundle de
+        # l'ancien schema (magasin local seul, incomplet : `verify=20`).
+        if ($true) {
             $Fabrique = Join-Path `
                 $RepoRoot `
                 "tools\ladybird\certs\fabrique-bundle.ps1"
@@ -881,6 +903,9 @@ if ($LadybirdMode) {
                 $hostLine,
                 $timezoneLine,
                 $popupLine,
+                # BOUCHAUD_PERF_V1 : surface a deux tampons, journal de production.
+                "gui-surface $Surface",
+                $(if ($Diagnostic) { 'echo "journal : diagnostic"' } else { 'profil-rip off' }),
                 'desktop',
                 ''
             )
@@ -1380,7 +1405,30 @@ if ($Accel -ne "none") {
 
     if ($Accel -eq "auto") {
 
-        if ($LadybirdMode -and $CpuCount -gt 1) {
+        # BOUCHAUD_PERF_V1 : WHPX en SMP seulement si CETTE machine l'a prouve
+        # pour CE noyau (tools\windows\Mesure-Acceleration.ps1 ecrit la preuve,
+        # liee a l'empreinte du bootimage). Pas de preuve : TCG, comme avant.
+        $WhpxQualifie = $false
+        $Preuve = Join-Path $RepoRoot "target\whpx-qualification.json"
+        if ($LadybirdMode -and $CpuCount -gt 1 -and (Test-Path -LiteralPath $Preuve)) {
+            try {
+                $q = Get-Content -LiteralPath $Preuve -Raw | ConvertFrom-Json
+                $empreinte = (Get-FileHash -LiteralPath $BootImage -Algorithm SHA256).Hash.ToLower()
+                if ($q.bootimage_sha256 -eq $empreinte -and [int]$q.smp_max_qualifie -ge $CpuCount -and $q.irqchip -eq $WhpxIrqchip) {
+                    $WhpxQualifie = $true
+                }
+            }
+            catch { $WhpxQualifie = $false }
+        }
+
+        if ($WhpxQualifie) {
+            Write-Host ("accel      : WHPX SMP{0} (qualifie sur cette machine pour ce noyau : {1})" -f $CpuCount, $Preuve) `
+                -ForegroundColor Green
+            $qemuArgs += @("-accel", "whpx,kernel-irqchip=$WhpxIrqchip", "-cpu", "max")
+        }
+        elseif ($LadybirdMode -and $CpuCount -gt 1) {
+            Write-Host "accel      : WHPX non qualifie en SMP pour ce noyau -> tools\windows\Mesure-Acceleration.ps1" `
+                -ForegroundColor DarkGray
             # TCG force pour SMP : le run local WHPX avec `-smp 4` a expose
             # seulement un CPU au probe (`SMP4_DISCOVERED count=1`), alors que
             # le meme bring-up est prouve sous TCG en CI. On privilegie donc
@@ -1401,22 +1449,26 @@ if ($Accel -ne "none") {
             )
         }
         else {
-            # Windows Hypervisor Platform, avec fallback TCG.
+            # Windows Hypervisor Platform, avec fallback TCG. `-cpu max` : sans
+            # lui, WHPX expose le modele qemu64 -- sans SSE4.1, que les
+            # runtimes Ladybird exigent (`roundsd`).
             $qemuArgs += @(
                 "-accel",
-                "whpx,kernel-irqchip=off",
+                "whpx,kernel-irqchip=$WhpxIrqchip",
 
                 "-accel",
                 "tcg"
             )
+            if ($LadybirdMode) { $qemuArgs += @("-cpu", "max") }
         }
     }
     else {
 
         $qemuArgs += @(
             "-accel",
-            $Accel
+            $(if ($Accel -eq "whpx") { "whpx,kernel-irqchip=$WhpxIrqchip" } else { $Accel })
         )
+        if ($LadybirdMode -and $Accel -eq "whpx") { $qemuArgs += @("-cpu", "max") }
 
         # Un -Accel tcg explicite doit offrir le meme jeu d'instructions que
         # le chemin TCG force ci-dessus.

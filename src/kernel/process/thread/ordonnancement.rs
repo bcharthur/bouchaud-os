@@ -582,7 +582,7 @@ fn switch_to(from: usize, to: usize) {
         account_slice_end(&mut *from_ptr);
         usermode::fxsave((*from_ptr).fpu_ptr() as *mut u8);
         (*from_ptr).fs_base = usermode::fs_base();
-        deactivate_task_space(&*from_ptr, cpu_id);
+        quitte_espace(&*from_ptr, &*to_ptr, cpu_id);
         prepare_switch_handoff(from, &mut *from_ptr, cpu_id);
         // PAS de on_cpu=-1, PAS d'enqueue ici. Cette pile est encore active.
         finalise_task_running(&mut *to_ptr, cpu_id);

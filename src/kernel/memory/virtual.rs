@@ -863,7 +863,22 @@ impl AddressSpaceIdentity {
         if self.retiring.load(Ordering::Acquire) {
             return false;
         }
-        self.mark_active(smp::cpu_index());
+        // BOUCHAUD_CR3_MEME_ESPACE_V1 : ce coeur est deja dans CET espace, et
+        // il n'en est jamais sorti (son bit est reste pose : chaque shootdown
+        // de l'espace l'a vise). Recharger CR3 ne ferait que vider un TLB
+        // juste -- sous TCG, tout le TLB logiciel de QEMU ; sans PCID, le TLB
+        // materiel. Le bit n'est garde que par `switch_to`/la preemption
+        // entre deux fils du MEME processus (`Mm::reste_charge_ici`).
+        let cpu = smp::cpu_index();
+        if cpu < 64
+            && self.active_cpus.load(Ordering::Acquire) & (1u64 << cpu) != 0
+            && Cr3::read().0.start_address().as_u64() == self.pml4
+        {
+            CR3_EVITES.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        CR3_ECRITS.fetch_add(1, Ordering::Relaxed);
+        self.mark_active(cpu);
         if self.retiring.load(Ordering::Acquire) {
             self.mark_inactive(smp::cpu_index());
             return false;
@@ -871,6 +886,14 @@ impl AddressSpaceIdentity {
         let frame = PhysFrame::containing_address(PhysAddr::new(self.pml4));
         Cr3::write(frame, Cr3Flags::empty());
         true
+    }
+
+    /// Ce coeur execute-t-il CET espace, marque actif, sans retrait en cours ?
+    pub(crate) fn charge_ici(&self, cpu: usize) -> bool {
+        cpu < 64
+            && !self.retiring.load(Ordering::Acquire)
+            && self.active_cpus.load(Ordering::Acquire) & (1u64 << cpu) != 0
+            && Cr3::read().0.start_address().as_u64() == self.pml4
     }
 
     pub(crate) fn mark_active(&self, cpu: usize) {
@@ -1624,7 +1647,23 @@ pub fn flush_local_range(start: u64, len: u64) {
 }
 
 /// Restaure la PML4 du noyau (retour au contexte noyau pur).
+/// BOUCHAUD_CR3_MEME_ESPACE_V1 : chargements de CR3 faits et evites.
+pub static CR3_ECRITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CR3_EVITES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CR3_NOYAU: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CR3_NOYAU_EVITES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Commutations entre deux fils du meme processus ou le coeur garde l'espace.
+pub static ESPACES_GARDES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn activate_kernel() {
+    // BOUCHAUD_CR3_MEME_ESPACE_V1 : d'un fil noyau a un autre, la PML4 noyau
+    // est deja chargee ; elle n'est jamais retiree, ses traductions restent
+    // justes. Recharger CR3 ne ferait que vider le TLB.
+    if Cr3::read().0.start_address().as_u64() == unsafe { KERNEL_PML4 } {
+        CR3_NOYAU_EVITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    CR3_NOYAU.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     unsafe {
         let frame = PhysFrame::containing_address(PhysAddr::new(KERNEL_PML4));
         Cr3::write(frame, Cr3Flags::empty());

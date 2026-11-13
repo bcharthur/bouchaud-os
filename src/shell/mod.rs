@@ -1981,7 +1981,20 @@ fn dispatch(line: &str, cwd: &mut usize) -> i32 {
         // cumulees. Deux appels encadrant une charge donnent le cout en
         // verrou de cette charge, ce qu'aucune mesure de temps ne
         // distingue toute seule.
-        "smpstat" => { crate::kernel::task::log_smp_load(); 0 }
+        "smpstat" => {
+            crate::kernel::task::log_smp_load();
+            // BOUCHAUD_CR3_MEME_ESPACE_V1 : le meme releve que [PROC-STAT].
+            crate::serial_println!(
+                "BOUCHAUD_CR3_STATS commutations={} espaces_gardes={} cr3_ecrits={} cr3_evites={} cr3_noyau={} cr3_noyau_evites={}",
+                crate::kernel::task::context_switches(),
+                crate::kernel::vmm::ESPACES_GARDES.load(core::sync::atomic::Ordering::Relaxed),
+                crate::kernel::vmm::CR3_ECRITS.load(core::sync::atomic::Ordering::Relaxed),
+                crate::kernel::vmm::CR3_EVITES.load(core::sync::atomic::Ordering::Relaxed),
+                crate::kernel::vmm::CR3_NOYAU.load(core::sync::atomic::Ordering::Relaxed),
+                crate::kernel::vmm::CR3_NOYAU_EVITES.load(core::sync::atomic::Ordering::Relaxed),
+            );
+            0
+        }
         // BOUCHAUD_CONTINUATION_SYNCHRONE_V1 : banc de la continuation run_noyau.
         "contexte-banc" => crate::kernel::task::banc_contexte_bsp(),
         "continuation-banc" => {
