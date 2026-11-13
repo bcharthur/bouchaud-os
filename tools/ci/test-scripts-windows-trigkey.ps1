@@ -213,7 +213,7 @@ if ($py) {
     Verifie 'disque de banc : autorun inconnu = NON_MESURABLE avec cause' ($d.statut -eq 'NON_MESURABLE' -and $d.raison -eq 'autorun-sans-ligne-desktop') "$($d.raison)"
 }
 else { Write-Host 'ECHEC disque de banc : python introuvable sur le runner'; $echecs++ }
-$sortie = & $mesure -Bootimage $img -DryRun -Repetitions 1 -AvecLadybird -Configurations @('whpx-smp4') *>&1 | Out-String
+$sortie = & $mesure -Bootimage $img -DryRun -Repetitions 1 -AvecLadybird -Configurations @('whpx-smp4') *>&1 | Out-String -Width 4096
 Verifie 'mesure -AvecLadybird : la copie de banc est montee, jamais ladybird-browser.img' ($sortie -match 'ladybird-banc\.img,snapshot=on' -and $sortie -notmatch 'ladybird-browser\.img,snapshot') $sortie
 
 Remove-Item -LiteralPath $t -Recurse -Force

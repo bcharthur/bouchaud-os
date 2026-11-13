@@ -112,7 +112,9 @@ $boot = Join-Path $t 'boot.bin'
 [System.IO.File]::WriteAllBytes($boot, (New-Object byte[] 512))
 $mesure = Join-Path $t 'tools\windows\Mesure-Acceleration.ps1'
 function Lance-Mesure([hashtable]$P) {
-    try { return (& $mesure @P *>&1 | Out-String) } catch { return "EXCEPTION $($_.Exception.GetType().FullName) $($_.Exception.Message)" }
+    # Largeur explicite : Windows PowerShell 5.1 coupe sinon les lignes a la
+    # largeur de la console (120), et `MESURE ... ladybird=` passe a la ligne.
+    try { return (& $mesure @P *>&1 | Out-String -Width 4096) } catch { return "EXCEPTION $($_.Exception.GetType().FullName) $($_.Exception.Message)" }
 }
 function Aucun-Orphelin([string]$Nom) {
     Start-Sleep -Seconds 1
