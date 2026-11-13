@@ -17,8 +17,8 @@
          rencontrees ; les autres sont telechargees A LA DEMANDE, la premiere
          fois qu'une chaine les exige (Automatic Root Certificates Update).
          Exporter le seul magasin local donnait un bundle INCOMPLET : curl
-         repondait `code=60 verify=20` (« unable to get local issuer
-         certificate ») sur des sites parfaitement valides, comme
+         repondait `code=60 verify=20` ("unable to get local issuer
+         certificate") sur des sites parfaitement valides, comme
          https://example.com/ sous QEMU ;
       3. le magasin Mozilla de la distribution WSL
          (/etc/ssl/certs/ca-certificates.crt, maintenu par ses mises a jour) ;

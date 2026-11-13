@@ -1446,8 +1446,9 @@ jobs:
 
   perf-surface-bilan:
     name: ladybird / perf (bilan avant/apres)
-    needs: [perf-surface]
-    if: ${{ !cancelled() }}
+    needs: [dedoublonne, perf-surface]
+    # Saute avec ses producteurs quand l'artefact du meme SHA est reutilise.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
