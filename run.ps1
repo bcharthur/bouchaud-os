@@ -95,12 +95,13 @@ param(
     [ValidateSet('off', 'on')]
     [string]$WhpxIrqchip = 'off',
 
-    # BOUCHAUD_PERF_V1 -- surface du navigateur : deux tampons (le client
-    # peint la trame suivante pendant que le bureau compose la precedente ;
-    # banc de dechirure : 51-75 compositions mixtes en simple, 0 en double)
-    # ou un seul (le contrat d'avant).
+    # BOUCHAUD_PERF_V1 -- surface du navigateur : un tampon (defaut) ou deux.
+    # Mesure (CI perf-surface, QEMU TCG, 3 demarrages, p50) : deux tampons
+    # suppriment la dechirure et donnent la premiere image ~22 % plus tot,
+    # MAIS la presentation moyenne est ~52 % plus lente et le pire cas double
+    # (rejeu de la zone endommagee). Pas un gain net : option, pas defaut.
     [ValidateSet('double', 'simple')]
-    [string]$Surface = 'double',
+    [string]$Surface = 'simple',
 
     # BOUCHAUD_PERF_V1 -- journalisation de DIAGNOSTIC (profil RIP par tic,
     # releves periodiques complets). Sans ce commutateur, la session

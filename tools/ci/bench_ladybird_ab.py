@@ -38,6 +38,9 @@ def derniere(t, balise):
 
 def mesures(t):
     m = bl.mesures(t)
+    # Le verdict du smoke sort sur la SORTIE du script, pas sur la serie : le
+    # succes se lit ici sur la ligne de la page, que la serie porte.
+    m["smoke_ok"] = int("HOST_SMOKE_OK canvas=1 worker=1 image=1 frame=1" in t)
     perf = derniere(t, "[LB:PERF]")
     rendu = derniere(t, "M11_RENDER_STATS")
     bilan = derniere(t, "GUI_SURFACE_BILAN")
