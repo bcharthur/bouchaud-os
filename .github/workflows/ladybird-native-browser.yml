@@ -65,6 +65,8 @@ on:
       - 'tools/ci/run_ladybird_crash_services.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
+      - 'tools/ci/bench_ladybird_ab.py'
+      - 'tools/ci/bench_ladybird.py'
       - 'tools/ci/run_ladybird_https_confiance.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
@@ -137,6 +139,8 @@ on:
       - 'tools/ci/run_ladybird_crash_services.sh'
       - 'tools/ci/tendance_rss.py'
       - 'tools/ci/run_ladybird_sites.sh'
+      - 'tools/ci/bench_ladybird_ab.py'
+      - 'tools/ci/bench_ladybird.py'
       - 'tools/ci/run_ladybird_https_confiance.sh'
       - 'tools/ci/ladybird_runtime_verdict.py'
       - 'tools/ci/verifie-ladybird-convergence.py'
@@ -1369,6 +1373,81 @@ jobs:
             surface-tentatives*.txt
             convergence-browser-host-double.json
           if-no-files-found: warn
+
+  # BOUCHAUD_PERF_V1 : A/B de la surface du navigateur, PLUSIEURS demarrages a
+  # froid par bras (medianes et P95 sur les demarrages, pas sur un seul run).
+  # Meme noyau, meme artefact, meme page ; seul `gui-surface` change.
+  # Environnement : QEMU TCG sur runner GitHub (jamais confondu avec KVM,
+  # WHPX ou le materiel).
+  perf-surface:
+    name: ladybird / perf surface ${{ matrix.surface }} #${{ matrix.essai }}
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        surface: [simple, double]
+        essai: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: Smoke BrowserHost (mesure)
+        env:
+          BO_SMOKE_SURFACE: ${{ matrix.surface }}
+          BO_SMOKE_SUFFIXE: -${{ matrix.surface }}-${{ matrix.essai }}
+        run: tools/ci/run_ladybird_browser_host.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin native-browser
+      - name: Journal
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-surface-${{ matrix.surface }}-${{ matrix.essai }}
+          path: serie-browser-host-${{ matrix.surface }}-${{ matrix.essai }}.log
+          if-no-files-found: warn
+
+  perf-surface-bilan:
+    name: ladybird / perf surface (bilan A/B)
+    needs: [perf-surface]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: perf-surface-*
+          merge-multiple: true
+          path: perf
+      - name: Bilan simple / double (medianes et P95)
+        run: |
+          set -o pipefail
+          ls -la perf
+          a=$(ls perf/serie-browser-host-simple-*.log 2>/dev/null | paste -sd, -)
+          b=$(ls perf/serie-browser-host-double-*.log 2>/dev/null | paste -sd, -)
+          python3 tools/ci/bench_ladybird_ab.py "QEMU TCG, runner GitHub ubuntu-24.04, -smp 4" "simple=$a" "double=$b" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ==========================================================================
   # BOUCHAUD_C44_DEUX_STATUTS_REELS

@@ -70,6 +70,18 @@ else { Write-Host "ECHEC simulation par defaut : $sortie"; $echecs++ }
 function global:Read-Host { param($Prompt) return 'oui' }
 Attendu-Refus 'confirmation fausse' 'confirmation' (P @{ Disque = 3; Identite = "Cle Test|CLE42|$(16GB)"; Execute = $true })
 
+# BOUCHAUD_PERF_V1 -- Mesure-Acceleration.ps1 : refus sans bootimage ; en
+# simulation, chaque configuration a son accelerateur et `-cpu max`, et rien
+# n'est lance.
+$mesure = Join-Path $racine 'tools/windows/Mesure-Acceleration.ps1'
+try { & $mesure -Bootimage "$t/absent.bin" -DryRun *> $null; Write-Host 'ECHEC mesure sans bootimage : aucun refus'; $echecs++ }
+catch { if ($_.Exception.Message -match 'bootimage absent') { Write-Host 'ok    mesure : refus sans bootimage' } else { Write-Host "ECHEC mesure : $($_.Exception.Message)"; $echecs++ } }
+$sortie = & $mesure -Bootimage $img -DryRun -Repetitions 2 -WhpxIrqchip on *>&1 | Out-String
+$plans = ([regex]::Matches($sortie, 'PLAN ')).Count
+if ($plans -eq 10 -and $sortie -match 'PLAN whpx-smp4 #2 : .*-smp 4 .*-accel whpx,kernel-irqchip=on -cpu max' -and $sortie -match 'PLAN tcg-smp1 #1 : .*-accel tcg -cpu max') {
+    Write-Host 'ok    mesure : plan TCG/WHPX SMP1..4, -cpu max, irqchip transmis'
+} else { Write-Host "ECHEC mesure : plan inattendu ($plans) $sortie"; $echecs++ }
+
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }
 Write-Host 'SCRIPTS_WINDOWS_TRIGKEY_OK'
