@@ -59,7 +59,7 @@ def verifie(racine: Path) -> list[str]:
     except OSError as e:
         return [f"lecture impossible : {e}"]
     fautes = []
-    h = corps(src[COURANT], "complete_switch_handoff")
+    h = corps(src[COURANT], "complete_switch_handoff_if_coupe")  # corps de la completion (P13_COMPLETION_SOUS_IF_COUPE_V1)
     i, j, k = h.find("task.switching_out.range(false);"), h.find(BARRIERE), h.find("task.state == TaskState::Ready")
     if min(i, j, k) < 0 or not i < j < k:
         fautes.append(f"{COURANT} : la passation lit l'etat sans barriere apres ses ecritures")

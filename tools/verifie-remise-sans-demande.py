@@ -70,7 +70,7 @@ def verifie(t: dict, autres: str) -> list:
     prepare = corps(t["courant"], "fn prepare_switch_handoff(")
     if RETENUE not in prepare:
         fautes.append("prepare_switch_handoff : la sortante prete n'est pas retenue")
-    complete = corps(t["courant"], "fn complete_switch_handoff(")
+    complete = corps(t["courant"], "fn complete_switch_handoff_if_coupe(")  # corps de la completion (P13_COMPLETION_SOUS_IF_COUPE_V1)
     if not 0 <= complete.find(LECTURE) < complete.find(RENDU) < complete.find(PUBLIE):
         fautes.append("complete_switch_handoff : remise lue apres le rendu de la case, ou publiee sans elle")
     if (t["creation"] + t["courant"] + autres).count("ReveilPublication::Remise") != 1:

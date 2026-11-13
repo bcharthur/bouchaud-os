@@ -387,7 +387,30 @@ fn prepare_switch_handoff(index: usize, task: &mut Task, cpu: usize) {
 /// Un reveil concurrent pendant la commutation peut mettre `state=Ready`, mais
 /// `publish_ready()` refuse encore la tache tant que `on_cpu >= 0`. Ici, apres
 /// abandon physique de l'ancienne pile, on republie exactement une fois.
+///
+/// P13_COMPLETION_SOUS_IF_COUPE_V1 (#264, recidive du 12/11) : la completion
+/// est ATOMIQUE vis-a-vis des IRQ de ce coeur, quel que soit l'appelant.
+/// #285 avait coupe IF de la publication a la completion dans `switch_to`,
+/// mais d'autres continuations terminent une passation interruptions
+/// OUVERTES : `kernel_task_trampoline` (pile initiale RFLAGS=0x202),
+/// `idle_bsp_trampoline` (idem), et l'entree de `schedule()`. Une IRQ de
+/// quantum tombant entre la lecture de `SWITCH_PENDING` et le controle de
+/// `switching_out` entrait dans `preempt_from_irq`, qui terminait la MEME
+/// passation ; la completion reprise trouvait alors `switching_out == false`
+/// et paniquait sur le tid SORTANT (« passation pending sans switching_out
+/// tid=100 », piege du Compositor, 3fd7ada, cpu=3, juste apres un fork) --
+/// ou, interrompue plus loin, republiait la sortante une seconde fois.
+/// Une IRQ arrivee AVANT la completion reste correcte : elle termine la
+/// passation, et cette completion-ci ne trouve plus rien (`NO_TASK`).
 fn complete_switch_handoff() {
+    interrupts::without_interrupts(complete_switch_handoff_if_coupe);
+}
+
+fn complete_switch_handoff_if_coupe() {
+    debug_assert!(
+        !interrupts::are_enabled(),
+        "task: completion de passation interruptions ouvertes"
+    );
     let cpu = local_cpu();
     let outgoing = SWITCH_PENDING[cpu].load(Ordering::Acquire);
     if outgoing == NO_TASK {
