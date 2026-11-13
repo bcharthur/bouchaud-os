@@ -72,26 +72,8 @@ mod x509;
 #[allow(dead_code)]
 mod roots_embarques;
 
-// `validate::now_stamp` lit l'horloge CMOS. Aucune epreuve ne l'appelle --
-// chacune passe son `now` -- mais le module doit compiler.
-#[allow(dead_code)]
-mod arch {
-    pub mod x86_64 {
-        pub mod rtc {
-            pub struct DateTime {
-                pub year: u16,
-                pub month: u8,
-                pub day: u8,
-                pub hour: u8,
-                pub minute: u8,
-                pub second: u8,
-            }
-            pub fn now_utc() -> DateTime {
-                DateTime { year: 2030, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
-            }
-        }
-    }
-}
+// `validate.rs` ne lit plus aucune horloge (BOUCHAUD_TLS_PARTAGE_V1) : chaque
+// epreuve passe son `now`, comme le noyau et l'agent OTA de l'anneau 3.
 
 /// Le magasin factice : une seule racine, les regles de `roots.rs`.
 #[allow(dead_code)]

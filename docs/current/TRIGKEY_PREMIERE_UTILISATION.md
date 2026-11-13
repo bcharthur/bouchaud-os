@@ -83,7 +83,7 @@ Le Trigkey possède **un seul emplacement NVMe** : le SSD dédié remplace tempo
 | Matériel Trigkey (RTL8168, affichage, USB, NVMe réel, coupure secteur) | `BLOCKED_PHYSICAL` | §2. |
 | Canal `testing` automatique | non fait | GitHub n'offre pas d'URL « dernière prerelease » : seul le canal **stable** est automatique. |
 | Reprise d'un téléchargement à travers un redémarrage | partiel | L'interruption est détectée dans STATE (`bo-update historique` : `telechargement_interrompu`), et le téléchargement recommence depuis la première partie, sous signature (QEMU : `ota-reseau`). La reprise **d'octets** n'est pas faite : les parties vivent en RAM. |
-| Politique OTA en ring 3 | en cours | L'agent est encore dans le noyau (`src/kernel/update/ota.rs`). Il installe via `updated`, en ring 3, seul détenteur de la capacité. |
+| Politique OTA en ring 3 | fait (QEMU) | Agent `/bin/bo-ota` en anneau 3, TLS du dépôt (`system/tls-core`) ; le noyau garde l'autorité (`/proc/bouchaud/ota`) et le redémarrage. Profil de sécurité dédié : à faire. |
 | Incident intermittent `ota-complet` (ec0ea87) | surveillé | Voir `TRIGKEY_INSTALL_UPDATE.md`. |
 
 ## 4. Retour arrière

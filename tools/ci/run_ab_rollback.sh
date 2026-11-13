@@ -250,7 +250,11 @@ case "$SCENARIO" in sante|sante-ko|sans-vidange|seconde-cle|mise-a-jour|sans-cle
   for prog in services/serviced/serviced services/healthd/healthd services/updated/updated services/logd/logd tests/healthd-defaillant; do
     "$SDK" "$TRAVAIL/$(basename $prog)" "userland/$prog.c"
   done
-  systeme="bin/serviced=$TRAVAIL/serviced bin/updated=$TRAVAIL/updated bin/logd=$TRAVAIL/logd"
+  # BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA de l'anneau 3 (service `ota` de
+  # serviced, non critique), avec la CA de banc quand le banc en a une.
+  if [ -n "${BOUCHAUD_CA_BANC_DEV:-}" ]; then tools/release/build_bo_ota.sh "$TRAVAIL/bo-ota" --banc
+  else tools/release/build_bo_ota.sh "$TRAVAIL/bo-ota"; fi
+  systeme="bin/serviced=$TRAVAIL/serviced bin/updated=$TRAVAIL/updated bin/logd=$TRAVAIL/logd bin/bo-ota=$TRAVAIL/bo-ota"
   critique_b=$TRAVAIL/healthd; { [ "$SCENARIO" = sante-ko ] || [ "$SCENARIO" = ota-rollback ]; } && critique_b=$TRAVAIL/healthd-defaillant
   critique_a=$TRAVAIL/healthd; [ "$SCENARIO" = echecs-repetes ] && critique_a=$TRAVAIL/healthd-defaillant
   ramdisk "$OUT/slot-b/ramdisk" $systeme "bin/healthd=$critique_b"
@@ -746,9 +750,12 @@ if [ "$OTA_COMPLET" = 1 ]; then
     if grep -aqE "BOUCHAUD_OTA_REPRISE url=$u/rel/system-slot.img.part00[4-5] essai=[2-4] resultat=ok" <<< "$apres_coupe"; then
       perte_lien=reprise_applicative
     else
-      ecart=$(grep -aE "BOUCHAUD_OTA_PARTIE n=[3-5] " <<< "$apres_coupe" \
-        | sed -nE 's/^\[([0-9]+):([0-9]+):([0-9]+)\].*/\1 \2 \3/p' \
-        | awk '{ t = $1 * 3600 + $2 * 60 + $3; if (NR > 1 && t - p > m) m = t - p; p = t } END { print m + 0 }')
+      # L'agent est en anneau 3 (BOUCHAUD_OTA_ANNEAU3_V1) : ses lignes n'ont
+      # pas l'horodatage serie du noyau ; il date chaque partie (t_ms=,
+      # horloge monotone du processus). Meme seuil, meme exigence.
+      ecart=$(grep -aoE "BOUCHAUD_OTA_PARTIE n=[3-5] .*t_ms=[0-9]+" <<< "$apres_coupe" \
+        | sed -E 's/.*t_ms=([0-9]+).*/\1/' \
+        | awk '{ t = int($1 / 1000); if (NR > 1 && t - p > m) m = t - p; p = t } END { print m + 0 }')
       [ "${ecart:-0}" -ge 15 ] || echec "boot=1 raison=pas_de_reprise_apres_la_perte_du_lien ecart_max_s=${ecart:-0}"
       perte_lien="reprise_tcp(ecart_s=$ecart)"
     fi

@@ -6,11 +6,53 @@
 //! client applicatif actuel puisse parler aux frontaux Google/GitHub.
 
 use super::record::{self, CipherSuite, DirKeys, KeySchedule, CT_HANDSHAKE, CT_ALERT, CT_APPLICATION_DATA};
-use super::{hash, x25519, p256, rng, x509, validate};
-use crate::net::tcp::TcpConn;
+use super::{hash, x25519, p256, x509, validate};
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
+
+/// BOUCHAUD_TLS_PARTAGE_V1 -- ce dont le handshake a besoin du systeme qui
+/// l'heberge. Le meme source sert au noyau (TcpConn de smoltcp, RDRAND, RTC)
+/// et a l'agent OTA en anneau 3 (`system/tls-core` : socket Linux,
+/// getrandom, clock_gettime). Rien d'autre n'est emprunte a son hote.
+pub trait Transport {
+    /// Bloque jusqu'a `want` octets recus, ou la fin du flux (faux).
+    fn fill(&mut self, want: usize) -> bool;
+    /// Octets recus, pas encore consommes.
+    fn rx(&self) -> &[u8];
+    /// Consomme `n` octets recus.
+    fn take(&mut self, n: usize) -> Vec<u8>;
+    fn send(&mut self, data: &[u8]) -> bool;
+    /// Emission sans pomper la reception (le noyau en a besoin juste apres le
+    /// Finished ; un socket n'en fait aucune difference).
+    fn send_no_pump(&mut self, data: &[u8]) -> bool { self.send(data) }
+    fn etat(&self) -> EtatFlux;
+    fn close(&mut self);
+}
+
+/// Ce que le transport sait de la fin du flux.
+#[derive(Clone, Copy, Default)]
+pub struct EtatFlux {
+    pub peer_fin: bool,
+    pub closed: bool,
+    pub rst_seen: bool,
+    pub fin_seen: bool,
+}
+
+/// L'aleatoire (cles ephemeres, ClientHello.random) et l'heure de la
+/// validation X.509 (UTC, AAAAMMJJhhmmss : `validate::stamp`), fournis par
+/// l'hote.
+#[derive(Clone, Copy)]
+pub struct Plateforme {
+    pub aleatoire: fn(&mut [u8]),
+    pub maintenant: u64,
+}
+
+fn random32(p: &Plateforme) -> [u8; 32] {
+    let mut r = [0u8; 32];
+    (p.aleatoire)(&mut r);
+    r
+}
 
 // Suites TLS 1.3 reellement implementees.
 const TLS_AES_128_GCM_SHA256: u16 = record::TLS_AES_128_GCM_SHA256_ID;
@@ -74,8 +116,8 @@ struct KeyPair {
 
 impl KeyPair {
     /// Genere une paire ephemere pour le groupe demande.
-    fn generate(group: KxGroup) -> KeyPair {
-        let private = rng::random32();
+    fn generate(group: KxGroup, p: &Plateforme) -> KeyPair {
+        let private = random32(p);
         let public = match group {
             KxGroup::X25519 => x25519::base_mul(&private).to_vec(),
             // Point non compresse 0x04||X||Y (65 octets).
@@ -110,8 +152,8 @@ pub struct CertReport {
 }
 
 /// Session TLS etablie : prete pour les donnees applicatives.
-pub struct Session {
-    pub conn: TcpConn,
+pub struct Session<T: Transport> {
+    pub conn: T,
     c_ap: DirKeys,
     s_ap: DirKeys,
     pub report: CertReport,
@@ -385,10 +427,10 @@ fn parse_server_hello(msg: &[u8]) -> Result<ServerHelloKind, &'static str> {
     Ok(ServerHelloKind::Hello { group, server_pub, cipher })
 }
 
-fn read_raw_record(conn: &mut TcpConn) -> Option<([u8; 5], Vec<u8>)> {
+fn read_raw_record<T: Transport>(conn: &mut T) -> Option<([u8; 5], Vec<u8>)> {
     if !conn.fill(5) { return None; }
     let mut hdr = [0u8; 5];
-    hdr.copy_from_slice(&conn.rx[..5]);
+    hdr.copy_from_slice(&conn.rx()[..5]);
     let len = ((hdr[3] as usize) << 8) | hdr[4] as usize;
     if !conn.fill(5 + len) { return None; }
     let _ = conn.take(5);
@@ -397,7 +439,7 @@ fn read_raw_record(conn: &mut TcpConn) -> Option<([u8; 5], Vec<u8>)> {
     Some((hdr, body))
 }
 
-fn send_plaintext(conn: &mut TcpConn, ct: u8, data: &[u8]) {
+fn send_plaintext<T: Transport>(conn: &mut T, ct: u8, data: &[u8]) {
     let mut rec = Vec::with_capacity(data.len() + 5);
     rec.push(ct);
     rec.extend_from_slice(&[0x03, 0x03]);
@@ -476,7 +518,7 @@ fn subject_cn(cert: &x509::Certificate) -> String {
 
 // Lit un message handshake (ServerHello / HRR) en sautant les CCS, et traduit
 // une alerte recue en message lisible.
-fn read_server_hello(conn: &mut TcpConn) -> Result<Vec<u8>, &'static str> {
+fn read_server_hello<T: Transport>(conn: &mut T) -> Result<Vec<u8>, &'static str> {
     loop {
         let (hdr, body) = read_raw_record(conn).ok_or("pas de ServerHello (timeout)")?;
         match hdr[0] {
@@ -492,12 +534,12 @@ fn read_server_hello(conn: &mut TcpConn) -> Result<Vec<u8>, &'static str> {
 }
 
 /// Effectue le handshake TLS 1.3 complet sur une connexion TCP deja ouverte.
-pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static str> {
+pub fn connect<T: Transport>(mut conn: T, hostname: &str, plateforme: &Plateforme) -> Result<Session<T>, &'static str> {
     // Premier ClientHello : key_share x25519 (accepte par la quasi-totalite des
     // serveurs). Si le serveur impose un autre groupe, il repond par un
     // HelloRetryRequest et on rejoue avec le groupe demande (ex. secp256r1).
-    let mut kp = KeyPair::generate(KxGroup::X25519);
-    let random = rng::random32();
+    let mut kp = KeyPair::generate(KxGroup::X25519, plateforme);
+    let random = random32(plateforme);
 
     let ch = build_client_hello(hostname, &random, &kp, None);
     let mut transcript: Vec<u8> = Vec::new();
@@ -524,7 +566,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
             t.extend_from_slice(&sh1); // HelloRetryRequest
 
             // Rejoue le ClientHello avec le groupe impose + echo du cookie.
-            kp = KeyPair::generate(new_group);
+            kp = KeyPair::generate(new_group, plateforme);
             let ch2 = build_client_hello(hostname, &random, &kp, cookie.as_deref());
             t.extend_from_slice(&ch2);
             send_plaintext(&mut conn, CT_HANDSHAKE, &ch2);
@@ -564,7 +606,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     let mut th_through_cert: Option<Vec<u8>> = None;
     let mut alpn = String::new();
 
-    let feed = |conn: &mut TcpConn, hs_buf: &mut Vec<u8>, s_hs: &mut DirKeys| -> Result<(), &'static str> {
+    let feed = |conn: &mut T, hs_buf: &mut Vec<u8>, s_hs: &mut DirKeys| -> Result<(), &'static str> {
         loop {
             let (hdr, body) = read_raw_record(conn).ok_or("flight serveur incomplet")?;
             match hdr[0] {
@@ -644,7 +686,7 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     // Validation X.509 avant le Finished client : ensuite on enchaine Finished -> GET
     // sans long calcul CPU entre les deux.
     let chain = validate::parse_chain(&certs_der);
-    let now = validate::now_stamp();
+    let now = plateforme.maintenant;
     let v = validate::validate(&chain, hostname, now);
     let cn = leaf.as_ref().map(subject_cn).unwrap_or_default();
     let report = CertReport {
@@ -664,11 +706,12 @@ pub fn connect(mut conn: TcpConn, hostname: &str) -> Result<Session, &'static st
     let rec = c_hs.encrypt(CT_HANDSHAKE, &fin_msg);
     conn.send_no_pump(&rec);
 
-    let post_finished_rx = conn.rx.len();
-    let post_finished_peer_fin = conn.peer_fin;
-    let post_finished_closed = conn.closed;
-    let post_finished_rst = conn.rst_seen;
-    let post_finished_fin_seen = conn.fin_seen;
+    let post_finished_rx = conn.rx().len();
+    let ef = conn.etat();
+    let post_finished_peer_fin = ef.peer_fin;
+    let post_finished_closed = ef.closed;
+    let post_finished_rst = ef.rst_seen;
+    let post_finished_fin_seen = ef.fin_seen;
 
     let c_ap = DirKeys::new(suite, &c_ap_secret);
     let s_ap = DirKeys::new(suite, &s_ap_secret);
@@ -718,7 +761,7 @@ fn tls_ct_name(t: u8) -> &'static str {
     }
 }
 
-impl Session {
+impl<T: Transport> Session<T> {
     pub fn send_app(&mut self, data: &[u8]) -> bool {
         let rec = self.c_ap.encrypt(CT_APPLICATION_DATA, data);
         self.conn.send(&rec)
@@ -751,7 +794,7 @@ impl Session {
                     _ => return None,
                 },
                 None => {
-                    if self.conn.peer_fin || self.conn.closed { return None; }
+                    if self.conn.etat().peer_fin || self.conn.etat().closed { return None; }
                     empty_reads += 1;
                     if empty_reads >= 2 { return None; }
                 }
@@ -774,9 +817,9 @@ impl Session {
                 None => {
                     trace.push(format!(
                         "recv: pas de record TLS complet (rx={} fin={} closed={} rst={} fin_seen={} empty={})",
-                        self.conn.rx.len(), self.conn.peer_fin, self.conn.closed, self.conn.rst_seen, self.conn.fin_seen, empty_reads + 1,
+                        self.conn.rx().len(), self.conn.etat().peer_fin, self.conn.etat().closed, self.conn.etat().rst_seen, self.conn.etat().fin_seen, empty_reads + 1,
                     ));
-                    if self.conn.peer_fin || self.conn.closed { break; }
+                    if self.conn.etat().peer_fin || self.conn.etat().closed { break; }
                     empty_reads += 1;
                     if empty_reads >= 2 { break; }
                     continue;
@@ -785,7 +828,7 @@ impl Session {
             empty_reads = 0;
             records += 1;
             let (hdr, body) = rec;
-            trace.push(format!("recv: record #{} outer={} len={} reste_tcp={}", records, tls_ct_name(hdr[0]), body.len(), self.conn.rx.len()));
+            trace.push(format!("recv: record #{} outer={} len={} reste_tcp={}", records, tls_ct_name(hdr[0]), body.len(), self.conn.rx().len()));
             match hdr[0] {
                 record::CT_CHANGE_CIPHER_SPEC => continue,
                 CT_APPLICATION_DATA => {
@@ -838,7 +881,7 @@ impl Session {
                     break;
                 }
             }
-            if self.conn.peer_fin && self.conn.rx.len() == 0 { break; }
+            if self.conn.etat().peer_fin && self.conn.rx().len() == 0 { break; }
         }
         trace.push(format!("recv: total plaintext={} octets", out.len()));
         out
@@ -848,20 +891,20 @@ impl Session {
     /// SANS fermer la connexion, afin de pouvoir la reutiliser (keep-alive).
     /// S'arrete des que `http::is_complete` est vrai, ou si le flux se termine
     /// (FIN/alerte/timeout). Renvoie les octets HTTP bruts dechiffres.
-    pub fn recv_http(&mut self, max: usize) -> Vec<u8> {
+    pub fn recv_http(&mut self, max: usize, complet: fn(&[u8]) -> bool) -> Vec<u8> {
         let mut out = core::mem::take(&mut self.rx_plain);
-        if crate::net::http::is_complete(&out) { return out; }
+        if complet(&out) { return out; }
         let mut empty_reads = 0u32;
         loop {
             match self.recv_some() {
                 Some(pt) => {
                     empty_reads = 0;
                     out.extend_from_slice(&pt);
-                    if crate::net::http::is_complete(&out) { break; }
+                    if complet(&out) { break; }
                     if out.len() >= max { break; }
                 }
                 None => {
-                    if self.conn.peer_fin || self.conn.closed { break; }
+                    if self.conn.etat().peer_fin || self.conn.etat().closed { break; }
                     empty_reads += 1;
                     if empty_reads >= 2 { break; }
                 }
@@ -872,7 +915,7 @@ impl Session {
 
     /// Vrai si la connexion sous-jacente est encore exploitable (pas de FIN/RST).
     pub fn is_alive(&self) -> bool {
-        !self.conn.peer_fin && !self.conn.closed && !self.conn.rst_seen
+        !self.conn.etat().peer_fin && !self.conn.etat().closed && !self.conn.etat().rst_seen
     }
 
     pub fn close(&mut self) {

@@ -135,6 +135,16 @@ jobs:
       - name: Suites de tests hote
         run: tools/ci/run_host_tests.sh
 
+      # BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA de l'anneau 3 (Rust std, musl),
+      # ses tests, puis son TLS STRICT -- la pile du noyau sur un socket Linux --
+      # contre de vrais serveurs TLS 1.3 : CA de banc acceptee, CA inconnue et
+      # nom non couvert refuses AVANT toute requete.
+      - name: Agent OTA anneau 3 (tests, TLS strict sur l'hote)
+        run: |
+          ( cd / && cargo +"$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")" test --release \
+              --manifest-path "$GITHUB_WORKSPACE/userland/services/ota/Cargo.toml" --target x86_64-unknown-linux-gnu )
+          tools/ci/test_bo_ota_tls.sh
+
       # ICI, ET PAS DANS INTEGRATION. Ce banc construit le noyau deux fois, une
       # fois avec jeton et une fois sans ; il n'a de sens que la ou le cache
       # cargo est deja chaud, sinon il paie deux constructions froides pour

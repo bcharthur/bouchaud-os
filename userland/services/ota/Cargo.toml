@@ -1,0 +1,31 @@
+[package]
+name = "bo-ota"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "BOUCHAUD_OTA_ANNEAU3_V1 : l'agent de mise a jour en anneau 3 (verification signee, telechargement, preparation pour updated)"
+
+[[bin]]
+name = "bo-ota"
+path = "src/main.rs"
+
+[features]
+# BOUCHAUD_CA_BANC_V1 : la CA de banc des scenarios ota-* (run_ab_rollback.sh),
+# jamais livree. Memes regles que la feature du noyau.
+banc-ca-dev = ["bouchaud-tls/banc-ca-dev"]
+
+[dependencies]
+bouchaud-tls = { path = "../../../system/tls-core" }
+bouchaud-update-core = { path = "../../../system/update-core" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = false
+strip = true
+codegen-units = 1
+lto = true
+
+[profile.dev]
+panic = "abort"
+opt-level = 2
