@@ -319,6 +319,9 @@ struct SmpSamplePrevious {
 static mut SMP_SAMPLE_PREVIOUS: Option<SmpSamplePrevious> = None;
 
 static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Commutations de contexte depuis le demarrage (BOUCHAUD_CR3_MEME_ESPACE_V1).
+pub fn context_switches() -> u64 { CONTEXT_SWITCHES.load(Ordering::Relaxed) }
 static IRQ_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 static DEFERRED_PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 static WM_HEARTBEAT_TICK: AtomicU64 = AtomicU64::new(0);

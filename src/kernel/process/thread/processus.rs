@@ -36,6 +36,12 @@ impl Mm {
         identity.mark_inactive(cpu);
     }
 
+    /// BOUCHAUD_CR3_MEME_ESPACE_V1 : l'espace COURANT de ce processus est-il
+    /// celui que ce coeur execute ? (Faux apres un `exec` qui l'a remplace.)
+    pub fn reste_charge_ici(&self, cpu: usize) -> bool {
+        self.activation.lock().charge_ici(cpu)
+    }
+
     pub fn replace_activation(&self, identity: Arc<crate::kernel::vmm::AddressSpaceIdentity>) {
         *self.activation.lock() = identity;
     }

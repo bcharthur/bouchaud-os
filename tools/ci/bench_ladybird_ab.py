@@ -26,10 +26,14 @@ import bench_ladybird as bl  # noqa: E402
 
 
 def derniere(t, balise):
-    lignes = [l for l in t.splitlines() if balise in l]
-    if not lignes:
-        return {}
-    return {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", lignes[-1].split(balise, 1)[1])}
+    """Les champs des lignes `balise`, les plus recentes l'emportant : une
+    ligne coupee par un entrelacement de la serie ne fait pas perdre un champ
+    qu'une ligne precedente portait."""
+    champs = {}
+    for l in t.splitlines():
+        if balise in l:
+            champs.update({k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", l.split(balise, 1)[1])})
+    return champs
 
 
 def mesures(t):
@@ -37,6 +41,7 @@ def mesures(t):
     perf = derniere(t, "[LB:PERF]")
     rendu = derniere(t, "M11_RENDER_STATS")
     bilan = derniere(t, "GUI_SURFACE_BILAN")
+    cr3 = derniere(t, "[PROC-STAT] commutations=")
     tous_present = [int(v) for v in re.findall(r"\[LB:PERF\] .*present_us_moy=(\d+)", t)]
     m.update({
         "present_us_moy_fin": perf.get("present_us_moy"),
@@ -51,6 +56,9 @@ def mesures(t):
         "liberations": rendu.get("liberations"),
         "compositions_mixtes": bilan.get("compositions_mixtes"),
         "octets_serie": len(t.encode("utf-8", "replace")),
+        # BOUCHAUD_CR3_MEME_ESPACE_V1 (n/m sur un noyau qui ne le publie pas).
+        "cr3_ecrits_total": (cr3["cr3_ecrits"] + cr3.get("cr3_noyau", 0)) if "cr3_ecrits" in cr3 else None,
+        "cr3_evites_total": (cr3["cr3_evites"] + cr3.get("cr3_noyau_evites", 0)) if "cr3_evites" in cr3 else None,
     })
     return m
 
@@ -70,6 +78,8 @@ LIBELLES = [
     ("compositions_mixtes", "Compositions mixtes (déchirure lue)", ""),
     ("rss_somme_des_max_kio", "Mémoire : somme des RSS max", "Kio"),
     ("octets_serie", "Volume du journal série", "o"),
+    ("cr3_ecrits_total", "CR3 rechargés (utilisateur + noyau)", ""),
+    ("cr3_evites_total", "CR3 évités (même espace)", ""),
 ]
 
 

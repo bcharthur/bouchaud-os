@@ -873,6 +873,17 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         vivantes,
         RELEVES_FAUTES_MANQUES.load(Ordering::Relaxed),
     );
+    // BOUCHAUD_CR3_MEME_ESPACE_V1 : commutations et chargements de CR3
+    // (utilisateur ecrits, evites ; noyau), cumules depuis le demarrage.
+    crate::serial_println!(
+        "[PROC-STAT] commutations={} espaces_gardes={} cr3_ecrits={} cr3_evites={} cr3_noyau={} cr3_noyau_evites={}",
+        crate::kernel::task::context_switches(),
+        crate::kernel::vmm::ESPACES_GARDES.load(Ordering::Relaxed),
+        crate::kernel::vmm::CR3_ECRITS.load(Ordering::Relaxed),
+        crate::kernel::vmm::CR3_EVITES.load(Ordering::Relaxed),
+        crate::kernel::vmm::CR3_NOYAU.load(Ordering::Relaxed),
+        crate::kernel::vmm::CR3_NOYAU_EVITES.load(Ordering::Relaxed),
+    );
     let (depassements, pire) = crate::kernel::task::proc_depassements();
     let invariants = crate::kernel::task::invariants_compta();
     crate::serial_println!(

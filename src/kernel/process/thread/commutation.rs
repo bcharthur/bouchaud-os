@@ -155,6 +155,24 @@ fn deactivate_task_space(task: &Task, cpu_id: usize) {
     if !task.noyau { task.process.mm.mark_inactive(cpu_id); }
 }
 
+/// BOUCHAUD_CR3_MEME_ESPACE_V1 -- quitter `from` pour `to` sans quitter son
+/// espace d'adressage : deux fils du MEME processus, dont l'espace courant
+/// est celui que ce coeur execute. Le coeur reste alors marque actif (les
+/// shootdowns continuent de le viser) et `install` ne recharge pas CR3.
+/// Sinon : la sortie habituelle de l'espace.
+#[inline]
+fn quitte_espace(from: &Task, to: &Task, cpu_id: usize) {
+    let garde = !from.noyau
+        && !to.noyau
+        && Arc::ptr_eq(&from.process, &to.process)
+        && from.process.mm.reste_charge_ici(cpu_id);
+    if garde {
+        crate::kernel::vmm::ESPACES_GARDES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        deactivate_task_space(from, cpu_id);
+    }
+}
+
 #[inline]
 fn mark_task_running(task: &mut Task, cpu_id: usize) {
     assert_eq!(
