@@ -74,6 +74,26 @@ pub struct Task {
     pub kernel_cpu_ns: EcheanceAtomique,
     pub cpu_ns: [EcheanceAtomique; MAX_CPUS],
     pub in_kernel: DrapeauAtomique,
+    /// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : vrai de l'entree d'un appel
+    /// systeme jusqu'APRES sa livraison de signaux (`deliver_pending`), en
+    /// TEMPS REEL. `in_kernel` n'est qu'un instantane pris au repli de la
+    /// tranche : pour un fil en cours d'execution il peut dater d'avant son
+    /// appel systeme (mesure : 4 vols de SIGCHLD sur 30 passages de
+    /// sigchld-multifil-probe, fil principal `Ready`, `in_kernel=false`,
+    /// en train d'executer `poll`). Ecrit par son seul fil.
+    pub en_appel_systeme: DrapeauAtomique,
+    /// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : le fil dort dans une attente qui
+    /// REND LA MAIN sur signal (`poll`, `select`, `epoll_wait`, sommeil
+    /// signalable, attente native) : un signal de processus peut l'y
+    /// attendre. Pas `wait4` ni `futex`, qui se rendorment. Ecrit par son
+    /// seul fil (garde `AttenteSignalable`).
+    pub attente_signalable: DrapeauAtomique,
+    /// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : fin de la reservation d'un signal au
+    /// fil principal, posee par CE fil quand il le lui laisse ; sa prochaine
+    /// attente est bornee par elle (`borne_par_reservation`), pour qu'il
+    /// livre lui-meme si le principal ne l'a pas pris. 0 : aucune. Ecrit et
+    /// lu par son seul fil.
+    pub echeance_reservation_ns: EcheanceAtomique,
     pub context_switches: EcheanceAtomique,
     pub migrations: EcheanceAtomique,
     pub frame: TrapFrame,

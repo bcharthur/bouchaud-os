@@ -209,6 +209,12 @@ diagnostic_echec() {
     # 1b. BOUCHAUD_OTA_V1 : agent, updated, transport HTTPS.
     grep -aE "BOUCHAUD_OTA_|UPDATED_(OTA|INSTALL|SKIP|IDLE|PROGRESS)|nautile/(ERR|NET)\] (https|\[TLS)|BOUCHAUD_PERSIST_(MONTAGE|DEMARRAGES)" \
       <<< "$propre" | awk -v n="$n" 'c < 60 { print "AB_DIAG " n " " $0; c++ }' || true
+    # 1c. Réseau de l'invité : lien vu par le pilote, reconfiguration, ARP,
+    # bilans de lien et de routage. ota-reseau (24a1419, job 132252775893) :
+    # après `set_link e0 on`, sept minutes de `connect` en échec, sans qu'on
+    # sache si l'invité avait revu le lien.
+    grep -aE "BOUCHAUD_NET_(LIEN|RECONFIGURE|ARP_ECHEC)|NET_VERDICT|NET_BOOT .*phase=|\[NET-(LIEN|ROUTAGE|TCP)\]" \
+      <<< "$propre" | awk -v n="$n" 'c < 40 { print "AB_DIAG " n " " $0; c++ }' || true
     # 2. Transport USB : décompte, puis les premiers échecs d'E/S.
     echo "AB_DIAG $n usb io_echec=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_IO_ECHEC' <<< "$propre" || true) reprise_ok=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_OK' <<< "$propre" || true) reprise_echec=$(grep -ac 'BOUCHAUD_USB_BOT_REPRISE_ECHEC' <<< "$propre" || true) vidange_refusee=$(grep -ac 'BOUCHAUD_USB_STOCKAGE_VIDANGE_REFUSEE' <<< "$propre" || true)"
     # awk lit tout (pas de `head`) : sous pipefail, aucun SIGPIPE du producteur.

@@ -774,6 +774,8 @@ fn frontiere_compta_bloc(vers_noyau: bool) -> bool {
 }
 
 pub fn account_resume_user_noreturn() {
+    // `execve` reussi : l'appel ne rejoint jamais la fin d'`execute_syscall`.
+    sort_appel_systeme();
     account_kernel_exit();
 }
 

@@ -103,6 +103,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     let mut child_signals = signals;
     // Les signaux en attente ne sont pas herites : ils appartenaient au parent.
     child_signals.pending = 0;
+    child_signals.leve_ns = 0;
 
     let child = Arc::new(Process {
         pid,
