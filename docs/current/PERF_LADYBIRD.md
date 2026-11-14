@@ -145,6 +145,27 @@ Mesure : temps mural hôte entre le lancement de QEMU et le premier octet du noy
   - le refus nommé sur un disque qui ne le porte pas ;
   - l'image de boot sous 20 Mo.
 
+### Du noyau au bureau : où partent les 5,2 à 5,8 s sous TCG (13/11)
+
+Construction de diagnostic locale (QEMU TCG SMP2, sans navigateur). Points silencieux publiés avec leur temps, analyse de la police chronométrée.
+
+| Étape (horloge de l'invité) | t |
+|---|---|
+| `kernel-main` | 0 ms |
+| ordonnanceur en ligne, premiers fils noyau | 2 770 ms |
+| `bureau-entree` (tâche `desktop`) | 2 981 ms |
+| analyse de la police DejaVuSans (`fontdue::Font::from_bytes`) | 2 996 → 5 396 ms : **2 401 ms** |
+| fond d'écran 1280×720 | 322 ms |
+| `bureau-premiere-trame` | 5 784 ms |
+
+Ce que ce relevé établit et n'établit pas :
+
+- **42 % du trajet du noyau au bureau** est l'analyse de la police : 6 253 glyphes, dont toutes les géométries sont calculées d'avance.
+- `load_substitutions: false` **n'y change rien** (2 327 et 2 459 ms), et n'est donc pas retenu.
+- C'est du calcul flottant, lent sous TCG. **Sous WHPX ou sur le matériel, ce poste n'est pas mesuré.** Pour cette raison, aucune optimisation n'est faite à l'aveugle.
+- La ligne permanente `BOUCHAUD_POLICE_ANALYSEE glyphes= duree_ms=` le mesurera dans les journaux WHPX et matériel. On n'optimisera que si elle y pèse.
+- Le DHCP ne retarde pas le bureau. La première découverte reste sans réponse (700 ms, aucune trame), la seconde part 1,74 s plus tard et réussit en 1 ms. Le bail (3,6 à 3,8 s) arrive avant la première trame.
+
 ## HTTPS de Ladybird (`BOUCHAUD_CA_COMPLET_V2`)
 
 Banc `tools/ci/run_ladybird_https_confiance.sh`, dans le job « Sites réels » :

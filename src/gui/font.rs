@@ -435,9 +435,20 @@ fn fd_font() -> Option<&'static fontdue::Font> {
     unsafe {
         if !FD_TRIED {
             FD_TRIED = true;
+            // Le temps de cette analyse est MESURE : 2,3 a 2,5 s sous QEMU TCG
+            // (13/11/2026, 6253 glyphes, toutes geometries calculees d'avance,
+            // `load_substitutions: false` n'y change rien), sur le chemin
+            // critique de la premiere trame du bureau. Sous accelerateur
+            // materiel, a mesurer : cette ligne le dira.
+            let debut_ms = crate::kernel::timer::monotonic_ms();
             match fontdue::Font::from_bytes(FONT_DATA, fontdue::FontSettings::default()) {
                 Ok(f) => {
                     crate::serial_println!("[font_ttf] fontdue: DejaVuSans charge ({} glyphes)", f.glyph_count());
+                    crate::serial_println!(
+                        "BOUCHAUD_POLICE_ANALYSEE glyphes={} duree_ms={}",
+                        f.glyph_count(),
+                        crate::kernel::timer::monotonic_ms().saturating_sub(debut_ms)
+                    );
                     FD_FONT = Some(f);
                     FD_CACHE = Some(hashbrown::HashMap::new());
                     FD_ADV = Some(hashbrown::HashMap::new());
