@@ -174,7 +174,7 @@
         {"nom": "fermeture_onglet_ms", "de": "fermeture", "a": "ferme"}
       ]
     },
-    {"id": "E2E-06", "titre": "Interactions graphiques (fenetre : deplacement, redimensionnement, reduction, plein ecran)", "non_implemente": "pilotage de la geometrie des fenetres clientes non publie par le gestionnaire de fenetres (pas de marqueur de position) : a ajouter avant de pouvoir viser la barre de titre"},
+    {"id": "E2E-06", "titre": "Interactions graphiques (fenetre : deplacement, redimensionnement, reduction, plein ecran)", "non_implemente": "scenario de deplacement et de redimensionnement non ecrit ; la zone utile du navigateur est publiee (BOUCHAUD_ATELIER_FENETRE_CLIENT), pas encore la barre de titre ni les poignees"},
     {"id": "E2E-07", "titre": "Multitache DOOM + Ladybird", "non_implemente": "scenario non ecrit dans cette version du banc"},
     {"id": "E2E-08", "titre": "Endurance (cycles d'ouverture, de navigation et d'onglets)", "non_implemente": "scenario non ecrit dans cette version du banc ; les endurances existantes restent dans ladybird-native-browser.yml"},
     {"id": "E2E-09", "titre": "Persistance (favoris apres relance et apres redemarrage)", "non_implemente": "scenario non ecrit dans cette version du banc"},
