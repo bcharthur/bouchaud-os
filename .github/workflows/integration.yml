@@ -330,6 +330,54 @@ jobs:
           path: python-disque/*.log
           if-no-files-found: warn
 
+  souffrance-verrou:
+    # BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) : quand TOUS les coeurs sont
+    # figes, la seule ligne qui sort (`[DIAG-EN-SOUFFRANCE]`, emise par l'IRQ)
+    # doit nommer le verrou attendu, son coeur proprietaire et la ligne de
+    # l'attente. Temoin positif (noyau `banc-souffrance-verrou`, jamais livre)
+    # et temoin negatif (l'image partagee : aucune ligne en 60 s).
+    name: qemu / noyau fige, proprietaire du verrou
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: integration-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            integration-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Noyau temoin (banc-souffrance-verrou)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          command -v cargo-bootimage >/dev/null 2>&1 || cargo install bootimage --locked
+          cargo bootimage --features banc-souffrance-verrou
+          grep -aq BOUCHAUD_BANC_SOUFFRANCE target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin temoin-souffrance.bin
+      - name: Ligne de souffrance d'un noyau fige
+        run: tools/ci/run_souffrance_verrou.sh temoin-souffrance.bin image/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-souffrance-verrou
+          path: souffrance-verrou/*.log
+          if-no-files-found: warn
+
   os-primitives:
     name: qemu / os primitives
     needs: [gate, kernel-build]
@@ -690,7 +738,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -701,6 +749,7 @@ jobs:
           NVME: ${{ needs.nvme-gpt.result }}
           HEALTH: ${{ needs.system-health.result }}
           PYDISK: ${{ needs.python-disque.result }}
+          SOUFFRANCE: ${{ needs.souffrance-verrou.result }}
           PRIMITIVES: ${{ needs.os-primitives.result }}
           MM: ${{ needs.mm-ng6.result }}
           QT: ${{ needs.qt-pixel.result }}
@@ -717,7 +766,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -727,7 +776,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -736,7 +785,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

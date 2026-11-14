@@ -632,18 +632,48 @@ pub fn stall_probe_from_timer() {
         && debut_ns.saturating_sub(DIAG_SOUFFRANCE_DERNIERE_NS.load(Ordering::Relaxed)) >= DIAG_SOUFFRANCE_NS
     {
         DIAG_SOUFFRANCE_DERNIERE_NS.store(debut_ns, Ordering::Relaxed);
+        // BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283). Quand tous les coeurs
+        // sont figes, cette ligne est la SEULE qui sort : `diag-noyau` ne
+        // tourne plus, donc ni `[SMP-SPIN]` (proprietaire, site d'appel) ni
+        // `[SMP-IPI]` (ou se trouvent les autres coeurs). Deux gels de #283
+        // (b95fc0a sur #309, 2e61a6b sur #319) n'ont laisse que l'adresse du
+        // verrou : impossible de dire QUI le tient ni OU on l'attend. La ligne
+        // porte desormais, par coeur :
+        //   spin=[verrou/age_tics/pPROPRIO@fichier:ligne ...] -- le CPU
+        //        proprietaire et la ligne de l'appel `lock()` en attente ;
+        //   ipi=[age_tics/rip/uU ...] -- dernier IPI recu : RIP interrompu et
+        //        mode (u1 : utilisateur). Le coeur zero envoie un IPI de
+        //        reordonnancement a chaque quantum aux coeurs en mode
+        //        utilisateur : un coeur fige en mode noyau a un age qui croit.
+        // Lectures atomiques seulement ; `fichier` est un `&'static str` de
+        // `Location`, reduit a son dernier composant.
         let spin = |cpu: usize| crate::kernel::sync::attente_verrou(cpu)
-            .map(|a| (a.verrou as u64, now.wrapping_sub(a.depuis)))
-            .unwrap_or((0, 0));
+            .map(|a| {
+                let court = a.fichier.rsplit('/').next().unwrap_or(a.fichier);
+                (a.verrou as u64, now.wrapping_sub(a.depuis), a.proprietaire as i64, court, a.ligne)
+            })
+            .unwrap_or((0, 0, -1, "-", 0));
+        let (s0, s1, s2, s3) = (spin(0), spin(1), spin(2), spin(3));
+        let ipi = |cpu: usize| {
+            let tick = STALL_IPI_TICK[cpu].load(Ordering::Acquire);
+            let age = if STALL_IPI_COUNT[cpu].load(Ordering::Acquire) == 0 { 0 } else { now.saturating_sub(tick) };
+            (age, STALL_IPI_RIP[cpu].load(Ordering::Acquire), STALL_IPI_USER[cpu].load(Ordering::Acquire))
+        };
+        let (i0, i1, i2, i3) = (ipi(0), ipi(1), ipi(2), ipi(3));
         crate::serial_println!(
             "[DIAG-EN-SOUFFRANCE] t={} demande_ms={} fil={} cur=[{},{},{},{}] site=[{} {} {} {}] \
-spin=[{:#x}/{} {:#x}/{} {:#x}/{} {:#x}/{}]",
+spin=[{:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{}] \
+ipi=[{}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{}]",
             now,
             debut_ns.saturating_sub(depuis) / 1_000_000,
             DIAG_FIL_LANCE.load(Ordering::Relaxed) as u8,
             mots[1] as i64, mots[2] as i64, mots[3] as i64, mots[4] as i64,
             site0, site1, site2, site3,
-            spin(0).0, spin(0).1, spin(1).0, spin(1).1, spin(2).0, spin(2).1, spin(3).0, spin(3).1,
+            s0.0, s0.1, s0.2, s0.3, s0.4,
+            s1.0, s1.1, s1.2, s1.3, s1.4,
+            s2.0, s2.1, s2.2, s2.3, s2.4,
+            s3.0, s3.1, s3.2, s3.3, s3.4,
+            i0.0, i0.1, i0.2, i1.0, i1.1, i1.2, i2.0, i2.1, i2.2, i3.0, i3.1, i3.2,
         );
     }
 }

@@ -615,6 +615,10 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // qui n'est pas celui qui tourne devant l'utilisateur.
     #[cfg(feature = "banc-io")]
     crate::platform::pc::banc_io::demarre();
+    // BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) : temoin qui fige
+    // VOLONTAIREMENT tous les coeurs. Jamais livre.
+    #[cfg(feature = "banc-souffrance-verrou")]
+    crate::platform::pc::banc_souffrance::demarre();
 
     // Le navigateur est lance sur demande. Le prechauffage automatique reste
     // desactive pour preserver les ressources du bureau et du diagnostic LAB.

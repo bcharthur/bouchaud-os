@@ -42,6 +42,13 @@ banc-gpu-composition-panne = []
 # reglage a l'execution laisserait la possibilite de l'armer par accident. Voir
 # `platform/pc/banc_io.rs` et `tools/ci/run_trigkey_ladybird_io_stress.sh`.
 banc-io = []
+# BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) -- TEMOIN DU NOYAU FIGE.
+# Un fil noyau prend un verrou et tourne sans le rendre ; le demarrage l'attend.
+# Sur deux coeurs, plus rien ne s'ordonnance : seule la ligne
+# `[DIAG-EN-SOUFFRANCE]` de l'IRQ peut encore sortir, et elle doit nommer le
+# proprietaire et la ligne d'attente. Voir `platform/pc/banc_souffrance.rs` et
+# `tools/ci/run_souffrance_verrou.sh`. Jamais dans une image livree.
+banc-souffrance-verrou = []
 # BOUCHAUD_CLE_USB_TEST_V1 -- IMAGE D'ESSAI SUR CLE USB.
 #
 # Aucune commande d'ecriture, de vidange, de formatage, d'effacement ni de
