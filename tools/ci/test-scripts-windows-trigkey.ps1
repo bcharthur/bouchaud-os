@@ -92,7 +92,7 @@ function Verifie([string]$Nom, [bool]$Condition, [string]$Detail = '') {
 }
 # L'analyseur PowerShell sur les scripts touches : une erreur de syntaxe dans
 # run.ps1 ne se verrait sinon que sur Windows.
-foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1')) {
+foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1', 'tools/windows/Verifier-Ladybird.ps1')) {
     $jetons = $null; $erreursAnalyse = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $racine $f), [ref]$jetons, [ref]$erreursAnalyse)
     Verifie "analyse $f" ($erreursAnalyse.Count -eq 0) (($erreursAnalyse | ForEach-Object { $_.Message }) -join ' ; ')

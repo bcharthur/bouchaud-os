@@ -31,6 +31,7 @@ on:
   pull_request:
     paths:
       - 'tools/ladybird/**'
+      - 'tools/e2e/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
@@ -108,6 +109,7 @@ on:
     branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024', 'chatgpt/active']
     paths:
       - 'tools/ladybird/**'
+      - 'tools/e2e/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
@@ -1248,6 +1250,74 @@ jobs:
             surface-browser-host-t*.ppm
             surface-tentatives.txt
             convergence-browser-host.json
+          if-no-files-found: warn
+
+  # BOUCHAUD_E2E_LADYBIRD_V1 : les PARCOURS UTILISATEUR, joues par la souris
+  # et le clavier de QEMU (chemin reel), depuis UNE definition commune
+  # (tools/e2e/ladybird/scenarios.json) que tools/windows/Verifier-Ladybird.ps1
+  # joue aussi sous WHPX. TCG et KVM SMP4, jamais melanges. DIAGNOSTIC (hors
+  # verdict de convergence) tant qu'il n'a pas ete vu vert.
+  e2e-parcours:
+    name: ladybird / e2e parcours (${{ matrix.accel }} SMP4, diagnostic)
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        accel: [tcg, kvm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 file
+      - name: Tests de l'orchestrateur (sans QEMU)
+        run: python3 -m unittest discover -s tools/e2e/ladybird -p 'test_e2e.py' -v
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: Acces a /dev/kvm
+        if: matrix.accel == 'kvm'
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Materiel TLS de banc (genere ici, jamais commite)
+        run: python3 -I tools/e2e/ladybird/tls/genere_tls.py "$RUNNER_TEMP/e2e-tls"
+      - name: Disque E2E (session normale, navigateur au menu)
+        run: |
+          python3 -I tools/e2e/ladybird/prepare_disque.py --artefact native-browser \
+            --certs /etc/ssl/certs/ca-certificates.crt --ca-test "$RUNNER_TEMP/e2e-tls/ca.pem" \
+            --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img
+      - name: Parcours E2E
+        run: |
+          python3 tools/e2e/ladybird/e2e.py --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --disque disque-e2e.img --accel ${{ matrix.accel }} --smp 4 --memoire 8192 \
+            --sortie e2e-${{ matrix.accel }} --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
+            --exige E2E-01,E2E-02,E2E-03,E2E-04,E2E-05
+      - name: Rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-e2e-${{ matrix.accel }}
+          path: e2e-${{ matrix.accel }}
           if-no-files-found: warn
 
   # BOUCHAUD_VIRTIO_GPU_2D_V1 : le MEME smoke, ecran virtio-gpu (-vga none).

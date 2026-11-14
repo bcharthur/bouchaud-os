@@ -2467,7 +2467,10 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     };
 
     crate::gui::services::enregistre(client.pid);
-    #[cfg(feature = "reference-desktop")]
+    // Publie dans TOUTE construction, plus seulement sous `reference-desktop` :
+    // une ligne par lancement, et le noyau livre devient observable. Le
+    // parcours E2E (BOUCHAUD_E2E_LADYBIRD_V1) joue le noyau par defaut et
+    // attendait en vain ce marqueur, pendant 120 s, a chaque passage.
     crate::serial_println!(
         "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
         client.pid,
@@ -2484,6 +2487,17 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     ouvre_fenetre(wins, w, degats);
     if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
         client.envoie_configuration(true);
+    }
+    // BOUCHAUD_E2E_LADYBIRD_V1 : la zone utile de la fenetre, dans le repere
+    // de l'ecran -- celui ou arrivent les clics (`window::zone_utile`, la
+    // MEME definition que le routage des evenements). Un banc qui clique
+    // dans la page comme un humain en a besoin ; une ligne par ouverture.
+    if let Some(w) = wins.last() {
+        let z = window::zone_utile(w);
+        crate::serial_println!(
+            "BOUCHAUD_ATELIER_FENETRE_CLIENT titre={} x={} y={} w={} h={}",
+            window::TITRE_NAVIGATEUR, z.x, z.y, z.largeur, z.hauteur
+        );
     }
 }
 
