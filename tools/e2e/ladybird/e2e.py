@@ -236,14 +236,15 @@ class Banc:
         self.fixture = None
         self.mon: Moniteur | None = None
         self.curseur = 0
-        self.vars: dict[str, str] = {"FIXTURE": f"http://10.0.2.2:{o.port_fixture}"}
+        self.vars: dict[str, str] = {"FIXTURE": f"http://10.0.2.2:{o.port_fixture}",
+                                     "FIXTURE_TLS": f"https://10.0.2.2:{o.port_fixture + 1}"}
         self.instants: dict[str, float] = {}
         self.captures_rgb: dict[str, tuple] = {}
 
     # --- environnement -------------------------------------------------------
     def demarre(self) -> None:
         self.fixture = subprocess.Popen([sys.executable, str(ICI / "fixture.py"), str(self.o.port_fixture),
-                                         str(self.journal_fixture)],
+                                         str(self.journal_fixture), str(self.o.port_fixture + 1)],
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         ligne = self.fixture.stdout.readline()
         if "E2E_FIXTURE_PRETE" not in ligne:
@@ -334,6 +335,11 @@ class Banc:
             return True, ""
         if "capture" in e:
             return self.capture(e)
+        if "fixture_jamais" in e:
+            # Preuve d'un REFUS : le site de reference n'a jamais servi cette page.
+            vus = [json.loads(l) for l in self.journal_fixture.read_text().splitlines() if l.strip()]
+            servi = [v for v in vus if v["chemin"] == e["fixture_jamais"]]
+            return (not servi), ("" if not servi else f"le site de reference a servi {e['fixture_jamais']} malgre le refus attendu")
         if "fixture_vu" in e:
             vus = [json.loads(l) for l in self.journal_fixture.read_text().splitlines() if l.strip()]
             ok = any(v["chemin"] == e["fixture_vu"] and (e.get("q") is None or v["q"] == e["q"]) for v in vus)

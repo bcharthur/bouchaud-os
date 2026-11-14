@@ -26,7 +26,7 @@ sys.path.insert(0, str(ICI))
 import e2e  # noqa: E402
 import fixture  # noqa: E402
 
-ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client"}
+ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client", "fixture_jamais"}
 
 
 class Definition(unittest.TestCase):
@@ -201,6 +201,32 @@ class CausesParParcours(unittest.TestCase):
         self.assertIn("RS_ECHEC url=https://expired.badssl.com/ code=60", l)
         self.assertIn("autre chose", l)
         self.assertFalse(any("MEM-NG" in x for x in l))
+
+
+class RefusTls(unittest.TestCase):
+    def test_certificat_expire_refuse_pour_son_expiration(self):
+        import socket
+        import ssl
+        serveur = fixture.serveur_tls(0)
+        port = serveur.server_address[1]
+        threading.Thread(target=serveur.serve_forever, daemon=True).start()
+        try:
+            ctx = ssl.create_default_context(cafile=str(fixture.TLS / "ca.pem"))
+            ctx.check_hostname = False  # 10.0.2.2 cote invite ; ici 127.0.0.1
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as brut:
+                with self.assertRaises(ssl.SSLCertVerificationError) as e:
+                    ctx.wrap_socket(brut).close()
+            # Refuse pour l'EXPIRATION : l'autorite, elle, est reconnue.
+            self.assertIn("expired", str(e.exception))
+        finally:
+            serveur.shutdown()
+
+    def test_disque_e2e_recoit_l_autorite_de_test(self):
+        sys.path.insert(0, str(ICI))
+        import prepare_disque
+        magasin = prepare_disque.avec_ca_de_test(b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n")
+        self.assertTrue(magasin.startswith(b"-----BEGIN CERTIFICATE-----\nX"))
+        self.assertTrue(magasin.endswith((ICI / "tls" / "ca.pem").read_bytes()))
 
 
 class Extrait(unittest.TestCase):

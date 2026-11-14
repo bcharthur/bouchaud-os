@@ -45,6 +45,19 @@ def autorun_session(url: str) -> str:
         "desktop", ""])
 
 
+CA_DE_TEST = Path(__file__).resolve().parent / "tls" / "ca.pem"
+MAGASIN = ("./etc/ssl/certs/ca-certificates.crt", "etc/ssl/certs/ca-certificates.crt")
+
+
+def avec_ca_de_test(magasin: bytes) -> bytes:
+    """Le magasin d'autorites + l'autorite de TEST du banc (tls/ca.pem).
+
+    Seul le disque E2E la recoit : E2E-03 prouve qu'un certificat EXPIRE
+    signe par une autorite de confiance est refuse pour son expiration.
+    """
+    return magasin.rstrip(b"\n") + b"\n" + CA_DE_TEST.read_bytes()
+
+
 def ajoute(tar: tarfile.TarFile, nom: str, donnees: bytes, mode: int) -> None:
     info = tarfile.TarInfo(nom)
     info.size, info.mode, info.uid, info.gid, info.uname, info.gname = len(donnees), mode, 0, 0, "root", "root"
@@ -75,7 +88,7 @@ def depuis_artefact(artefact: Path, certs: Path, url: str, tar: tarfile.TarFile)
                 dossier(tar, f"./usr/share/ladybird/{rel}")
             else:
                 ajoute(tar, f"./usr/share/ladybird/{rel}", p.read_bytes(), 0o644)
-    ajoute(tar, "./etc/ssl/certs/ca-certificates.crt", certs.read_bytes(), 0o644)
+    ajoute(tar, "./etc/ssl/certs/ca-certificates.crt", avec_ca_de_test(certs.read_bytes()), 0o644)
     ajoute(tar, "./autorun", autorun_session(url).encode(), 0o644)
 
 
@@ -93,6 +106,8 @@ def depuis_image(image: Path, url: str, tar: tarfile.TarFile) -> None:
                 lignes.insert(i, f"export BOUCHAUD_M9_URL='{url}'")
                 ajoute(tar, m.name, "\n".join(lignes).encode(), m.mode)
                 vu = True
+            elif m.name in MAGASIN and m.isfile():
+                ajoute(tar, m.name, avec_ca_de_test(src.extractfile(m).read()), m.mode)
             elif m.isfile():
                 tar.addfile(m, src.extractfile(m))
             else:

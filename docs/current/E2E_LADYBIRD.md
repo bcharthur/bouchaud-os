@@ -36,7 +36,8 @@ Ce que chaque preuve établit, et ce qu'elle n'établit pas :
 |---|---|---|
 | E2E-01 | Démarrage : CPU, ordonnanceur, battement, bureau | implémenté |
 | E2E-02 | Ouverture par le menu, première trame, page d'accueil **visible** | implémenté |
-| E2E-03 | HTTPS réel (example.com), refus d'un certificat expiré (`RS_ECHEC code=60`) | implémenté ; `BLOCKED_EXTERNAL` si le réseau externe manque |
+| E2E-03 | Refus d'un certificat **expiré** signé par une autorité de confiance (`RS_ECHEC code=60` et page jamais servie), puis HTTPS réel (example.com) | implémenté ; refus **déterministe** sur le site de référence (`tls/`) ; `BLOCKED_EXTERNAL` si example.com manque |
+| E2E-03X | Refus du certificat expiré d'un site externe réel (expired.badssl.com) | implémenté, **jamais bloquant** |
 | E2E-04 | Recherche sur le site de référence : formulaire, résultats, lien, retour, avance | implémenté, bloquant |
 | E2E-04G | Recherche Google réelle | implémenté, **jamais bloquant** ; consentement, CAPTCHA ou indisponibilité donnent `BLOCKED_EXTERNAL`, jamais un succès |
 | E2E-05 | Onglets : ouverture, navigation par onglet, bascule **sans rechargement**, fermeture | implémenté |
@@ -114,3 +115,17 @@ Deux défauts du **banc**, corrigés :
 
 1. **Zone persistante absente.** Le disque n'avait pas la zone de 128 Mio que `mkdisk.sh` ajoute. Sans `/persist`, le BrowserHost sortait avec le code 1, quatre fois de suite.
 2. **E2E-04 : Entrée sur le lien qui avait le foyer.** La page de résultats est chargée et visible, mais Entrée ne navigue pas. Le banc **clique** désormais au milieu de la page, comme un humain, grâce à la zone utile que publie le gestionnaire de fenêtres. Il reste à établir si l'activation d'un lien au clavier manque dans Ladybird.
+
+### E2E-03 rendu déterministe (14/11)
+
+À 75fc27b et 3453bfe, `expired.badssl.com` a coupé la poignée TLS (`RS_ECHEC code=35`, *Broken pipe*) avant toute vérification. Le refus du certificat n'était alors **pas prouvé**. Élargir le motif « externe » à ce code aurait pu masquer un défaut de notre propre pile TLS.
+
+Le refus est désormais prouvé sur le site de référence :
+
+- **Certificat** : `tools/e2e/ladybird/tls/expire.pem` (IP 10.0.2.2, expiré depuis le 02/01/2025), signé par une autorité de **test** (`tls/ca.pem`).
+- **Autorité** : ajoutée au magasin du **seul** disque E2E (`prepare_disque.py`), jamais à une image livrée.
+- **Ce qu'on attend** : un `code=60` (vérification du certificat), et **aucune** requête servie pour la page.
+- **Ce que vérifie le test hôte** (`RefusTls`) : le refus porte sur l'**expiration**, pas sur une autorité inconnue ni sur une extension manquante. La première version du certificat, sans AKI ni SKI, était refusée pour ce manque : le test l'a attrapé.
+- **Régénération** : `python3 tools/e2e/ladybird/tls/genere_tls.py`.
+
+`expired.badssl.com` reste joué dans E2E-03X, en parcours non bloquant.
