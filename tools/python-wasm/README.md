@@ -9,6 +9,26 @@ dépendances et prend plusieurs minutes à compiler. On compile une fois,
 hors-ligne, et on committe le `.wasm` (~16 Mo) — même logique que les polices
 de `src/assets/fonts/`.
 
+## Où il vit : sur le disque, plus dans le noyau
+
+Depuis le 13/11/2026, le `.wasm` n'est **plus embarqué** dans l'image de boot.
+Ses 16,4 Mo doublaient le temps de chargement par le BIOS : 10,0 à 11,6 s avant
+la première ligne du noyau, contre 4,8 à 5,6 s sans (QEMU TCG). Le détail est
+dans `docs/current/PERF_LADYBIRD.md`.
+
+- **Emplacement** : `/usr/lib/python/rustpython.wasm` sur le disque de données.
+  `tools/userland/mkdisk.sh` et `run.ps1` l'y déposent.
+- **Lecture** : au premier `python`, en 29 à 38 ms, puis gardé en mémoire.
+- **Disque sans interpréteur** : `python` le dit (« interpréteur absent : … »)
+  et la session continue. **C'est désormais le cas de l'image de livraison
+  Trigkey** : `python` y venait du noyau, il n'y est plus. Aucun banc ni
+  service de cette image ne s'en sert. Pour le rendre, il suffit de déposer le
+  fichier dans le système assemblé, ou de construire avec la feature
+  ci-dessous.
+- **`cargo bootimage --features python-embarque`** rétablit l'ancien
+  `include_bytes!`, pour une image sans disque de données.
+- **Banc** : `tools/ci/run_python_disque.sh` (CI `qemu / python depuis le disque`).
+
 ## Contenu du binaire
 
 - **RustPython 0.5** (Python 3.13) : compilateur + VM, écrits en Rust pur —
