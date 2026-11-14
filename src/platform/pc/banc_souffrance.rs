@@ -26,7 +26,9 @@ static VERROU: SpinLock<u64> = SpinLock::new(0);
 static TENU: AtomicBool = AtomicBool::new(false);
 
 fn detenteur() -> ! {
-    let mut garde = VERROU.lock();
+    // Meme ligne que la prise : c'est le site du DETENTEUR que la ligne de
+    // souffrance doit nommer (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1).
+    let (_ligne_detenteur, mut garde) = (line!(), VERROU.lock());
     *garde += 1;
     TENU.store(true, Ordering::Release);
     crate::serial_println!(

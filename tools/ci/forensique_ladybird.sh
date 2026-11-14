@@ -32,6 +32,12 @@ sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$JOURNAL" |
   | awk '/\[FIL-RELEVE\] debut/ { n = 0; delete l } /\[FIL-RELEVE\] debut/, /\[FIL-RELEVE\] fin/ { if ($0 !~ /\[SCHED-TACHE\]/) l[++n] = $0 }
          END { if (n == 0) print "(aucun releve publie)"; for (i = 1; i <= n && i <= 500; i++) print l[i] }' \
   | cut -c1-420 || true
+# BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1 : quand tous les coeurs sont figes,
+# `[DIAG-EN-SOUFFRANCE]` est la SEULE ligne qui sort, et ses champs `spin=` et
+# `ipi=` depassent 260 caracteres : les trois dernieres, ENTIERES (gel de
+# main@eb6f115 : la ligne coupee a fait perdre l'etat des coeurs 2 et 3).
+echo "-- noyau fige : dernieres lignes [DIAG-EN-SOUFFRANCE], entieres --"
+sed -E 's/\x1b\[[0-9;]*m//g' "$JOURNAL" | tr -d '\r' | grep -aF '[DIAG-EN-SOUFFRANCE]' | tail -n 3 || true
 echo "-- 60 dernieres lignes du journal, hors releves memoire periodiques et releve des fils --"
 sed -E 's/\x1b\[[0-9;]*m//g' "$JOURNAL" | tr -d '\r' | grep -avE 'MM-NG6|\[FIL-FORENSIQUE\]|\[SCHED-TACHE\]' | tail -n 60 | cut -c1-260 || true
 echo "== FORENSIQUE FIN =="
