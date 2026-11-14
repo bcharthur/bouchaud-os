@@ -2488,6 +2488,17 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     if let Some(App::Navigateur { client }) = wins.last_mut().map(|w| &mut w.app) {
         client.envoie_configuration(true);
     }
+    // BOUCHAUD_E2E_LADYBIRD_V1 : la zone utile de la fenetre, dans le repere
+    // de l'ecran -- celui ou arrivent les clics (`window::zone_utile`, la
+    // MEME definition que le routage des evenements). Un banc qui clique
+    // dans la page comme un humain en a besoin ; une ligne par ouverture.
+    if let Some(w) = wins.last() {
+        let z = window::zone_utile(w);
+        crate::serial_println!(
+            "BOUCHAUD_ATELIER_FENETRE_CLIENT titre={} x={} y={} w={} h={}",
+            window::TITRE_NAVIGATEUR, z.x, z.y, z.largeur, z.hauteur
+        );
+    }
 }
 
 /// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : lance n'importe quel programme ring 3

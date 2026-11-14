@@ -26,7 +26,7 @@ sys.path.insert(0, str(ICI))
 import e2e  # noqa: E402
 import fixture  # noqa: E402
 
-ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu"}
+ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client"}
 
 
 class Definition(unittest.TestCase):
@@ -176,6 +176,20 @@ class Metriques(unittest.TestCase):
         i_ctrl_t = next(i for i, e in enumerate(etapes) if e.get("touches") == ["ctrl-t"])
         self.assertLess(i_charge, i_ctrl_t)
         self.assertLess(i_charge, i_capture)
+
+
+class Fenetre(unittest.TestCase):
+    def test_zone_client_derniere_publiee(self):
+        t = ("BOUCHAUD_ATELIER_FENETRE_CLIENT titre=Ladybird x=10 y=20 w=300 h=200\n"
+             "BOUCHAUD_ATELIER_FENETRE_CLIENT titre=DOOM x=1 y=2 w=3 h=4\n"
+             "BOUCHAUD_ATELIER_FENETRE_CLIENT titre=Ladybird x=90 y=60 w=1100 h=604\n")
+        self.assertEqual(e2e.zone_client(t, "Ladybird"), (90, 60, 1100, 604))
+        self.assertIsNone(e2e.zone_client(t, "Notes"))
+
+    def test_page_de_resultats_bloc_cliquable_vers_l_article(self):
+        html = fixture.page("resultats", "R", "x", lien_bloc="/article-1.html")
+        self.assertIn("<a id='lien-bloc' href='/article-1.html'", html)
+        self.assertIn(fixture.hexa(fixture.COULEURS["resultats"]), html)
 
 
 class Extrait(unittest.TestCase):

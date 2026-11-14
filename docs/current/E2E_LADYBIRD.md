@@ -40,7 +40,7 @@ Ce que chaque preuve établit, et ce qu'elle n'établit pas :
 | E2E-04 | Recherche sur le site de référence : formulaire, résultats, lien, retour, avance | implémenté, bloquant |
 | E2E-04G | Recherche Google réelle | implémenté, **jamais bloquant** ; consentement, CAPTCHA ou indisponibilité donnent `BLOCKED_EXTERNAL`, jamais un succès |
 | E2E-05 | Onglets : ouverture, navigation par onglet, bascule **sans rechargement**, fermeture | implémenté |
-| E2E-06 | Interactions de fenêtre | `NOT_RUN` : la position des fenêtres clientes n'est pas publiée |
+| E2E-06 | Interactions de fenêtre | `NOT_RUN` : la zone utile du navigateur est publiée (`BOUCHAUD_ATELIER_FENETRE_CLIENT`), il reste le scénario de déplacement et de redimensionnement |
 | E2E-07 | DOOM et Ladybird simultanés | `NOT_RUN` : non écrit |
 | E2E-08 | Endurance | `NOT_RUN` : non écrit (les endurances existantes restent en CI) |
 | E2E-09 | Persistance | `NOT_RUN` : non écrit |
@@ -98,3 +98,19 @@ Sous TCG SMP2, en local, sur un disque sans navigateur :
 - 5,5 s entre le noyau et le bureau, selon l'horloge de l'invité.
 
 Le temps d'**avant** le noyau domine donc déjà sous TCG.
+
+## Premier passage réel sous KVM (CI, 14/11, `a403de4`, SMP4, vrai Ladybird)
+
+| Parcours | Verdict |
+|---|---|
+| E2E-01 démarrage | PASS |
+| E2E-02 ouverture par le menu, page d'accueil **visible** | PASS |
+| E2E-03 HTTPS réel et refus d'un certificat expiré | PASS |
+| E2E-04 recherche | FAIL, voir ci-dessous |
+| E2E-04G Google | FAIL, non bloquant |
+| E2E-05 onglets, bascule sans rechargement | PASS |
+
+Deux défauts du **banc**, corrigés :
+
+1. **Zone persistante absente.** Le disque n'avait pas la zone de 128 Mio que `mkdisk.sh` ajoute. Sans `/persist`, le BrowserHost sortait avec le code 1, quatre fois de suite.
+2. **E2E-04 : Entrée sur le lien qui avait le foyer.** La page de résultats est chargée et visible, mais Entrée ne navigue pas. Le banc **clique** désormais au milieu de la page, comme un humain, grâce à la zone utile que publie le gestionnaire de fenêtres. Il reste à établir si l'activation d'un lien au clavier manque dans Ladybird.

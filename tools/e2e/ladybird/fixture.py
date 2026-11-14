@@ -45,16 +45,20 @@ def hexa(rgb):
     return "#%02x%02x%02x" % rgb
 
 
-def page(nom, titre, corps, focus=None):
+def page(nom, titre, corps, focus=None, lien_bloc=None):
     script = ""
     if focus:
         # Le foyer va a l'element voulu des le chargement : le banc tape au
         # clavier sans viser a la souris une page dont il ignore la mise en page.
         script = "<script>window.addEventListener('load',function(){var e=document.querySelector('%s');if(e){e.focus();}});</script>" % focus
+    bloc = "<div id='bloc' style='width:100%%;height:260px;background:%s'></div>" % hexa(COULEURS[nom])
+    if lien_bloc:
+        # Le bloc entier est un lien : le banc clique au milieu de la page,
+        # sans connaitre sa mise en page au pixel pres.
+        bloc = "<a id='lien-bloc' href='%s' style='display:block'>%s</a>" % (lien_bloc, bloc)
     return ("<!doctype html><html><head><meta charset='utf-8'><title>%s</title>%s</head>"
-            "<body style='margin:0;font-family:sans-serif'>"
-            "<div id='bloc' style='width:100%%;height:260px;background:%s'></div>"
-            "<div style='padding:16px'>%s</div></body></html>") % (titre, script, hexa(COULEURS[nom]), corps)
+            "<body style='margin:0;font-family:sans-serif'>%s"
+            "<div style='padding:16px'>%s</div></body></html>") % (titre, script, bloc, corps)
 
 
 class Gestionnaire(BaseHTTPRequestHandler):
@@ -94,7 +98,8 @@ class Gestionnaire(BaseHTTPRequestHandler):
                             for i, (nom, titre) in enumerate(RESULTATS))
             qh = html.escape(q)
             self.envoie(200, page("resultats", "Resultats E2E : %s" % qh,
-                                  "<h1>Resultats pour %s</h1>%s" % (qh, liens), focus="#r1"))
+                                  "<h1>Resultats pour %s</h1>%s" % (qh, liens), focus="#r1",
+                                  lien_bloc="/%s.html" % RESULTATS[0][0]))
         elif u.path.endswith(".html") and u.path[1:-5] in COULEURS:
             nom = u.path[1:-5]
             self.envoie(200, page(nom, "Page %s" % nom, "<h1>Page %s</h1>" % nom))

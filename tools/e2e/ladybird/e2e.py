@@ -311,6 +311,8 @@ class Banc:
         # pour que l'attente suivante ne trouve pas un marqueur plus ancien.
         if "menu" in e:
             return self.ouvre_par_le_menu(e["menu"], nom)
+        if "clic_client" in e:
+            return self.clic_client(e["clic_client"], e.get("dy", 0), nom)
         if "touches" in e:
             self.curseur = len(self.texte())
             if nom:
@@ -363,6 +365,27 @@ class Banc:
                 return True, ""
             time.sleep(0.25)
         return False, f"le menu Demarrer ne propose pas « {libelle} »"
+
+    def clic_client(self, titre: str, dy: int, nom: str | None) -> tuple[bool, str]:
+        """Clic dans la PAGE d'une fenetre cliente, comme un humain.
+
+        Position : la zone utile publiee par le gestionnaire de fenetres
+        (`BOUCHAUD_ATELIER_FENETRE_CLIENT`), centre horizontal, `dy` pixels
+        sous son bord haut (la barre d'outils du navigateur comprise).
+        """
+        z = zone_client(self.texte(), titre)
+        if z is None:
+            return False, f"geometrie de la fenetre « {titre} » absente"
+        x, y, w, h = z
+        if not 0 <= dy < h:
+            return False, f"dy={dy} hors de la zone utile (h={h})"
+        self.curseur = len(self.texte())
+        self.mon.va(x + w // 2, y + dy)
+        time.sleep(0.3)
+        if nom:
+            self.instants[nom] = self.maintenant_ms()
+        self.mon.clic()
+        return True, ""
 
     def capture(self, e: dict) -> tuple[bool, str]:
         nom = e["capture"]
@@ -585,6 +608,12 @@ def main(argv: list[str]) -> int:
     print(f"E2E_VERDICT {verdict} " + " ".join(f"{k}={v}" for k, v in compte.items())
           + f" accel_reel={manifeste['environnement']['accel_reel']} sortie={sortie}", flush=True)
     return 0 if verdict == "PASS" else 1
+
+
+def zone_client(texte: str, titre: str):
+    """Derniere zone utile publiee pour la fenetre `titre` : (x, y, w, h)."""
+    m = re.findall(rf"BOUCHAUD_ATELIER_FENETRE_CLIENT titre={re.escape(titre)} x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)", texte)
+    return tuple(map(int, m[-1])) if m else None
 
 
 # Bilans periodiques du noyau : utiles dans serial.log, du bruit dans un extrait.

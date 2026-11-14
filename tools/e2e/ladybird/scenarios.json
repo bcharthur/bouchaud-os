@@ -74,7 +74,7 @@
         {"fixture_vu": "/resultats", "q": "bouchaud os navigateur"},
         {"pause_s": 2},
         {"capture": "04-resultats", "couleur": "resultats", "min_px": 20000},
-        {"touches": ["ret"], "nom": "clic_resultat"},
+        {"clic_client": "Ladybird", "dy": 166, "nom": "clic_resultat"},
         {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/article-1.html", "delai_s": 120, "nom": "article"},
         {"touches": ["alt-left"], "nom": "retour"},
         {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/resultats\\?q=bouchaud\\+os\\+navigateur", "delai_s": 120, "nom": "revenu"},
