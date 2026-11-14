@@ -137,6 +137,19 @@ class Disque(unittest.TestCase):
             self.assertNotIn("https://x", autorun)
 
 
+class Extrait(unittest.TestCase):
+    def test_extrait_sans_bruit_ni_couleur_borne(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Path(t) / "serial.log"
+            j.write_text("\n".join(["\x1b[36m[PROC-STAT] x\x1b[0m", "gui: navigateur : refus"]
+                                   + [f"ligne {i}" for i in range(200)]) + "\n")
+            ex = e2e.extrait_journal(j, 50)
+            self.assertEqual(len(ex), 50)
+            self.assertEqual(ex[-1], "ligne 199")
+            self.assertFalse(any("PROC-STAT" in l or "\x1b" in l for l in ex))
+            self.assertEqual(e2e.extrait_journal(Path(t) / "absent.log"), [])
+
+
 class Fixture(unittest.TestCase):
     def test_requete_echappee_et_journalisee(self):
         with tempfile.TemporaryDirectory() as t:

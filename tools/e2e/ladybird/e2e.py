@@ -572,9 +572,31 @@ def main(argv: list[str]) -> int:
         + ([{"id": "global", "statut": "FAIL", "cause": "disque modifie"}] if not disque_intact else []),
         indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     rapport_html(sortie, manifeste, liste)
+    if verdict != "PASS":
+        for ligne in extrait_journal(sortie / "serial.log"):
+            print("E2E_EXTRAIT " + ligne)
     print(f"E2E_VERDICT {verdict} " + " ".join(f"{k}={v}" for k, v in compte.items())
           + f" accel_reel={manifeste['environnement']['accel_reel']} sortie={sortie}", flush=True)
     return 0 if verdict == "PASS" else 1
+
+
+# Bilans periodiques du noyau : utiles dans serial.log, du bruit dans un extrait.
+BRUIT = re.compile(r"PROC-STAT|MM-RSS|PERF-RIP|SMP-LOAD|SCHED-NG|REGISTRE-|SONDE-GEL|IDENTITE|BATTEMENT|HEARTBEAT|_BILAN")
+EXTRAIT_LIGNES = 80
+
+
+def extrait_journal(chemin: Path, n: int = EXTRAIT_LIGNES) -> list[str]:
+    """Les `n` dernieres lignes SIGNIFICATIVES du journal serie, sans couleurs.
+
+    Un echec en CI doit se lire dans le journal du job lui-meme : les
+    artefacts ne sont pas toujours accessibles a qui diagnostique.
+    """
+    try:
+        texte = chemin.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lignes = [re.sub(r"\x1b\[[0-9;]*m", "", l).rstrip() for l in texte.splitlines()]
+    return [l[:300] for l in lignes if l.strip() and not BRUIT.search(l)][-n:]
 
 
 if __name__ == "__main__":

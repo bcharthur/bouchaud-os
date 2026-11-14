@@ -2467,7 +2467,10 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     };
 
     crate::gui::services::enregistre(client.pid);
-    #[cfg(feature = "reference-desktop")]
+    // Publie dans TOUTE construction, plus seulement sous `reference-desktop` :
+    // une ligne par lancement, et le noyau livre devient observable. Le
+    // parcours E2E (BOUCHAUD_E2E_LADYBIRD_V1) joue le noyau par defaut et
+    // attendait en vain ce marqueur, pendant 120 s, a chaque passage.
     crate::serial_println!(
         "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid={} zone={}x{}",
         client.pid,
