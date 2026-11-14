@@ -14,6 +14,11 @@ reference-bringup = []
 reference-desktop = ["reference-bringup"]
 # P19 experimental QEMU TCG profile, opt-in; the physical default is unchanged.
 p19-tcg-low-latency = []
+# Python (RustPython, 16,4 Mo) EMBARQUE dans le noyau, comme avant le
+# 13/11/2026. Par defaut l'interpreteur est lu sur le disque de donnees
+# (/usr/lib/python/rustpython.wasm) au premier `python` : l'embarquer doublait
+# le temps de chargement BIOS (voir src/lang/python.rs).
+python-embarque = []
 # BOUCHAUD_GPU_COMPOSITION_V2 (P10) : la negociation VIRGL et le compositeur
 # GPU des fenetres sont TOUJOURS compiles ; ils ne s'enclenchent que si l'hote
 # PROPOSE VIRGL (QEMU `virtio-gpu-gl-pci`), que la sonde 3D et l'autotest de

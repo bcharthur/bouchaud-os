@@ -40,6 +40,19 @@ fi
 #
 # Les chemins sont relatifs a $SOURCE, donc ce qui s'y trouve atterrit a la
 # racine du RAMFS : out/hello devient /hello.
+# L'interpreteur Python (16,4 Mo) n'est plus embarque dans le noyau : il vit
+# sur ce disque, ou `python` le lit au premier usage (src/lang/python.rs).
+# Il est depose dans une copie de $SOURCE, jamais dans $SOURCE lui-meme. Un
+# dossier qui apporte deja le sien le garde.
+PY_WASM=../../src/assets/python/rustpython.wasm
+if [ -f "$PY_WASM" ] && [ ! -e "$SOURCE/usr/lib/python/rustpython.wasm" ]; then
+    ASSEMBLE=$(mktemp -d)
+    trap 'rm -rf "$ASSEMBLE"' EXIT
+    cp -a "$SOURCE/." "$ASSEMBLE/"
+    mkdir -p "$ASSEMBLE/usr/lib/python"
+    cp "$PY_WASM" "$ASSEMBLE/usr/lib/python/rustpython.wasm"
+    SOURCE=$ASSEMBLE
+fi
 tar --format=ustar -C "$SOURCE" -cf "$IMAGE" .
 
 # Le noyau lit par secteurs de 512 octets ; on complete pour que la derniere
