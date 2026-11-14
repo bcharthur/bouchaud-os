@@ -6,10 +6,10 @@ Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 19:00
 
 | Objet | SHA | État |
 |---|---|---|
-| `main` | `eb6f115` | #321, #322, #320, #323 puis #324 (ligne de souffrance du noyau figé) fusionnées le 14/11 ; `main@01dc7fd` vérifiée verte (CI Fast relancé : compile + invariants) |
+| `main` | `2eabd65` | #321, #322, #320, #323, #324, #326 puis #325 (lignes de souffrance du noyau figé) fusionnées le 14/11 ; `main@01dc7fd` vérifiée verte (CI Fast relancé : compile + invariants) |
 | #319 `claude/sigchld-boucle` | `2179ddf` | correctif #311, à jour de `main` ; A/B terminé (§2bis) : les trois échecs d'origine ne se reproduisent pas ; **non fusionnée** : un contrôle `robustesse` rouge au SHA exact (gel #283) et décision humaine attendue |
 | #324 `claude/souffrance-proprio` | `b259735` | **fusionnée** (`eb6f115`) : 141 contrôles verts |
-| #325 `claude/souffrance-site-detenteur` | `adfdf88` | site de prise du détenteur ; seul rouge : le bras `perf avant-simple`, qui démarre le noyau de `main` (gel #283) ; relancé une fois |
+| #325 `claude/souffrance-site-detenteur` | `adfdf88` | **fusionnée** (`2eabd65`) : 141 contrôles verts ; le seul rouge initial (`perf avant-simple`, noyau de `main`, gel #283) relancé une fois, vert |
 | #320 `claude/e2e-ladybird` | `8aed50d` | **fusionnée** (`65a67d6`, 14/11 ~11:00 UTC) : 78 contrôles verts ; `E2E_VERDICT PASS` sous KVM et TCG |
 | #321 `claude/python-hors-noyau` | `efcf54f` | **fusionnée** (`c6c3eea`) |
 
