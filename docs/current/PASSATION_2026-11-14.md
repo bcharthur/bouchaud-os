@@ -1,14 +1,14 @@
 # Passation du 14/11/2026 — mission « développement, stabilisation et performance »
 
-Point de reprise vivant de la nuit du 13 au 14/11. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
+Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 08:30 UTC. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
 
 ## 1. État de `main` et des PR
 
 | Objet | SHA | État |
 |---|---|---|
-| `main` | `c6c3eea` | contient #315 à #318, puis **#321 fusionnée le 14/11 à 01:25 UTC** (arbre de `efcf54f`, 67 contrôles verts) |
-| #319 `claude/sigchld-boucle` | `e7e8b96` | correctif #311 ; **fusion bloquée** : anomalie `ota-reseau` non classée (voir §3) |
-| #320 `claude/e2e-ladybird` | `a4432d1` | parcours E2E ; KVM : lancement OK, puis Ladybird planté 4 fois sur 4 (cause à lire dans `E2E_CAUSE`) |
+| `main` | `c6c3eea` | #321 fusionnée le 14/11 à 01:25 UTC (arbre de `efcf54f`, 67 contrôles verts) ; **CI de `main` après fusion : 59 verts, 0 échec** |
+| #319 `claude/sigchld-boucle` | `e7e8b96` | correctif #311 ; **fusion bloquée** : trois échecs nouveaux et sensibles au temps, non classés (voir §3) |
+| #320 `claude/e2e-ladybird` | `3453bfe` | parcours E2E sous KVM : 01, 02, 04 et 05 PASS ; E2E-03 FAIL une fois sur deux (à classer) ; **non fusionnable** |
 | #321 `claude/python-hors-noyau` | `efcf54f` | **fusionnée** (`c6c3eea`) |
 
 Règle appliquée : une PR n'est fusionnée qu'avec tous ses contrôles obligatoires verts **au SHA exact**. Une relance verte ne règle jamais un intermittent.
@@ -55,6 +55,29 @@ L'interpréteur Python (16,4 Mo) quitte l'image de boot (29,3 → 12,9 Mo). Prem
 - L'image de livraison Trigkey **perd `python`**, ce qui est dit dans la PR et dans le README de python-wasm.
 - Anomalie préexistante notée : le code de sortie de `python -c` est perdu, y compris sur l'ancien noyau.
 - Attribution du trajet du noyau au bureau sous TCG : 2,4 s sur 5,2 à 5,8 s vont à l'analyse de la police (`fontdue`). **Non optimisé**, parce que ce coût est probablement propre à TCG. La ligne `BOUCHAUD_POLICE_ANALYSEE` le mesurera sous WHPX et sur le matériel.
+
+
+### #319 : trois échecs nouveaux sur la branche, non classés
+
+| Job | SHA | Vu | Témoin |
+|---|---|---|---|
+| `ab-rollback (ota-reseau)` : `partie_5_non_reprise` | 24a1419 | 1 sur 2 | vert sur `main` |
+| `BRDP client-lent` : délai dépassé | e7e8b96 | 1 sur 2 | vert sur `main@c6c3eea` |
+| `ab-rollback (mise-a-jour-morts)` : `updated_battements_manques` | e7e8b96 | 1 fois | jamais en échec sur une trentaine de passages |
+
+Mécanisme : la PR n'agit que sur un processus multi-fil qui reçoit un signal destiné au processus. Les trois cas sont des fils uniques ou des fils noyau. **Rien ne les relie à la PR, rien ne les en écarte.**
+
+À faire : un A/B au même SHA de base, en plusieurs passages, de ces trois bancs avec et sans la PR.
+
+### #320 : parcours E2E, défauts du banc corrigés dans la nuit
+
+1. Le marqueur de lancement n'existait que sous `reference-desktop`.
+2. Le disque n'avait pas de zone persistante : le BrowserHost sortait avec le code 1.
+3. Entrée sur un lien ne navigue pas : le banc clique désormais dans la page, avec la zone utile publiée par le gestionnaire de fenêtres. E2E-04 passe ; l'activation d'un lien au clavier dans Ladybird reste à vérifier.
+4. Course entre capture et extinction dans le banc native IPC.
+5. Lignes de cause prises dans la fenêtre du parcours en échec.
+
+Intermittent sans lien avec la PR : `CONSOLE_PANIQUE_ECHEC 1999/2000`, vert au noyau identique.
 
 ## 3. Anomalies ouvertes, non attribuées
 
