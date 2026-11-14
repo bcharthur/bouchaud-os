@@ -370,6 +370,10 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // clavier et la souris attendent, et une commande de stockage qui traine
     // se voit a l'ecran. Voir `budget_bot`.
     drivers::xhci_active::bring_up_termine();
+    // BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) : temoin qui fige
+    // VOLONTAIREMENT tous les coeurs. Jamais livre.
+    #[cfg(feature = "banc-souffrance-verrou")]
+    platform::pc::banc_souffrance::demarre();
 
     // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
     //

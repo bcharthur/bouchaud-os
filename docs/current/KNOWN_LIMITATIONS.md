@@ -26,6 +26,16 @@ Les colonnes distinguent ce qui est **sur `main`**, ce qui est **dans une PR ouv
   `LADYBIRD_FUNCTIONAL_SMOKE fail raison=jalons manquants=7`, 2 démarrages sur
   96 (épreuve « piège du Compositor »), sur `main` ET sur la branche candidate.
   Cause non établie (piste : ordonnancement / réveil perdu après fork-exec).
+  Deux formes vues le 14/11 sur #319 à `2e61a6b` (même famille que #309) :
+  (a) piège du Compositor, 1/16 : tous les fils IPC des six processus en
+  `poll(-1)` sur la même file depuis la même seconde, aucun verrou tenu, CPU au
+  repos ; (b) `perf apres-double` (`batterie_workers`) : juste après le
+  fork-exec d'un WebWorker, les quatre CPU gardent la même tâche 20 min, le
+  CPU 0 (`services-metrics`) tourne sur un verrou, le CPU 2 (le WebWorker) est
+  dans une faute de page du chargeur (site 212), comme sur #309. La ligne de
+  l'IRQ ne disait ni le propriétaire ni le site d'attente ; elle les dit
+  désormais (`BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1`, éprouvé par
+  `tools/ci/run_souffrance_verrou.sh`).
 - **#288 — Banc de coupure : faux `INVENTION` possible.** Une occurrence sur
   ~180 coupures ; mécanisme probable (acquittements encore dans l'anneau de la
   console asynchrone, tolérance du juge +1) lu dans le code, non prouvé par une
