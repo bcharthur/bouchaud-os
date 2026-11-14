@@ -137,6 +137,40 @@ class Disque(unittest.TestCase):
             self.assertNotIn("https://x", autorun)
 
 
+class Metriques(unittest.TestCase):
+    def test_instants_locaux_au_parcours(self):
+        class FauxBanc:
+            def __init__(self):
+                self.instants = {"lancement_qemu": 0.0, "requete": 100.0, "resultats": 900.0}
+                self.t = 1000.0
+            def texte(self):
+                return ""
+            def maintenant_ms(self):
+                self.t += 10
+                return self.t
+            def etape(self, e):
+                if "nom" in e:
+                    self.instants[e["nom"]] = self.maintenant_ms()
+                return (False, "bloque") if e.get("echoue") else (True, "")
+        sc = {"id": "X", "titre": "x", "etapes": [{"pause_s": 0, "nom": "requete"}, {"pause_s": 0, "echoue": True}],
+              "metriques": [{"nom": "m", "de": "requete", "a": "resultats"},
+                            {"nom": "boot", "de": "lancement_qemu", "a": "requete"}]}
+        r = e2e.joue(FauxBanc(), sc, {})
+        self.assertEqual(r["statut"], "FAIL")
+        # `resultats` vient d'un AUTRE parcours : jamais reutilise.
+        self.assertIsNone(r["metriques"]["m"])
+        self.assertIsNotNone(r["metriques"]["boot"])
+
+    def test_e2e05_ramene_l_onglet_1_avant_d_y_revenir(self):
+        d = json.loads((ICI / "scenarios.json").read_text(encoding="utf-8"))
+        etapes = [x for x in d["scenarios"] if x["id"] == "E2E-05"][0]["etapes"]
+        i_charge = next(i for i, e in enumerate(etapes) if "onglet=1 document_charge url=${FIXTURE}/article-1.html" in e.get("attend", ""))
+        i_capture = next(i for i, e in enumerate(etapes) if e.get("couleur") == "article-1")
+        i_ctrl_t = next(i for i, e in enumerate(etapes) if e.get("touches") == ["ctrl-t"])
+        self.assertLess(i_charge, i_ctrl_t)
+        self.assertLess(i_charge, i_capture)
+
+
 class Extrait(unittest.TestCase):
     def test_extrait_sans_bruit_ni_couleur_borne(self):
         with tempfile.TemporaryDirectory() as t:

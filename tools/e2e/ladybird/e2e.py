@@ -412,6 +412,11 @@ def joue(banc: Banc, sc: dict, resultats: dict) -> dict:
         return r
     depart = len(banc.texte())
     debut = banc.maintenant_ms()
+    # Instants LOCAUX au parcours : des noms comme `requete` ou `resultats`
+    # reviennent d'un parcours a l'autre. Sans remise a zero, E2E-04G bloque
+    # sur Google rapporterait la latence du site de reference d'E2E-04, ou une
+    # latence negative. Seule l'origine commune (lancement de QEMU) est gardee.
+    banc.instants = {"lancement_qemu": banc.instants.get("lancement_qemu", 0.0)}
     r["statut"], r["cause"] = "PASS", ""
     for e in sc["etapes"]:
         t = banc.maintenant_ms()

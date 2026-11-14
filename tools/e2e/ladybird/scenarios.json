@@ -114,7 +114,12 @@
       "id": "E2E-05",
       "titre": "Onglets : ouverture, navigation par onglet, bascule sans rechargement, fermeture",
       "requiert": ["E2E-02"],
+      "note": "L'onglet 1 est d'abord ramene sur article-1 : E2E-04G (non bloquant) a pu le laisser sur Google, une page de consentement ou d'erreur, et ne doit pas pouvoir changer ce verdict.",
       "etapes": [
+        {"touches": ["ctrl-l"]},
+        {"tape": "${FIXTURE}/article-1.html", "entree": true},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/article-1.html", "delai_s": 180, "nom": "onglet1_pret"},
+        {"pause_s": 2},
         {"touches": ["ctrl-t"], "nom": "nouvel_onglet_2"},
         {"attend": "\\[LB:TAB\\] ouvert onglet=(?P<onglet2>\\d+) ", "delai_s": 120, "nom": "onglet2_ouvert"},
         {"pause_s": 2},
