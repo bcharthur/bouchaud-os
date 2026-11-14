@@ -91,6 +91,16 @@ def main() -> int:
                 args.composited.read_bytes(),
                 0o755,
             )
+        if args.composited is not None:
+            # BOUCHAUD_COMPOSITORD_PRESENTATION_V1 : l'hote capture l'ecran des
+            # que la mire est presentee. Sans ce fichier, l'invite enchainait
+            # fin d'autorun et extinction en quelques millisecondes, et une
+            # capture arrivee apres coup lisait l'ecran texte 720x400 :
+            # `exacts=0` (#320 a a2ae728, job 132305016902, premiere fois sur
+            # une cinquantaine de passages). La machine reste debout ; c'est
+            # le banc qui l'arrete (`cleanup`), APRES la capture. Les verdicts
+            # ne changent pas : marqueurs et mire au pixel restent exiges.
+            add_bytes(tar, "garde-vm-vivante", b"", 0o644)
         add_bytes(tar, "autorun", autorun_data, 0o644)
 
     archive_size = args.image.stat().st_size
