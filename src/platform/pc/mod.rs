@@ -18,6 +18,9 @@ pub mod ecran_faute;
 /// Banc de charge d'entree-sortie, derriere son drapeau : voir `banc_io.rs`.
 #[cfg(feature = "banc-io")]
 pub mod banc_io;
+/// Temoin du noyau fige (#283), derriere son drapeau : voir `banc_souffrance.rs`.
+#[cfg(feature = "banc-souffrance-verrou")]
+pub mod banc_souffrance;
 /// BOUCHAUD_CLE_USB_TEST_V1 : sonde d'ecriture du banc, QEMU uniquement.
 #[cfg(feature = "banc-ecriture-interne")]
 pub mod sonde_ecriture_interne;
