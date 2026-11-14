@@ -131,6 +131,13 @@ class Disque(unittest.TestCase):
                            capture_output=True)
             self.assertEqual(e2e.sha256(src), avant)
             self.assertEqual(sortie.stat().st_size % 512, 0)
+            # Zone persistante de mkdisk.sh : sans elle, pas de /persist et le
+            # BrowserHost s'arrete avec le code 1.
+            zone = 262144 * 512
+            self.assertGreaterEqual(sortie.stat().st_size, zone + (1025 + 1) * 512)
+            with sortie.open("rb") as f:
+                f.seek(-zone, 2)
+                self.assertEqual(f.read(4096), b"\0" * 4096)
             autorun = tarfile.open(sortie).extractfile("./autorun").read().decode()
             self.assertNotIn("BO_AUTOSTART_BROWSER", autorun)
             self.assertIn("export BOUCHAUD_M9_URL='http://10.0.2.2:18300/accueil.html'\ndesktop", autorun)

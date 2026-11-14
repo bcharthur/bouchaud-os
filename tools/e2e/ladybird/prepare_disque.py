@@ -101,6 +101,27 @@ def depuis_image(image: Path, url: str, tar: tarfile.TarFile) -> None:
             raise SystemExit("E2E_DISQUE_REFUS autorun absent de l'image")
 
 
+# Zone persistante, comme tools/userland/mkdisk.sh (src/fs/persistance) :
+# 128 Mio a la FIN de l'image. Sans elle, le noyau declare « disque trop
+# petit, zone absente », /persist n'existe pas, et le BrowserHost s'arrete
+# aussitot avec le code 1 (parcours KVM a 5127a0e et a4432d1 : quatre
+# lancements, quatre sorties, relances epuisees).
+ZONE_SECTEURS = 262144
+SECTEUR_CONTENU = 1025
+PLANCHER_ARCHIVE = (SECTEUR_CONTENU + 1) * 512
+
+
+def ajoute_zone_persistante(image: Path) -> None:
+    taille = image.stat().st_size
+    archive = taille + (-taille) % 512
+    archive = max(archive, PLANCHER_ARCHIVE)
+    with image.open("ab") as f:
+        f.write(b"\0" * (archive - taille))
+        bloc = b"\0" * (1024 * 1024)
+        for _ in range(ZONE_SECTEURS * 512 // len(bloc)):
+            f.write(bloc)
+
+
 def main(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--artefact", type=Path)
@@ -123,9 +144,7 @@ def main(argv):
             depuis_artefact(o.artefact, o.certs, o.url, tar)
         else:
             depuis_image(o.image, o.url, tar)
-    taille = tmp.stat().st_size
-    with tmp.open("ab") as f:
-        f.write(b"\0" * ((-taille) % 512))
+    ajoute_zone_persistante(tmp)
     tmp.replace(o.sortie)
     print(f"E2E_DISQUE_OK sortie={o.sortie} octets={o.sortie.stat().st_size} url={o.url}")
     return 0
