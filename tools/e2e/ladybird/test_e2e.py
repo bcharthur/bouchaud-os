@@ -192,6 +192,17 @@ class Fenetre(unittest.TestCase):
         self.assertIn(fixture.hexa(fixture.COULEURS["resultats"]), html)
 
 
+class CausesParParcours(unittest.TestCase):
+    def test_lignes_du_parcours_causes_puis_fin(self):
+        t = "\n".join(["[x] [MEM-NG-HEAP] a=1", "[LB:NAV] onglet=1 demande url=https://expired.badssl.com/",
+                        "RS_ECHEC url=https://expired.badssl.com/ code=60", "autre chose"])
+        l = e2e.lignes_du_parcours(t)
+        self.assertEqual(l[0], "[LB:NAV] onglet=1 demande url=https://expired.badssl.com/")
+        self.assertIn("RS_ECHEC url=https://expired.badssl.com/ code=60", l)
+        self.assertIn("autre chose", l)
+        self.assertFalse(any("MEM-NG" in x for x in l))
+
+
 class Extrait(unittest.TestCase):
     def test_extrait_sans_bruit_ni_couleur_borne(self):
         with tempfile.TemporaryDirectory() as t:

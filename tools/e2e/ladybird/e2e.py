@@ -450,6 +450,11 @@ def joue(banc: Banc, sc: dict, resultats: dict) -> dict:
             r["statut"], r["cause"] = ("BLOCKED_EXTERNAL", f"{ext} ; etape : {cause}") if ext else ("FAIL", cause)
             break
     r["duree_ms"] = round(banc.maintenant_ms() - debut)
+    if r["statut"] in ("FAIL", "BLOCKED_EXTERNAL"):
+        # La fenetre de journal de CE parcours : les lignes de cause d'un
+        # echec sont les siennes, pas celles du demarrage (E2E-03 a 75fc27b :
+        # les 60 premieres lignes du journal entier ne disaient rien de lui).
+        r["journal"] = lignes_du_parcours(banc.texte()[depart:])
     for m in sc.get("metriques", []):
         v = None
         if "de" in m and m["de"] in banc.instants and m["a"] in banc.instants:
@@ -601,8 +606,9 @@ def main(argv: list[str]) -> int:
         indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     rapport_html(sortie, manifeste, liste)
     if verdict != "PASS":
-        for ligne in causes_journal(sortie / "serial.log"):
-            print("E2E_CAUSE " + ligne)
+        for r in liste:
+            for ligne in r.get("journal", []):
+                print(f"E2E_CAUSE {r['id']} {ligne}")
         for ligne in extrait_journal(sortie / "serial.log"):
             print("E2E_EXTRAIT " + ligne)
     print(f"E2E_VERDICT {verdict} " + " ".join(f"{k}={v}" for k, v in compte.items())
@@ -624,9 +630,17 @@ BRUIT = re.compile(r"\] \[(kernel\] \[)?[A-Z0-9][A-Za-z0-9_-]+\] |^\[[A-Z0-9][A-
 EXTRAIT_LIGNES = 80
 # Ce qui explique un echec du navigateur : morts et fautes de processus,
 # marqueurs Ladybird, paniques. Meme motif que le smoke BrowserHost.
-CAUSES = re.compile(r"PROCESS_(DEATH|EXIT|FAULT)|FAULT_FATAL|PANIC|panicked|SIGSEGV|SIGILL|\[LB:|LADYBIRD|BROWSER_HOST"
-                    r"|bo-navigateur|ladybird/[A-Za-z]+|EXEC_AVORTE|gui: navigateur")
+CAUSES = re.compile(r"PROCESS_(DEATH|EXIT|FAULT)|FAULT_FATAL|PANIC|panicked|SIGSEGV|SIGILL|\[LB:(NAV|TAB|CRASH|NET|TLS)|LADYBIRD_|BROWSER_HOST"
+                    r"|RS_(ECHEC|OK)|TLS_REFUS|EXEC_AVORTE|gui: navigateur|NET_(VERDICT|LIEN)|DNS")
 CAUSES_LIGNES = 60
+
+
+def lignes_du_parcours(texte: str, causes: int = 40, fin: int = 25) -> list[str]:
+    """Les lignes de cause d'un parcours, puis ses dernieres lignes significatives."""
+    lignes = [re.sub(r"\x1b\[[0-9;]*m", "", l).rstrip()[:300] for l in texte.splitlines()]
+    trouvees = [l for l in lignes if CAUSES.search(l)][:causes]
+    queue = [l for l in lignes if l.strip() and not BRUIT.search(l) and l not in trouvees][-fin:]
+    return trouvees + queue
 
 
 def causes_journal(chemin: Path, n: int = CAUSES_LIGNES) -> list[str]:
