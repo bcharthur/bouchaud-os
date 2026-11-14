@@ -1,13 +1,15 @@
 # Passation du 14/11/2026 — mission « développement, stabilisation et performance »
 
-Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 11:00 UTC. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
+Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 19:00 UTC. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
 
 ## 1. État de `main` et des PR
 
 | Objet | SHA | État |
 |---|---|---|
-| `main` | `65a67d6` | #321 (démarrage −5,5 s TCG), #322 (passation) et #320 (parcours E2E) fusionnées le 14/11 ; CI de `main` à relire après #320 |
-| #319 `claude/sigchld-boucle` | `e7e8b96` | correctif #311 ; **fusion bloquée** : trois échecs nouveaux et sensibles au temps, non classés (voir §3) |
+| `main` | `eb6f115` | #321, #322, #320, #323 puis #324 (ligne de souffrance du noyau figé) fusionnées le 14/11 ; `main@01dc7fd` vérifiée verte (CI Fast relancé : compile + invariants) |
+| #319 `claude/sigchld-boucle` | `2179ddf` | correctif #311, à jour de `main` ; A/B terminé (§2bis) : les trois échecs d'origine ne se reproduisent pas ; **non fusionnée** : un contrôle `robustesse` rouge au SHA exact (gel #283) et décision humaine attendue |
+| #324 `claude/souffrance-proprio` | `b259735` | **fusionnée** (`eb6f115`) : 141 contrôles verts |
+| #325 `claude/souffrance-site-detenteur` | `adfdf88` | site de prise du détenteur ; seul rouge : le bras `perf avant-simple`, qui démarre le noyau de `main` (gel #283) ; relancé une fois |
 | #320 `claude/e2e-ladybird` | `8aed50d` | **fusionnée** (`65a67d6`, 14/11 ~11:00 UTC) : 78 contrôles verts ; `E2E_VERDICT PASS` sous KVM et TCG |
 | #321 `claude/python-hors-noyau` | `efcf54f` | **fusionnée** (`c6c3eea`) |
 
@@ -81,6 +83,34 @@ Mécanisme : la PR n'agit que sur un processus multi-fil qui reçoit un signal d
 
 Intermittent sans lien avec la PR : `CONSOLE_PANIQUE_ECHEC 1999/2000`, vert au noyau identique.
 
+## 2bis. Soir du 14/11 : A/B de #319 et le gel #283 qui parle enfin
+
+### A/B de #319 (A = `main` sans #319, B = `main` + #319)
+
+| Banc | A | B |
+|---|---|---|
+| ab-rollback ota-reseau | 3/3 verts | 3/3 verts |
+| ab-rollback mise-a-jour-morts | 3/3 verts | 3/3 verts |
+| BRDP + télémétrie | 3/3 verts | 4/4 verts |
+| Ladybird `perf` (démarrages) | 1 gel / ~81 | 2 gels / 45 |
+| Ladybird `robustesse` (runs) | 0 / 15 | 1 / 5 |
+| Piège du Compositor (runs) | 2 / 14 | 1 / 5 |
+
+Les trois échecs qui bloquaient #319 ne se reproduisent pas. Les gels Ladybird relèvent de #283 et existent sur `main` sous les mêmes formes. L'écart vu à `2e61a6b` (2 gels `perf`) ne tient pas sur la série suivante (0/9 de chaque côté). Détail et décision : commentaires de #319.
+
+### #283 : ce que le noyau figé dit désormais
+
+Trois formes de gel, toutes vues sur `main` :
+
+1. **attente IPC** : tous les fils IPC des six processus en `poll(-1)` sur la même file depuis la même seconde, aucun verrou tenu (`jalons manquants=7`) ;
+2. **verrou `Mm`** : capturé avec la ligne de #324 sur `main@eb6f115` (job 132498554631) :
+   - le CPU 0 (`services-metrics`) attend depuis 820 s le verrou `Mm` d'un processus, tenu par le CPU 1 ;
+   - le CPU 1 est le WebWorker qui vient d'être lancé, en faute de page du chargeur (site 212) ; son dernier RIP connu est `vma::protege` ;
+   - les CPU 2 et 3 ne reçoivent plus d'IPI ;
+3. **silence** : plus aucune ligne, pas même celle de l'IRQ.
+
+#325 ajoute le site où le détenteur a pris le verrou, `#[track_caller]` sur `Mm::lock`, et des lignes non tronquées dans les extraits. Écrire `Location::caller()` dans `SpinLock::try_lock` arrêtait la console asynchrone au démarrage (3/3 sous QEMU) ; cause non établie, laissée ouverte.
+
 ## 3. Anomalies ouvertes, non attribuées
 
 Voir `KNOWN_LIMITATIONS.md` :
@@ -134,6 +164,11 @@ Après #321, l'image doit faire environ 12,9 Mo, et non plus 29 Mo.
 
 ## 6. Prochaines actions
 
-1. Lire la CI de #319, #320 et #321 au SHA exact. Corriger ce qui est rouge, fusionner ce qui est vert, puis vérifier la CI de `main`.
-2. Lire `e2e-parcours` TCG et KVM avec le noyau qui publie le lancement : E2E-02, E2E-04 et E2E-05.
-3. Lire `BOUCHAUD_POLICE_ANALYSEE` et `hote_jusqu_au_noyau_ms` dans les journaux KVM et WHPX avant toute nouvelle optimisation du démarrage.
+1. **#319 (décision humaine).**
+   - Relire le tableau du §2bis.
+   - Relancer une fois le job `robustesse` à `2179ddf`.
+   - Fusionner seulement si tous les contrôles sont verts au SHA exact.
+   - #311 reste ouverte jusque-là.
+2. **#283.** Au prochain gel avec #325, lire `spin=[…@attente<prise …]` pour savoir où le détenteur du verrou `Mm` l'a pris. Croiser avec le RIP `vma::protege` du CPU 1.
+3. **`swaps_non_recoltes`.** L'endurance 20 min KVM échoue aussi sur `main@eb6f115` : un parent qui ne récolte pas un enfant, proche de #311. Non attribuée.
+4. **Mesures hors CI.** Lire `BOUCHAUD_POLICE_ANALYSEE` et `hote_jusqu_au_noyau_ms` dans les journaux KVM et WHPX avant toute nouvelle optimisation du démarrage.
