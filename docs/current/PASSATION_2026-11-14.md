@@ -6,10 +6,10 @@ Point de reprise vivant de la nuit du 13 au 14/11. Chaque verdict cite sa source
 
 | Objet | SHA | État |
 |---|---|---|
-| `main` | `c44a2e7` | contient #315, #316, #317 et #318 (fusionnées) |
-| #319 `claude/sigchld-boucle` | `24a1419` | correctif #311 ; CI en cours au moment d'écrire |
-| #320 `claude/e2e-ladybird` | `13a567f` | parcours E2E ; CI en cours |
-| #321 `claude/python-hors-noyau` | `efcf54f` | −5,5 s de démarrage sous TCG ; CI en cours |
+| `main` | `c6c3eea` | contient #315 à #318, puis **#321 fusionnée le 14/11 à 01:25 UTC** (arbre de `efcf54f`, 67 contrôles verts) |
+| #319 `claude/sigchld-boucle` | `e7e8b96` | correctif #311 ; **fusion bloquée** : anomalie `ota-reseau` non classée (voir §3) |
+| #320 `claude/e2e-ladybird` | `a4432d1` | parcours E2E ; KVM : lancement OK, puis Ladybird planté 4 fois sur 4 (cause à lire dans `E2E_CAUSE`) |
+| #321 `claude/python-hors-noyau` | `efcf54f` | **fusionnée** (`c6c3eea`) |
 
 Règle appliquée : une PR n'est fusionnée qu'avec tous ses contrôles obligatoires verts **au SHA exact**. Une relance verte ne règle jamais un intermittent.
 
@@ -60,6 +60,7 @@ L'interpréteur Python (16,4 Mo) quitte l'image de boot (29,3 → 12,9 Mo). Prem
 
 Voir `KNOWN_LIMITATIONS.md` :
 
+- **nouvelle** : `ab-rollback (ota-reseau, nvme)` `partie_5_non_reprise` sur #319 à `24a1419`. Après rétablissement du lien, 7 min de `connect` en échec ; noyau identique à `c1c32ca`, où le job était vert. Le diagnostic recopie désormais l'état réseau de l'invité ;
 - intermittent `ab-rollback` « recovery-requise » ;
 - piège du Compositor `batterie_workers` ;
 - `swaps_non_recoltes` ;
