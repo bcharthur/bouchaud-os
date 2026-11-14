@@ -578,6 +578,8 @@ def main(argv: list[str]) -> int:
         indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     rapport_html(sortie, manifeste, liste)
     if verdict != "PASS":
+        for ligne in causes_journal(sortie / "serial.log"):
+            print("E2E_CAUSE " + ligne)
         for ligne in extrait_journal(sortie / "serial.log"):
             print("E2E_EXTRAIT " + ligne)
     print(f"E2E_VERDICT {verdict} " + " ".join(f"{k}={v}" for k, v in compte.items())
@@ -586,8 +588,26 @@ def main(argv: list[str]) -> int:
 
 
 # Bilans periodiques du noyau : utiles dans serial.log, du bruit dans un extrait.
-BRUIT = re.compile(r"PROC-STAT|MM-RSS|PERF-RIP|SMP-LOAD|SCHED-NG|REGISTRE-|SONDE-GEL|IDENTITE|BATTEMENT|HEARTBEAT|_BILAN")
+# Ils commencent par une etiquette entre crochets (`[MEM-NG-HEAP]`,
+# `[kernel] [NET-TCP]`) ou portent un suffixe de bilan.
+BRUIT = re.compile(r"\] \[(kernel\] \[)?[A-Z0-9][A-Za-z0-9_-]+\] |^\[[A-Z0-9][A-Za-z0-9_-]+\] |\[kernel\] [A-Z_]+_(BREAKDOWN|WAIT|DISK|MEMORY) "
+                   r"|PROC-STAT|PERF_TRAMES|BATTEMENT|HEARTBEAT|_BILAN|_SAMPLE")
 EXTRAIT_LIGNES = 80
+# Ce qui explique un echec du navigateur : morts et fautes de processus,
+# marqueurs Ladybird, paniques. Meme motif que le smoke BrowserHost.
+CAUSES = re.compile(r"PROCESS_(DEATH|EXIT|FAULT)|FAULT_FATAL|PANIC|panicked|SIGSEGV|SIGILL|\[LB:|LADYBIRD|BROWSER_HOST"
+                    r"|bo-navigateur|ladybird/[A-Za-z]+|EXEC_AVORTE|gui: navigateur")
+CAUSES_LIGNES = 60
+
+
+def causes_journal(chemin: Path, n: int = CAUSES_LIGNES) -> list[str]:
+    """Les `n` premieres lignes qui expliquent un echec du navigateur."""
+    try:
+        texte = chemin.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lignes = (re.sub(r"\x1b\[[0-9;]*m", "", l).rstrip() for l in texte.splitlines())
+    return [l[:300] for l in lignes if CAUSES.search(l)][:n]
 
 
 def extrait_journal(chemin: Path, n: int = EXTRAIT_LIGNES) -> list[str]:

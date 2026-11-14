@@ -183,6 +183,22 @@ class Extrait(unittest.TestCase):
             self.assertFalse(any("PROC-STAT" in l or "\x1b" in l for l in ex))
             self.assertEqual(e2e.extrait_journal(Path(t) / "absent.log"), [])
 
+    def test_bilans_periodiques_filtres_causes_gardees(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Path(t) / "serial.log"
+            j.write_text("\n".join([
+                "[02:56:29][  0%:  1%:  4%][FPS:  0] [MEM-NG-HEAP] cached_bytes=1",
+                "[02:56:29][  0%:  1%:  4%][FPS:  0] [kernel] [NET-TCP] retransmissions=0",
+                "[02:56:29][  0%:  1%:  4%][FPS:  0] [kernel] FAULT_FILE_BREAKDOWN faults=1",
+                "[02:56:29][  0%:  1%:  4%][FPS:  0] PROCESS_DEATH pid=17 image=/bo-navigateur reason=fault",
+                "[02:56:29][  0%:  1%:  4%][FPS:  0] gui: autre chose",
+            ]) + "\n")
+            ex = e2e.extrait_journal(j)
+            self.assertEqual(len(ex), 2, ex)
+            causes = e2e.causes_journal(j)
+            self.assertEqual(len(causes), 1)
+            self.assertIn("PROCESS_DEATH pid=17", causes[0])
+
 
 class Fixture(unittest.TestCase):
     def test_requete_echappee_et_journalisee(self):
