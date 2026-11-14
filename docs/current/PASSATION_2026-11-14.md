@@ -1,6 +1,6 @@
 # Passation du 14/11/2026 — mission « développement, stabilisation et performance »
 
-Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 08:30 UTC. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
+Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 09:15 UTC. Chaque verdict cite sa source. Rien ici n'annonce un résultat qui n'a pas été observé.
 
 ## 1. État de `main` et des PR
 
@@ -8,7 +8,7 @@ Point de reprise vivant de la nuit du 13 au 14/11, mis à jour le 14/11 à 08:30
 |---|---|---|
 | `main` | `c6c3eea` | #321 fusionnée le 14/11 à 01:25 UTC (arbre de `efcf54f`, 67 contrôles verts) ; **CI de `main` après fusion : 59 verts, 0 échec** |
 | #319 `claude/sigchld-boucle` | `e7e8b96` | correctif #311 ; **fusion bloquée** : trois échecs nouveaux et sensibles au temps, non classés (voir §3) |
-| #320 `claude/e2e-ladybird` | `3453bfe` | parcours E2E sous KVM : 01, 02, 04 et 05 PASS ; E2E-03 FAIL une fois sur deux (à classer) ; **non fusionnable** |
+| #320 `claude/e2e-ladybird` | `56273f9` | **`E2E_VERDICT PASS` sous KVM et sous TCG** (CI à `0f8eec3`, même code) : E2E-01, 02, 03 (refus déterministe d'un certificat expiré), 03W, 04, 05 ; requalification au SHA de tête en cours ; fusion seulement si tout est vert |
 | #321 `claude/python-hors-noyau` | `efcf54f` | **fusionnée** (`c6c3eea`) |
 
 Règle appliquée : une PR n'est fusionnée qu'avec tous ses contrôles obligatoires verts **au SHA exact**. Une relance verte ne règle jamais un intermittent.
@@ -76,6 +76,8 @@ Mécanisme : la PR n'agit que sur un processus multi-fil qui reçoit un signal d
 3. Entrée sur un lien ne navigue pas : le banc clique désormais dans la page, avec la zone utile publiée par le gestionnaire de fenêtres. E2E-04 passe ; l'activation d'un lien au clavier dans Ladybird reste à vérifier.
 4. Course entre capture et extinction dans le banc native IPC.
 5. Lignes de cause prises dans la fenêtre du parcours en échec.
+
+6. E2E-03 rendu déterministe. Le site de référence sert un certificat **expiré**, signé par une autorité de test générée au moment du test (aucune clé commitée, `tools/verifie-cle-dev.py`). L'autorité n'est ajoutée qu'au disque E2E. `expired.badssl.com` passe en parcours non bloquant (E2E-03X), où une connexion coupée donne `BLOCKED_EXTERNAL`.
 
 Intermittent sans lien avec la PR : `CONSOLE_PANIQUE_ECHEC 1999/2000`, vert au noyau identique.
 
