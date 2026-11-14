@@ -51,6 +51,9 @@ struct Attente {
     fichier_len: AtomicUsize,
     ligne: AtomicU32,
     depuis: AtomicU64,
+    /// `&'static Location` de la prise du DETENTEUR, lue au signalement
+    /// (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1). 0 : inconnu.
+    site_detenteur: AtomicUsize,
 }
 
 impl Attente {
@@ -63,6 +66,7 @@ impl Attente {
             fichier_len: AtomicUsize::new(0),
             ligne: AtomicU32::new(0),
             depuis: AtomicU64::new(0),
+            site_detenteur: AtomicUsize::new(0),
         }
     }
 }
@@ -78,10 +82,13 @@ pub struct AttenteVerrou {
     pub fichier: &'static str,
     pub ligne: u32,
     pub depuis: u64,
+    /// Fichier et ligne ou le detenteur a pris le verrou (`"?"`/0 : inconnu).
+    pub fichier_detenteur: &'static str,
+    pub ligne_detenteur: u32,
 }
 
 #[inline(never)]
-fn signale(etat: u32, verrou: usize, proprietaire: usize, ou: &'static Location<'static>) {
+fn signale(etat: u32, verrou: usize, proprietaire: usize, ou: &'static Location<'static>, site_detenteur: usize) {
     let cpu = smp::cpu_index();
     if cpu >= smp::MAX_CPUS {
         return;
@@ -93,6 +100,7 @@ fn signale(etat: u32, verrou: usize, proprietaire: usize, ou: &'static Location<
     attente.fichier_len.store(ou.file().len(), Ordering::Relaxed);
     attente.ligne.store(ou.line(), Ordering::Relaxed);
     attente.depuis.store(crate::kernel::timer::ticks(), Ordering::Relaxed);
+    attente.site_detenteur.store(site_detenteur, Ordering::Relaxed);
     // Publie en dernier : la sonde ne lit les champs qu'apres avoir vu l'etat.
     attente.etat.store(etat, Ordering::Release);
 }
@@ -136,6 +144,14 @@ pub fn attente_verrou(cpu: usize) -> Option<AttenteVerrou> {
             ))
         }
     };
+    let site = attente.site_detenteur.load(Ordering::Relaxed);
+    let (fichier_detenteur, ligne_detenteur) = if site == 0 {
+        ("?", 0)
+    } else {
+        // Toujours un `&'static Location` ecrit par `SpinLock::lock`/`try_lock`.
+        let l = unsafe { &*(site as *const Location<'static>) };
+        (l.file(), l.line())
+    };
     Some(AttenteVerrou {
         etat,
         verrou: attente.verrou.load(Ordering::Relaxed),
@@ -143,12 +159,18 @@ pub fn attente_verrou(cpu: usize) -> Option<AttenteVerrou> {
         fichier,
         ligne: attente.ligne.load(Ordering::Relaxed),
         depuis: attente.depuis.load(Ordering::Relaxed),
+        fichier_detenteur,
+        ligne_detenteur,
     })
 }
 
 pub struct SpinLock<T: ?Sized> {
     locked: AtomicBool,
     owner_cpu: AtomicUsize,
+    /// `&'static Location` de la derniere prise reussie (0 : jamais prise).
+    /// Lu seulement par une attente anormalement longue, pour nommer OU le
+    /// detenteur a pris le verrou (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1).
+    owner_site: AtomicUsize,
     value: UnsafeCell<T>,
 }
 
@@ -160,6 +182,7 @@ impl<T> SpinLock<T> {
         Self {
             locked: AtomicBool::new(false),
             owner_cpu: AtomicUsize::new(NO_OWNER),
+            owner_site: AtomicUsize::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -211,6 +234,7 @@ impl<T: ?Sized> SpinLock<T> {
                 .is_ok()
             {
                 self.owner_cpu.store(cpu, Ordering::Relaxed);
+                self.owner_site.store(Location::caller() as *const _ as usize, Ordering::Relaxed);
                 if signale_publie {
                     acquitte(verrou);
                 }
@@ -230,13 +254,20 @@ impl<T: ?Sized> SpinLock<T> {
                     } else {
                         ATTENTE_LONGUE
                     };
-                    signale(etat, verrou, proprietaire, Location::caller());
+                    signale(
+                        etat,
+                        verrou,
+                        proprietaire,
+                        Location::caller(),
+                        self.owner_site.load(Ordering::Relaxed),
+                    );
                     signale_publie = true;
                 }
             }
         }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let cpu = Self::current_cpu();
 
@@ -260,6 +291,11 @@ impl<T: ?Sized> SpinLock<T> {
         }
 
         self.owner_cpu.store(cpu, Ordering::Relaxed);
+        // Une prise par `try_lock` efface le site : la ligne de souffrance
+        // dira « ? » plutot qu'un site perime. Y ecrire `Location::caller()`
+        // arretait la console asynchrone au demarrage (3 sur 3 sous QEMU
+        // -smp 2, le 14/11/2026) ; cause non etablie, laissee ouverte.
+        self.owner_site.store(0, Ordering::Relaxed);
         Some(SpinLockGuard { lock: self })
     }
 
