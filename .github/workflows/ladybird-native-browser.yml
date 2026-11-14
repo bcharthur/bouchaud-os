@@ -1299,16 +1299,19 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
+      - name: Materiel TLS de banc (genere ici, jamais commite)
+        run: python3 -I tools/e2e/ladybird/tls/genere_tls.py "$RUNNER_TEMP/e2e-tls"
       - name: Disque E2E (session normale, navigateur au menu)
         run: |
           python3 -I tools/e2e/ladybird/prepare_disque.py --artefact native-browser \
-            --certs /etc/ssl/certs/ca-certificates.crt --url http://10.0.2.2:18300/accueil.html \
-            --sortie disque-e2e.img
+            --certs /etc/ssl/certs/ca-certificates.crt --ca-test "$RUNNER_TEMP/e2e-tls/ca.pem" \
+            --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img
       - name: Parcours E2E
         run: |
           python3 tools/e2e/ladybird/e2e.py --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             --disque disque-e2e.img --accel ${{ matrix.accel }} --smp 4 --memoire 8192 \
-            --sortie e2e-${{ matrix.accel }} --port-fixture 18300 --exige E2E-01,E2E-02,E2E-04,E2E-05
+            --sortie e2e-${{ matrix.accel }} --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
+            --exige E2E-01,E2E-02,E2E-03,E2E-04,E2E-05
       - name: Rapport
         if: always()
         uses: actions/upload-artifact@v4

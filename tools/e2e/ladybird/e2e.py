@@ -236,6 +236,9 @@ class Banc:
         self.fixture = None
         self.mon: Moniteur | None = None
         self.curseur = 0
+        # Materiel TLS de banc genere au moment du test (tls/genere_tls.py) ;
+        # absent, le refus d'un certificat expire est NON_MESURABLE.
+        self.tls = bool(o.tls_dir) and (Path(o.tls_dir) / "expire.pem").is_file()
         self.vars: dict[str, str] = {"FIXTURE": f"http://10.0.2.2:{o.port_fixture}",
                                      "FIXTURE_TLS": f"https://10.0.2.2:{o.port_fixture + 1}"}
         self.instants: dict[str, float] = {}
@@ -243,8 +246,10 @@ class Banc:
 
     # --- environnement -------------------------------------------------------
     def demarre(self) -> None:
-        self.fixture = subprocess.Popen([sys.executable, str(ICI / "fixture.py"), str(self.o.port_fixture),
-                                         str(self.journal_fixture), str(self.o.port_fixture + 1)],
+        commande = [sys.executable, str(ICI / "fixture.py"), str(self.o.port_fixture), str(self.journal_fixture)]
+        if self.tls:
+            commande += [str(self.o.port_fixture + 1), str(self.o.tls_dir)]
+        self.fixture = subprocess.Popen(commande,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         ligne = self.fixture.stdout.readline()
         if "E2E_FIXTURE_PRETE" not in ligne:
@@ -435,6 +440,9 @@ def joue(banc: Banc, sc: dict, resultats: dict) -> dict:
     if "non_implemente" in sc:
         r.update(statut="NOT_RUN", cause=f"non implemente : {sc['non_implemente']}")
         return r
+    if sc.get("requiert_tls") and not getattr(banc, "tls", False):
+        r.update(statut="NON_MESURABLE", cause="materiel TLS de banc absent (--tls-dir, tls/genere_tls.py)")
+        return r
     manque = [x for x in sc.get("requiert", []) if resultats.get(x, {}).get("statut") != "PASS"]
     if manque:
         r.update(statut="NOT_RUN", cause=f"prerequis non PASS : {', '.join(manque)}")
@@ -539,6 +547,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--sortie", type=Path, default=None)
     p.add_argument("--scenarios", default="")
     p.add_argument("--port-fixture", dest="port_fixture", type=int, default=18300)
+    p.add_argument("--tls-dir", dest="tls_dir", default=None,
+                   help="materiel de tls/genere_tls.py ; sert ${FIXTURE_TLS} (certificat expire)")
     p.add_argument("--exige", default="E2E-01,E2E-02")
     o = p.parse_args(argv[1:])
     for f in (o.boot, o.disque):

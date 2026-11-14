@@ -67,7 +67,15 @@ $Sortie = Join-Path $Racine "target\e2e\$Horodatage-$Accel-smp$CpuCount"
 New-Item -ItemType Directory -Force -Path $Sortie | Out-Null
 $port = 18300
 $disqueE2E = Join-Path $Sortie 'disque-e2e.img'
-& $py.Source -I (Join-Path $Racine 'tools\e2e\ladybird\prepare_disque.py') --image $Disque --url "http://10.0.2.2:$port/accueil.html" --sortie $disqueE2E
+# Materiel TLS de banc (certificat expire, autorite de test) genere ICI,
+# jamais commite. Sans cryptography ni openssl : E2E-03 NON_MESURABLE.
+$tls = Join-Path $Sortie 'tls'
+& $py.Source -I (Join-Path $Racine 'tools\e2e\ladybird\tls\genere_tls.py') $tls
+$avecTls = ($LASTEXITCODE -eq 0)
+$argsDisque = @((Join-Path $Racine 'tools\e2e\ladybird\prepare_disque.py'), '--image', $Disque,
+    '--url', "http://10.0.2.2:$port/accueil.html", '--sortie', $disqueE2E)
+if ($avecTls) { $argsDisque += @('--ca-test', (Join-Path $tls 'ca.pem')) }
+& $py.Source -I @argsDisque
 if ($LASTEXITCODE -ne 0) { Echec 'preparation du disque E2E impossible' }
 
 # Profil : la meme definition ; `rapide` joue le demarrage et l'ouverture.
@@ -76,15 +84,21 @@ if ($LASTEXITCODE -ne 0) { Echec 'preparation du disque E2E impossible' }
 $arguments = @((Join-Path $Racine 'tools\e2e\ladybird\e2e.py'), '--boot', $Boot, '--disque', $disqueE2E,
     '--accel', $Accel, '--whpx-irqchip', $WhpxIrqchip, '--smp', "$CpuCount", '--memoire', "$RamMiB",
     '--qemu', $Qemu, '--sortie', $Sortie, '--port-fixture', "$port")
+if ($avecTls) { $arguments += @('--tls-dir', $tls) }
 if ($Profil -eq 'rapide') {
     $arguments += @('--scenarios', 'E2E-01,E2E-02', '--exige', 'E2E-01,E2E-02')
 }
 else {
-    $arguments += @('--exige', 'E2E-01,E2E-02,E2E-04,E2E-05')
+    # E2E-03 (refus d'un certificat expire) n'est exige que si le materiel
+    # TLS de banc a pu etre genere ; sinon il est NON_MESURABLE, et le dit.
+    if ($avecTls) { $arguments += @('--exige', 'E2E-01,E2E-02,E2E-03,E2E-04,E2E-05') }
+    else { $arguments += @('--exige', 'E2E-01,E2E-02,E2E-04,E2E-05') }
 }
 & $py.Source @arguments
 $code = $LASTEXITCODE
 Remove-Item -LiteralPath $disqueE2E -Force -ErrorAction SilentlyContinue
+# Les cles de banc ne partent pas dans l'archive a transmettre.
+Remove-Item -LiteralPath $tls -Recurse -Force -ErrorAction SilentlyContinue
 
 $archive = "$Sortie.zip"
 Compress-Archive -Path (Join-Path $Sortie '*') -DestinationPath $archive -Force

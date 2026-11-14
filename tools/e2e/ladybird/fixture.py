@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """BOUCHAUD_E2E_LADYBIRD_V1 -- site de REFERENCE des parcours E2E.
 
-    fixture.py PORT JOURNAL [PORT_TLS]
+    fixture.py PORT JOURNAL [PORT_TLS DOSSIER_TLS]
 
 Un site deterministe, servi par l'hote (l'invite le joint en
 http://10.0.2.2:PORT par le reseau utilisateur de QEMU, sous Linux comme sous
@@ -39,11 +39,11 @@ COULEURS = {
     "onglet-c": (0xC4, 0x11, 0x11),
     "expire": (0x8A, 0xE0, 0x21),
 }
-# PORT_TLS : le MEME site, en HTTPS, avec un certificat EXPIRE signe par
-# l'autorite de test (tls/). Le disque E2E fait confiance a cette autorite :
-# un refus ne peut donc venir que de l'expiration. Chaque requete servie y
-# est journalisee `tls=1` -- une page jamais servie prouve le refus.
-TLS = Path(__file__).resolve().parent / "tls"
+# PORT_TLS : le MEME site, en HTTPS, avec le certificat EXPIRE que
+# tls/genere_tls.py fabrique au moment du test dans DOSSIER_TLS, signe par
+# une autorite de test que le disque E2E croit : un refus ne peut donc venir
+# que de l'expiration. Chaque requete servie y est journalisee `tls=1` --
+# une page jamais servie prouve le refus.
 RESULTATS = [
     ("article-1", "Bouchaud OS : un systeme d'exploitation"),
     ("article-2", "Le navigateur Ladybird sous Bouchaud OS"),
@@ -122,24 +122,24 @@ class GestionnaireTls(Gestionnaire):
     tls = True
 
 
-def serveur_tls(port):
+def serveur_tls(port, dossier):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(str(TLS / "expire.pem"), str(TLS / "expire.key"))
+    ctx.load_cert_chain(str(Path(dossier) / "expire.pem"), str(Path(dossier) / "expire.key"))
     serveur = ThreadingHTTPServer(("127.0.0.1", port), GestionnaireTls)
     serveur.socket = ctx.wrap_socket(serveur.socket, server_side=True)
     return serveur
 
 
 def main(argv):
-    if len(argv) not in (3, 4):
+    if len(argv) not in (3, 5):
         print(__doc__, file=sys.stderr)
         return 2
     Gestionnaire.journal = argv[2]
     open(argv[2], "w").close()
     serveur = ThreadingHTTPServer(("127.0.0.1", int(argv[1])), Gestionnaire)
-    if len(argv) == 4:
-        threading.Thread(target=serveur_tls(int(argv[3])).serve_forever, daemon=True).start()
-    print("E2E_FIXTURE_PRETE port=%s tls=%s" % (argv[1], argv[3] if len(argv) == 4 else "-"), flush=True)
+    if len(argv) == 5:
+        threading.Thread(target=serveur_tls(int(argv[3]), argv[4]).serve_forever, daemon=True).start()
+    print("E2E_FIXTURE_PRETE port=%s tls=%s" % (argv[1], argv[3] if len(argv) == 5 else "-"), flush=True)
     serveur.serve_forever()
     return 0
 

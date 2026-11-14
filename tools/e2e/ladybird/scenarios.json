@@ -42,16 +42,26 @@
     },
     {
       "id": "E2E-03",
-      "titre": "HTTPS : refus d'un certificat EXPIRE signe par une autorite de confiance (deterministe), puis navigation HTTPS reelle (example.com)",
+      "titre": "HTTPS : refus d'un certificat EXPIRE signe par une autorite de confiance (deterministe)",
       "requiert": ["E2E-02"],
-      "note": "Le refus est prouve sur le site de reference (fixture.py, certificat tls/expire.pem, autorite tls/ca.pem ajoutee au seul disque E2E) : il ne depend d'aucun site externe. Le code 60 (verification du certificat) et l'absence de toute requete servie le prouvent. example.com reste externe : son indisponibilite donne BLOCKED_EXTERNAL.",
-      "externe": {"motif_blocage": "M9_RS_STATE id=\\d+ DNSLookup -> Error|RS_ECHEC url=https://example\\.com/? code=(6|7|28)\\b", "raison": "example.com injoignable depuis l'invite (DNS ou connexion)"},
+      "requiert_tls": true,
+      "note": "Certificat et autorite de test generes AU MOMENT du test (tls/genere_tls.py ; aucune cle commitee) ; l'autorite n'est ajoutee qu'au disque E2E. Preuves : code 60 (verification du certificat) et page jamais servie par le site de reference. Sans materiel TLS : NON_MESURABLE.",
       "etapes": [
         {"touches": ["ctrl-l"], "nom": "barre_adresse"},
         {"tape": "${FIXTURE_TLS}/expire.html", "entree": true, "nom": "saisie_invalide"},
         {"attend": "RS_ECHEC url=${FIXTURE_TLS}/expire\\.html code=60\\b", "delai_s": 120, "nom": "refus"},
-        {"fixture_jamais": "/expire.html"},
-        {"pause_s": 2},
+        {"fixture_jamais": "/expire.html"}
+      ],
+      "metriques": [
+        {"nom": "saisie_jusqu_au_refus_tls_ms", "de": "saisie_invalide", "a": "refus"}
+      ]
+    },
+    {
+      "id": "E2E-03W",
+      "titre": "Navigation HTTPS reelle (example.com)",
+      "requiert": ["E2E-02"],
+      "externe": {"motif_blocage": "M9_RS_STATE id=\\d+ DNSLookup -> Error|RS_ECHEC url=https://example\\.com/? code=(6|7|28)\\b", "raison": "example.com injoignable depuis l'invite (DNS ou connexion)"},
+      "etapes": [
         {"touches": ["ctrl-l"]},
         {"tape": "https://example.com", "entree": true, "nom": "saisie"},
         {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=https://example\\.com/?", "delai_s": 180, "nom": "charge"},
@@ -60,14 +70,13 @@
         {"capture": "03-example", "different_de": "02-navigateur"}
       ],
       "metriques": [
-        {"nom": "saisie_jusqu_au_refus_tls_ms", "de": "saisie_invalide", "a": "refus"},
         {"nom": "saisie_jusqu_au_document_https_ms", "de": "saisie", "a": "charge"}
       ]
     },
     {
       "id": "E2E-03X",
       "titre": "Refus du certificat expire d'un site externe reel (expired.badssl.com)",
-      "requiert": ["E2E-03"],
+      "requiert": ["E2E-02"],
       "bloquant": false,
       "note": "Externe, jamais bloquant. A 75fc27b et 3453bfe, la poignee TLS avec ce serveur a ete coupee (code 35, Broken pipe) avant toute verification : le refus n'etait alors pas PROUVE. Le refus deterministe est dans E2E-03.",
       "externe": {"motif_blocage": "RS_ECHEC url=https://expired\\.badssl\\.com/? code=(6|7|28|35|56)\\b|M9_RS_STATE id=\\d+ DNSLookup -> Error", "raison": "expired.badssl.com injoignable, ou connexion coupee avant la verification du certificat"},

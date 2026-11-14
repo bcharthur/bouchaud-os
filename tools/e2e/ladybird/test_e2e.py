@@ -204,29 +204,48 @@ class CausesParParcours(unittest.TestCase):
 
 
 class RefusTls(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(ICI / "tls"))
+        import genere_tls
+        self.t = tempfile.TemporaryDirectory()
+        self.dossier = Path(self.t.name)
+        self.moyen = genere_tls.genere(self.dossier)
+        if not self.moyen:
+            self.skipTest("ni cryptography ni openssl : materiel TLS de banc indisponible")
+
+    def tearDown(self):
+        self.t.cleanup()
+
     def test_certificat_expire_refuse_pour_son_expiration(self):
         import socket
         import ssl
-        serveur = fixture.serveur_tls(0)
+        serveur = fixture.serveur_tls(0, self.dossier)
         port = serveur.server_address[1]
         threading.Thread(target=serveur.serve_forever, daemon=True).start()
         try:
-            ctx = ssl.create_default_context(cafile=str(fixture.TLS / "ca.pem"))
+            ctx = ssl.create_default_context(cafile=str(self.dossier / "ca.pem"))
             ctx.check_hostname = False  # 10.0.2.2 cote invite ; ici 127.0.0.1
             with socket.create_connection(("127.0.0.1", port), timeout=10) as brut:
                 with self.assertRaises(ssl.SSLCertVerificationError) as e:
                     ctx.wrap_socket(brut).close()
-            # Refuse pour l'EXPIRATION : l'autorite, elle, est reconnue.
+            # Refuse pour l'EXPIRATION : l'autorite et les extensions sont reconnues.
             self.assertIn("expired", str(e.exception))
         finally:
             serveur.shutdown()
 
+    def test_aucune_cle_privee_dans_le_depot(self):
+        for p in (q for q in (ICI / "tls").iterdir() if q.is_file()):
+            self.assertNotIn(b"PRIVATE KEY", p.read_bytes(), p)
+
     def test_disque_e2e_recoit_l_autorite_de_test(self):
         sys.path.insert(0, str(ICI))
         import prepare_disque
-        magasin = prepare_disque.avec_ca_de_test(b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n")
-        self.assertTrue(magasin.startswith(b"-----BEGIN CERTIFICATE-----\nX"))
-        self.assertTrue(magasin.endswith((ICI / "tls" / "ca.pem").read_bytes()))
+        ca = (self.dossier / "ca.pem").read_bytes()
+        base = b"-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"
+        self.assertEqual(prepare_disque.avec_ca_de_test(base, b""), base)
+        magasin = prepare_disque.avec_ca_de_test(base, ca)
+        self.assertTrue(magasin.startswith(base.rstrip(b"\n")))
+        self.assertTrue(magasin.endswith(ca))
 
 
 class Extrait(unittest.TestCase):

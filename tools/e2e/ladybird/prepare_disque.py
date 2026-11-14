@@ -45,17 +45,20 @@ def autorun_session(url: str) -> str:
         "desktop", ""])
 
 
-CA_DE_TEST = Path(__file__).resolve().parent / "tls" / "ca.pem"
 MAGASIN = ("./etc/ssl/certs/ca-certificates.crt", "etc/ssl/certs/ca-certificates.crt")
+CA_DE_TEST: bytes | None = None  # --ca-test : autorite generee par tls/genere_tls.py
 
 
-def avec_ca_de_test(magasin: bytes) -> bytes:
-    """Le magasin d'autorites + l'autorite de TEST du banc (tls/ca.pem).
+def avec_ca_de_test(magasin: bytes, ca: bytes | None = None) -> bytes:
+    """Le magasin d'autorites + l'autorite de TEST du banc, si fournie.
 
     Seul le disque E2E la recoit : E2E-03 prouve qu'un certificat EXPIRE
     signe par une autorite de confiance est refuse pour son expiration.
     """
-    return magasin.rstrip(b"\n") + b"\n" + CA_DE_TEST.read_bytes()
+    ca = CA_DE_TEST if ca is None else ca
+    if not ca:
+        return magasin
+    return magasin.rstrip(b"\n") + b"\n" + ca
 
 
 def ajoute(tar: tarfile.TarFile, nom: str, donnees: bytes, mode: int) -> None:
@@ -141,6 +144,7 @@ def main(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--artefact", type=Path)
     p.add_argument("--certs", type=Path)
+    p.add_argument("--ca-test", dest="ca_test", type=Path, help="tls/genere_tls.py DOSSIER -> DOSSIER/ca.pem")
     p.add_argument("--image", type=Path)
     p.add_argument("--url", required=True)
     p.add_argument("--sortie", required=True, type=Path)
@@ -151,6 +155,9 @@ def main(argv):
         p.error("URL refusee (caracteres hors de l'autorun)")
     if o.image and o.image.resolve() == o.sortie.resolve():
         p.error("la sortie ne peut pas etre la source")
+    global CA_DE_TEST
+    if o.ca_test:
+        CA_DE_TEST = o.ca_test.read_bytes()
     tmp = o.sortie.with_name(o.sortie.name + ".tmp")
     with tarfile.open(tmp, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         if o.artefact:
