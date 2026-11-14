@@ -36,7 +36,8 @@ Ce que chaque preuve établit, et ce qu'elle n'établit pas :
 |---|---|---|
 | E2E-01 | Démarrage : CPU, ordonnanceur, battement, bureau | implémenté |
 | E2E-02 | Ouverture par le menu, première trame, page d'accueil **visible** | implémenté |
-| E2E-03 | Refus d'un certificat **expiré** signé par une autorité de confiance (`RS_ECHEC code=60` et page jamais servie), puis HTTPS réel (example.com) | implémenté ; refus **déterministe** sur le site de référence (`tls/`) ; `BLOCKED_EXTERNAL` si example.com manque |
+| E2E-03 | Refus d'un certificat **expiré** signé par une autorité de confiance (`RS_ECHEC code=60` et page jamais servie) | implémenté, **déterministe** ; `NON_MESURABLE` sans matériel TLS de banc |
+| E2E-03W | HTTPS réel (example.com) | implémenté ; `BLOCKED_EXTERNAL` si example.com manque |
 | E2E-03X | Refus du certificat expiré d'un site externe réel (expired.badssl.com) | implémenté, **jamais bloquant** |
 | E2E-04 | Recherche sur le site de référence : formulaire, résultats, lien, retour, avance | implémenté, bloquant |
 | E2E-04G | Recherche Google réelle | implémenté, **jamais bloquant** ; consentement, CAPTCHA ou indisponibilité donnent `BLOCKED_EXTERNAL`, jamais un succès |
@@ -120,12 +121,18 @@ Deux défauts du **banc**, corrigés :
 
 À 75fc27b et 3453bfe, `expired.badssl.com` a coupé la poignée TLS (`RS_ECHEC code=35`, *Broken pipe*) avant toute vérification. Le refus du certificat n'était alors **pas prouvé**. Élargir le motif « externe » à ce code aurait pu masquer un défaut de notre propre pile TLS.
 
-Le refus est désormais prouvé sur le site de référence :
+Le refus est désormais prouvé sur le site de référence.
 
-- **Certificat** : `tools/e2e/ladybird/tls/expire.pem` (IP 10.0.2.2, expiré depuis le 02/01/2025), signé par une autorité de **test** (`tls/ca.pem`).
-- **Autorité** : ajoutée au magasin du **seul** disque E2E (`prepare_disque.py`), jamais à une image livrée.
-- **Ce qu'on attend** : un `code=60` (vérification du certificat), et **aucune** requête servie pour la page.
-- **Ce que vérifie le test hôte** (`RefusTls`) : le refus porte sur l'**expiration**, pas sur une autorité inconnue ni sur une extension manquante. La première version du certificat, sans AKI ni SKI, était refusée pour ce manque : le test l'a attrapé.
-- **Régénération** : `python3 tools/e2e/ladybird/tls/genere_tls.py`.
+- **Le matériel** est généré **au moment du test**, jamais commité (`tools/verifie-cle-dev.py` refuse toute clé privée dans le dépôt). `python3 tools/e2e/ladybird/tls/genere_tls.py DOSSIER` produit :
+  - une autorité de test ;
+  - un certificat pour l'IP 10.0.2.2, expiré depuis le 02/01/2025, signé par cette autorité.
+
+  Il passe par la bibliothèque `cryptography`, sinon par la CLI `openssl ca`.
+- **L'autorité** n'est ajoutée qu'au magasin du disque E2E (`prepare_disque.py --ca-test`), jamais à une image livrée.
+- **Le site de référence** sert la page en HTTPS avec ce certificat (`e2e.py --tls-dir`). On attend un `code=60` et **aucune** requête servie pour la page.
+- **Sans matériel**, E2E-03 est `NON_MESURABLE`, jamais PASS.
+  - La CI le génère et l'exige.
+  - `Verifier-Ladybird.ps1` ne l'exige que s'il a pu être généré, et supprime les clés avant de produire l'archive à transmettre.
+- **Le test hôte `RefusTls`** vérifie que le refus porte sur l'**expiration**, et non sur une autorité inconnue ou une extension manquante. Il a attrapé l'absence d'AKI/SKI dans la première version du certificat.
 
 `expired.badssl.com` reste joué dans E2E-03X, en parcours non bloquant.
