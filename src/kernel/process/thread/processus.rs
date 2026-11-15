@@ -324,6 +324,25 @@ pub fn taille_as(&self) -> u64 {
     }
 }
 
+// BOUCHAUD_PROCESSUS_DETRUITS_V1 : chaque `Process` enregistre doit finir par
+// etre DETRUIT. `crees - detruits` est le nombre de processus encore en
+// memoire ; s'il croit avec le nombre de sorties, c'est une fuite (la memoire
+// d'un processus n'est rendue que par sa destruction).
+static PROCESSUS_CREES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static PROCESSUS_DETRUITS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_processus_cree() {
+    PROCESSUS_CREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// (crees, detruits) depuis le demarrage.
+pub fn processus_crees_detruits() -> (u64, u64) {
+    (
+        PROCESSUS_CREES.load(core::sync::atomic::Ordering::Relaxed),
+        PROCESSUS_DETRUITS.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 impl Drop for Process {
     /// Un processus qui disparait rend ses references sur le cache partage.
     ///
@@ -331,6 +350,7 @@ impl Drop for Process {
     /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
     /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
     fn drop(&mut self) {
+        PROCESSUS_DETRUITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         crate::kernel::security::policy::forget(self.pid);
         let (pml4, clean, shared) = {
             let mut mm = self.mm.lock();
