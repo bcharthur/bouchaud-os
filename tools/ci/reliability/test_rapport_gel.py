@@ -74,5 +74,44 @@ class Rapport(unittest.TestCase):
         self.assertEqual(rg.symbolise(None, [0x9cd642]), {})
 
 
+QEMU = """[QEMU-CPU] ech=1 cpu=0 rip=0xab84cd cpl=0 if=0 hlt=0 rsp=0x10000201d80 pile=[0x814dbd,0x94a492]
+[QEMU-CPU] ech=1 cpu=1 rip=0x9cd642 cpl=0 if=1 hlt=0 rsp=0x1803c41ff70 pile=[0xc80880,0x9cd5a0]
+[QEMU-CPU] ech=2 cpu=0 rip=0x94a492 cpl=0 if=1 hlt=0 rsp=0x10000201ef0 pile=[0x91ac40]
+[QEMU-CPU] ech=2 cpu=1 rip=0x9cd642 cpl=0 if=1 hlt=0 rsp=0x1803c41ff70 pile=[0xc80880,0x9cd5a0]
+"""
+
+
+class Qemu(unittest.TestCase):
+    """BOUCHAUD_RELEVE_CPUS_QEMU_V1 : registres vus par QEMU."""
+
+    def test_decoupe(self):
+        c = rg.cpus_qemu(QEMU)
+        self.assertEqual(len(c), 4)
+        self.assertEqual((c[1].cpu, c[1].rip, c[1].cpl, c[1].si, c[1].hlt), (1, 0x9cd642, 0, 1, 0))
+        self.assertEqual(c[1].pile, [0xc80880, 0x9cd5a0])
+
+    def test_boucle_noyau_sans_ligne_de_souffrance(self):
+        out = rg.rapport(QEMU)
+        self.assertIn("verdict=pas_de_ligne_noyau", out[0])
+        v = [l for l in out if "qemu_verdict=" in l]
+        self.assertEqual(len(v), 1)
+        self.assertIn("boucle_noyau coeur=1 rip=0x9cd642", v[0])
+
+    def test_tous_en_hlt(self):
+        texte = QEMU.replace("hlt=0", "hlt=1")
+        self.assertTrue(any("qemu_verdict=vm_au_repos" in l for l in rg.rapport(texte)))
+
+    def test_rip_utilisateur_immobile_n_est_pas_une_boucle_noyau(self):
+        texte = QEMU.replace("cpu=1 rip=0x9cd642 cpl=0", "cpu=1 rip=0x9cd642 cpl=3")
+        out = rg.rapport(texte)
+        self.assertFalse(any("boucle_noyau" in l for l in out))
+        self.assertTrue(any("qemu_verdict=vm_active" in l for l in out))
+
+    def test_avec_ligne_de_souffrance_les_registres_qemu_s_ajoutent(self):
+        out = rg.rapport(TEMOIN + "\n" + QEMU)
+        self.assertIn("verdict=noyau_fige", out[0])
+        self.assertTrue(any("qemu_verdict=boucle_noyau" in l for l in out))
+
+
 if __name__ == "__main__":
     unittest.main()

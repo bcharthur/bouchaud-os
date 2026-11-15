@@ -382,12 +382,15 @@ jobs:
             target/x86_64-bouchaud_os/debug/bouchaud-os | tee souffrance-verrou/rapport.txt
           grep -qE 'RAPPORT_GEL fautif coeur[01] .*s.execute en 0x[0-9a-f]+ \[[^]]*banc_souffrance::detenteur' \
             souffrance-verrou/rapport.txt
+          grep -qE 'RAPPORT_GEL qemu_verdict=boucle_noyau coeur=[01] .*banc_souffrance::detenteur' \
+            souffrance-verrou/rapport.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-souffrance-verrou
           path: |
             souffrance-verrou/*.log
+            souffrance-verrou/*.cpus
             souffrance-verrou/rapport.txt
           if-no-files-found: warn
 

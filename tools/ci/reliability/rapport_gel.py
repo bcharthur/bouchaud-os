@@ -19,7 +19,11 @@ Il repond aux questions d'un gel, une ligne `RAPPORT_GEL` chacune :
   progression  l'IRQ du minuteur progresse-t-elle (lignes successives) ?
 
 Sans ligne de souffrance, le rapport ne conclut RIEN sur le noyau : il le dit
-(`pas_de_gel_noyau`), ce qui oriente vers le navigateur ou l'environnement.
+(`pas_de_gel_noyau`), ce qui oriente vers le navigateur ou l'environnement --
+sauf si les registres vus par QEMU (`[QEMU-CPU]`, releve_cpus_qemu.py, lus
+aussi dans `JOURNAL.cpus`) sont la : `qemu_verdict=boucle_noyau` (meme RIP
+noyau a 1 s d'intervalle hors HLT), `vm_au_repos` (tous en HLT) ou
+`vm_active`.
 Le code de retour est toujours 0 : c'est un releve, pas un verdict de test.
 """
 from __future__ import annotations
@@ -110,6 +114,60 @@ def decoupe(ligne: str) -> Releve | None:
                   cur, sites, spin, ipi, nmi)
 
 
+@dataclass
+class CpuQemu:
+    ech: int
+    cpu: int
+    rip: int
+    cpl: int
+    si: int
+    hlt: int
+    pile: list = field(default_factory=list)
+
+
+def cpus_qemu(texte: str) -> list:
+    """Lignes [QEMU-CPU] de releve_cpus_qemu.py (BOUCHAUD_RELEVE_CPUS_QEMU_V1)."""
+    out = []
+    for m in re.finditer(r"\[QEMU-CPU\] ech=(\d+) cpu=(\d+) rip=(0x[0-9a-f]+) cpl=(-?\d+) "
+                         r"if=(-?\d+) hlt=(-?\d+) rsp=0x[0-9a-f]+ pile=\[([0-9a-fx,]*)\]", texte):
+        out.append(CpuQemu(int(m.group(1)), int(m.group(2)), _hex(m.group(3)), int(m.group(4)),
+                           int(m.group(5)), int(m.group(6)),
+                           [_hex(x) for x in m.group(7).split(",") if x]))
+    return out
+
+
+def lecture_qemu(cpus: list, s) -> list:
+    """Lignes de rapport tirees des registres vus par QEMU."""
+    if not cpus:
+        return []
+    out = []
+    par_cpu = {}
+    for c in cpus:
+        par_cpu.setdefault(c.cpu, {})[c.ech] = c
+    boucles = []
+    for cpu in sorted(par_cpu):
+        e = par_cpu[cpu]
+        a, b = e.get(1), e.get(2)
+        dernier = b or a
+        immobile = a is not None and b is not None and a.rip == b.rip and a.hlt == 0 and b.hlt == 0
+        if immobile and dernier.cpl == 0:
+            boucles.append(dernier)
+        pile = " < ".join(s(x) for x in dernier.pile if s(x) != "?") or "-"
+        out.append(f"RAPPORT_GEL qemu coeur={cpu} rip={dernier.rip:#x} [{s(dernier.rip)}] "
+                   f"{'noyau' if dernier.cpl == 0 else 'utilisateur' if dernier.cpl == 3 else '?'} "
+                   f"if={dernier.si} hlt={dernier.hlt} immobile={'oui' if immobile else 'non'} pile: {pile}")
+    if boucles:
+        for c in boucles:
+            out.append(f"RAPPORT_GEL qemu_verdict=boucle_noyau coeur={c.cpu} rip={c.rip:#x} [{s(c.rip)}] if={c.si} "
+                       f"(meme RIP noyau a 1 s d'intervalle, hors HLT)")
+    elif all((e.get(2) or e.get(1)).hlt == 1 for e in par_cpu.values()):
+        out.append("RAPPORT_GEL qemu_verdict=vm_au_repos tous les vCPU en HLT : aucune boucle, la machine "
+                   "attend un reveil qui ne vient pas (cote navigateur/IPC ou reveil perdu)")
+    else:
+        out.append("RAPPORT_GEL qemu_verdict=vm_active des vCPU progressent : pas de boucle noyau immobile")
+    return out
+
+
 def releves(texte: str) -> list:
     return [r for r in (decoupe(l) for l in texte.splitlines()) if r]
 
@@ -149,7 +207,15 @@ def symbolise(elf: str | None, adresses: list) -> dict:
 
 def rapport(texte: str, elf: str | None = None) -> list:
     tous = releves(texte)
+    qemu = cpus_qemu(texte)
     if not tous:
+        sym_q = symbolise(elf, [c.rip for c in qemu] + [x for c in qemu for x in c.pile])
+        def sq(a):
+            return sym_q.get(a, "?") if a else "-"
+        if qemu:
+            return (["RAPPORT_GEL verdict=pas_de_ligne_noyau raison=aucune_ligne_DIAG-EN-SOUFFRANCE "
+                     "(noyau qui ordonnance encore, OU coeur 0 fige IF=0 : lire les registres QEMU)"]
+                    + lecture_qemu(qemu, sq))
         return ["RAPPORT_GEL verdict=pas_de_gel_noyau raison=aucune_ligne_DIAG-EN-SOUFFRANCE "
                 "(le noyau a continue d'ordonnancer : chercher cote navigateur ou environnement)"]
     r = tous[-1]
@@ -161,6 +227,7 @@ def rapport(texte: str, elf: str | None = None) -> list:
     for i in r.ipi:
         if i:
             a_symboliser.append(i[1])
+    a_symboliser += [c.rip for c in qemu] + [x for c in qemu for x in c.pile]
     sym = symbolise(elf, a_symboliser)
     def s(a):
         return sym.get(a, "?") if a else "-"
@@ -195,6 +262,7 @@ def rapport(texte: str, elf: str | None = None) -> list:
     else:
         out.append("RAPPORT_GEL fautif=inconnu aucune attente de verrou publiee "
                    "(boucle sans verrou, ou attente non instrumentee : lire les RIP NMI)")
+    out += lecture_qemu(qemu, s)
     return out
 
 
@@ -207,6 +275,11 @@ def main(argv: list) -> int:
     except OSError as e:
         print(f"RAPPORT_GEL verdict=journal_illisible {e}")
         return 0
+    # Registres vus par QEMU (releve_cpus_qemu.py), deposes a cote du journal.
+    try:
+        texte += "\n" + open(argv[1] + ".cpus", errors="replace").read()
+    except OSError:
+        pass
     for ligne in rapport(texte, argv[2] if len(argv) > 2 else None):
         print(ligne)
     return 0
