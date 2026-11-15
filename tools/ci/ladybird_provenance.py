@@ -148,7 +148,46 @@ def cherche_artefact(courant_id, empreinte_courante, liste_artefacts, api, empre
         sortie(f"PROVENANCE candidat run={rid} {'RETENU' if ok else 'ecarte'} ({raison})")
         if ok:
             return rid, raison
-    return None, f"aucun run eligible parmi {examines}"
+    trouve, raison_prod = cherche_dans_productions(courant_id, empreinte_courante, api, empreinte_de,
+                                                   depot, depuis=depuis, sortie=sortie)
+    if trouve is not None:
+        return trouve, raison_prod
+    return None, f"aucun run eligible parmi {examines} ; {raison_prod}"
+
+
+def cherche_dans_productions(courant_id, empreinte_courante, api, empreinte_de, depot, depuis=None,
+                             sortie=print):
+    """BOUCHAUD_LADYBIRD_SOURCE_PRODUCTION_V1 : la source la plus sure est le run
+    de PRODUCTION lui-meme.
+
+    La liste des artefacts (100 derniers) ne suffit pas : chaque run qui
+    REUTILISE un artefact le republie sous le meme nom, et ces copies -- qui ne
+    sont pas des sources -- poussent la vraie source hors de la fenetre. Le
+    Nightly du 15/11 (run 43701000573) a ainsi ecarte 40 copies et conclu
+    « aucun artefact », alors que la production 43406969965 de la meme
+    empreinte etait valide jusqu'au 27/11.
+
+    Les productions terminees sont lues directement (titre `ladybird-artefact `
+    pour les TROUVER) ; chacune passe ensuite `examine` en entier -- empreinte
+    recalculee depuis git, build reel, artefacts presents. Rien n'est cru.
+    """
+    reponse = api(f"actions/workflows/{FICHIER_WORKFLOW}/runs?event=workflow_dispatch&status=completed&per_page=50")
+    vues = 0
+    for run in (reponse.get("workflow_runs") or []):
+        rid = run.get("id")
+        if not isinstance(rid, int) or rid == courant_id:
+            continue
+        if not str(run.get("display_title") or "").startswith(TITRE_PRODUCTION):
+            continue
+        vues += 1
+        try:
+            ok, raison = examine(rid, empreinte_courante, api, empreinte_de, depot, depuis)
+        except Exception as exc:  # API, git : cette production ne prouve rien
+            ok, raison = False, f"erreur {type(exc).__name__}: {exc}"
+        sortie(f"PROVENANCE production terminee run={rid} {'RETENUE' if ok else 'ecartee'} ({raison})")
+        if ok:
+            return rid, raison
+    return None, f"aucune production terminee eligible parmi {vues}"
 
 
 def productions_en_cours(courant_id, empreinte_courante, api, empreinte_de, depot, sortie=print):
@@ -226,7 +265,7 @@ def examine(rid, empreinte_courante, api, empreinte_de, depot, depuis=None):
 
 def attends(courant_id, empreinte_courante, api, liste, empreinte_de, depot, depuis=None,
             delai=14400, pas=60, grace=300, rafraichit=10, horloge=time.monotonic, dort=time.sleep,
-            sortie=print):
+            sortie=print, declenche=None):
     """Attend un artefact eligible de cette empreinte ; (run_id, raison) ou exception.
 
     Budget d'API borne (revue de la PR #282 : le jeton du job est limite a
@@ -246,6 +285,25 @@ def attends(courant_id, empreinte_courante, api, liste, empreinte_de, depot, dep
     if rid is not None:
         return rid, raison
     suivies, tour = [], 0
+    # BOUCHAUD_LADYBIRD_PRODUCTION_SUR_ATTENTE_V1 : sans artefact ni production
+    # en cours, l'attente DECLENCHE la production canonique de cette empreinte
+    # (meme workflow, palier artefact, concurrence par empreinte sans
+    # annulation) au lieu d'echouer. Sans droit de declencher, elle echoue et
+    # le dit : jamais d'ancien binaire en remplacement.
+    if declenche is not None:
+        try:
+            en_cours = productions_en_cours(courant_id, empreinte_courante, api, empreinte_de, depot, sortie)
+        except Exception as exc:
+            en_cours = []
+            sortie(f"PROVENANCE attente : productions illisibles ({type(exc).__name__}: {exc})")
+        if en_cours:
+            suivies.extend(en_cours)
+        else:
+            try:
+                declenche()
+                sortie("PROVENANCE attente : aucune production en cours, production declenchee")
+            except Exception as exc:
+                raise AttenteEchec(f"aucun artefact, et production impossible ({type(exc).__name__}: {exc})")
     while True:
         ecoule = horloge() - debut
         try:
@@ -352,11 +410,15 @@ def main(argv=None) -> int:
         depuis = str(api(f"actions/runs/{courant_id}").get("run_started_at") or "") or None
 
     if argv[:1] == ["attends"]:
+        declenche_attente = None
+        if env.get("REF_PRODUCTION"):
+            declenche_attente = gh_declenche(depot, env["REF_PRODUCTION"], courant["empreinte"], reconstruire)
         try:
             rid, raison = attends(courant_id, courant["empreinte"], api, lambda: liste_artefacts(api),
                                   empreinte_de, depot, depuis=depuis,
                                   delai=int(env.get("DELAI_ATTENTE") or 14400),
-                                  grace=int(env.get("GRACE_ATTENTE") or 300))
+                                  grace=int(env.get("GRACE_ATTENTE") or 300),
+                                  declenche=declenche_attente)
         except Exception as exc:
             print(f"LADYBIRD_ATTENTE_ECHEC {exc}")
             return 1
