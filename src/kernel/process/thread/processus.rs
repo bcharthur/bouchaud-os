@@ -21,6 +21,9 @@ impl Mm {
             activation: SpinLock::new(activation),
         }
     }
+    /// `track_caller` : une attente longue nomme l'APPELANT, pas cette ligne
+    /// (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1 ; gel de main@eb6f115 : `processus.rs:24`).
+    #[track_caller]
     pub fn lock(&self) -> SpinLockGuard<'_, MmState> { self.inner.lock() }
     pub fn activate(&self) {
         loop {
@@ -59,6 +62,7 @@ impl FileTable {
     pub fn new(table: FdTable) -> Self {
         Self { inner: RankedSpinLock::new(LockClass::FdTable, table) }
     }
+    #[track_caller]
     pub fn lock(&self) -> RankedSpinLockGuard<'_, FdTable> { self.inner.lock() }
 }
 

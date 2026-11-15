@@ -639,8 +639,10 @@ pub fn stall_probe_from_timer() {
         // (b95fc0a sur #309, 2e61a6b sur #319) n'ont laisse que l'adresse du
         // verrou : impossible de dire QUI le tient ni OU on l'attend. La ligne
         // porte desormais, par coeur :
-        //   spin=[verrou/age_tics/pPROPRIO@fichier:ligne ...] -- le CPU
-        //        proprietaire et la ligne de l'appel `lock()` en attente ;
+        //   spin=[verrou/age_tics/pPROPRIO@fichier:ligne<fichier:ligne ...] --
+        //        le CPU proprietaire, la ligne de l'appel `lock()` en attente
+        //        et, apres `<`, la ligne ou le DETENTEUR l'a pris
+        //        (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1) ;
         //   ipi=[age_tics/rip/uU ...] -- dernier IPI recu : RIP interrompu et
         //        mode (u1 : utilisateur). Le coeur zero envoie un IPI de
         //        reordonnancement a chaque quantum aux coeurs en mode
@@ -650,9 +652,11 @@ pub fn stall_probe_from_timer() {
         let spin = |cpu: usize| crate::kernel::sync::attente_verrou(cpu)
             .map(|a| {
                 let court = a.fichier.rsplit('/').next().unwrap_or(a.fichier);
-                (a.verrou as u64, now.wrapping_sub(a.depuis), a.proprietaire as i64, court, a.ligne)
+                let detenteur = a.fichier_detenteur.rsplit('/').next().unwrap_or(a.fichier_detenteur);
+                (a.verrou as u64, now.wrapping_sub(a.depuis), a.proprietaire as i64, court, a.ligne,
+                 detenteur, a.ligne_detenteur)
             })
-            .unwrap_or((0, 0, -1, "-", 0));
+            .unwrap_or((0, 0, -1, "-", 0, "-", 0));
         let (s0, s1, s2, s3) = (spin(0), spin(1), spin(2), spin(3));
         let ipi = |cpu: usize| {
             let tick = STALL_IPI_TICK[cpu].load(Ordering::Acquire);
@@ -662,17 +666,17 @@ pub fn stall_probe_from_timer() {
         let (i0, i1, i2, i3) = (ipi(0), ipi(1), ipi(2), ipi(3));
         crate::serial_println!(
             "[DIAG-EN-SOUFFRANCE] t={} demande_ms={} fil={} cur=[{},{},{},{}] site=[{} {} {} {}] \
-spin=[{:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{} {:#x}/{}/p{}@{}:{}] \
+spin=[{:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{}] \
 ipi=[{}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{}]",
             now,
             debut_ns.saturating_sub(depuis) / 1_000_000,
             DIAG_FIL_LANCE.load(Ordering::Relaxed) as u8,
             mots[1] as i64, mots[2] as i64, mots[3] as i64, mots[4] as i64,
             site0, site1, site2, site3,
-            s0.0, s0.1, s0.2, s0.3, s0.4,
-            s1.0, s1.1, s1.2, s1.3, s1.4,
-            s2.0, s2.1, s2.2, s2.3, s2.4,
-            s3.0, s3.1, s3.2, s3.3, s3.4,
+            s0.0, s0.1, s0.2, s0.3, s0.4, s0.5, s0.6,
+            s1.0, s1.1, s1.2, s1.3, s1.4, s1.5, s1.6,
+            s2.0, s2.1, s2.2, s2.3, s2.4, s2.5, s2.6,
+            s3.0, s3.1, s3.2, s3.3, s3.4, s3.5, s3.6,
             i0.0, i0.1, i0.2, i1.0, i1.1, i1.2, i2.0, i2.1, i2.2, i3.0, i3.1, i3.2,
         );
     }
