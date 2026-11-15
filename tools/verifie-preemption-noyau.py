@@ -157,6 +157,18 @@ def verifie(racine: Path) -> list[str]:
     for f in (racine / "src/arch/x86_64/idt").glob("*.rs"):
         texte = sans_commentaires(f.read_text())
         for nom in re.findall(r'extern "x86-interrupt" fn (\w+)\(', texte):
+            if nom == "nmi_handler":
+                # BOUCHAUD_RELEVE_NMI_V1 : une NMI peut tomber DANS la fenetre
+                # d'entree d'un autre gestionnaire (avant son `swapgs`) ;
+                # `GsGuard` y lirait un GS faux et fausserait `irq_depth`. Elle
+                # n'est donc admise que si elle ne fait QU'UNE chose : noter son
+                # cadre par `note_nmi` (coeur par RDPID, atomiques seulement).
+                c = corps(texte, nom)
+                appels = re.findall(r"[\w:]+!?\s*\(", c)
+                if "crate::kernel::task::note_nmi(" not in c or any(
+                        a not in ("crate::kernel::task::note_nmi(", "as_u64(") for a in appels):
+                    fautes.append(f"{f.name}:{nom} : la NMI doit se limiter a note_nmi")
+                continue
             if nom not in ("panic_stop_handler", "double_fault_handler"):
                 if "GsGuard::enter(&stack)" not in corps(texte, nom):
                     fautes.append(f"{f.name}:{nom} : entree/sortie IRQ non suivie")

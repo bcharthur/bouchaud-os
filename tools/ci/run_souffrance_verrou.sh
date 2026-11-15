@@ -14,7 +14,9 @@
 #      proprietaire est L'AUTRE coeur, et dont le site est
 #      `banc_souffrance.rs:<ligne de l'appel lock()>`, et le site de prise
 #      du detenteur `<banc_souffrance.rs:<ligne>` ;
-#   3. le champ `ipi=[...]` present pour les quatre emplacements.
+#   3. le champ `ipi=[...]` present pour les quatre emplacements ;
+#   4. le champ `nmi=[...]` : le coeur detenteur a repondu a la NMI, en mode
+#      noyau, avec un RIP dans la fonction `detenteur` (BOUCHAUD_RELEVE_NMI_V1).
 # BOOTIMAGE_NORMAL (temoin negatif) : le meme demarrage sans le drapeau
 # n'emet AUCUNE ligne de souffrance en 60 s.
 set -uo pipefail
@@ -23,6 +25,16 @@ TEMOIN=${1:?usage: run_souffrance_verrou.sh BOOTIMAGE_TEMOIN BOOTIMAGE_NORMAL}
 NORMAL=${2:?usage: run_souffrance_verrou.sh BOOTIMAGE_TEMOIN BOOTIMAGE_NORMAL}
 OUT=${OUT:-souffrance-verrou}
 mkdir -p "$OUT"
+
+# Les deux images doivent etre ce qu'on croit qu'elles sont. Le 14/11, une
+# image « normale » construite par `cargo bootimage` juste apres le temoin
+# contenait encore le temoin : son « blocage au demarrage » a ete pris, a tort,
+# pour une regression. On le verifie donc sur le binaire lui-meme.
+grep -aqF 'BOUCHAUD_BANC_SOUFFRANCE armement' "$TEMOIN" \
+  || { echo "SOUFFRANCE_VERROU_ECHEC raison=image_temoin_sans_temoin"; exit 1; }
+if grep -aqF 'BOUCHAUD_BANC_SOUFFRANCE armement' "$NORMAL"; then
+  echo "SOUFFRANCE_VERROU_ECHEC raison=image_normale_contient_le_temoin"; exit 1
+fi
 
 LIGNE=$(grep -n 'let (_ligne_attente, garde) = (line!(), VERROU.lock());' src/platform/pc/banc_souffrance.rs | cut -d: -f1)
 LIGNE_DETENTEUR=$(grep -n 'let (_ligne_detenteur, mut garde) = (line!(), VERROU.lock());' src/platform/pc/banc_souffrance.rs | cut -d: -f1)
@@ -44,11 +56,13 @@ joue "$TEMOIN" "$OUT/temoin.log" 150
 sed -E 's/\x1b\[[0-9;]*m//g' "$OUT/temoin.log" > "$OUT/temoin.txt"
 grep -aF "BOUCHAUD_BANC_SOUFFRANCE armement" "$OUT/temoin.txt" >/dev/null \
   && ok "temoin arme" || echec "le temoin n'a pas ete arme"
-python3 - "$OUT/temoin.txt" "$LIGNE" "$LIGNE_DETENTEUR" <<'PY' || echecs=$((echecs + 1))
+FONCTION=$(sed -nE 's/.*BOUCHAUD_BANC_SOUFFRANCE detenteur cpu=[0-9]+ verrou=0x[0-9a-f]+ fonction=(0x[0-9a-f]+).*/\1/p' "$OUT/temoin.txt" | sed -n 1p)
+python3 - "$OUT/temoin.txt" "$LIGNE" "$LIGNE_DETENTEUR" "${FONCTION:-0x0}" <<'PY' || echecs=$((echecs + 1))
 import re, sys
 texte = open(sys.argv[1], errors="replace").read()
 ligne = sys.argv[2]
 ligne_detenteur = sys.argv[3]
+fonction = int(sys.argv[4], 16)
 lignes = [l for l in texte.splitlines() if "[DIAG-EN-SOUFFRANCE]" in l]
 if not lignes:
     print("  ECHEC   aucune ligne [DIAG-EN-SOUFFRANCE]")
@@ -90,6 +104,24 @@ if fautes:
         print("  ECHEC   " + f)
     sys.exit(1)
 print(f"  ok      coeur {cpu} attend le verrou {v.group(1)} tenu par le coeur {proprio}, site {fichier}:{no}, pris en {v.group(6)}:{v.group(7)}")
+# BOUCHAUD_RELEVE_NMI_V1 : le detenteur fige doit avoir repondu a la NMI, en
+# mode noyau, avec un RIP DANS sa boucle (`detenteur`, quelques centaines
+# d'octets au plus) -- pas un RIP perime du dernier IPI.
+n = re.search(r"nmi=\[([^\]]*)\]", derniere)
+if not n:
+    print("  ECHEC   champ nmi= absent")
+    sys.exit(1)
+releves = dict(x.split(":", 1) for x in n.group(1).split())
+r = releves.get(f"c{proprio}", "-")
+m = re.match(r"(0x[0-9a-f]+)/([ku])/if([01])", r)
+if not m:
+    print(f"  ECHEC   le coeur detenteur {proprio} n'a pas repondu a la NMI ({r})")
+    sys.exit(1)
+rip = int(m.group(1), 16)
+if fonction == 0 or not (fonction <= rip < fonction + 0x400) or m.group(2) != "k":
+    print(f"  ECHEC   NMI du detenteur : rip={rip:#x} mode={m.group(2)}, attendu dans detenteur@{fonction:#x} en mode noyau")
+    sys.exit(1)
+print(f"  ok      NMI : le coeur {proprio} s'execute en {rip:#x}, dans detenteur ({fonction:#x}), mode noyau, if{m.group(3)}")
 PY
 
 joue "$NORMAL" "$OUT/normal.log" 60

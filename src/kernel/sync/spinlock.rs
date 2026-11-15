@@ -291,11 +291,12 @@ impl<T: ?Sized> SpinLock<T> {
         }
 
         self.owner_cpu.store(cpu, Ordering::Relaxed);
-        // Une prise par `try_lock` efface le site : la ligne de souffrance
-        // dira « ? » plutot qu'un site perime. Y ecrire `Location::caller()`
-        // arretait la console asynchrone au demarrage (3 sur 3 sous QEMU
-        // -smp 2, le 14/11/2026) ; cause non etablie, laissee ouverte.
-        self.owner_site.store(0, Ordering::Relaxed);
+        // Le site de la prise, comme pour `lock()`. (Le 14/11, #325 avait
+        // renonce a cette ecriture sur un faux constat : l'image « normale »
+        // du banc local contenait en fait le temoin `banc-souffrance-verrou`,
+        // que `cargo bootimage` n'avait pas reconstruit. Le banc verifie
+        // desormais le contenu des deux images.)
+        self.owner_site.store(Location::caller() as *const _ as usize, Ordering::Relaxed);
         Some(SpinLockGuard { lock: self })
     }
 
