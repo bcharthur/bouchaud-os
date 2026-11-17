@@ -1,4 +1,4 @@
-# Passation du 17/11/2026 (suite) — #329, #330, #331, #328, #319 fusionnées ; #332 ouverte
+# Passation du 17/11/2026 (suite) — #329, #330, #331, #328, #319, #332 fusionnées
 
 Suite de `PASSATION_2026-11-17.md`. Écriture GitHub rétablie dans cette
 session (fusion, création de PR, push).
@@ -11,7 +11,8 @@ session (fusion, création de PR, push).
 | #330 processus jamais détruits | `1f97b4b` | `13a83b3` : 147 contrôles verts/sautés (SMP8 relancé une fois : action `download-artifact` injoignable, aucun code exécuté) | tout vert (Ladybird annulé par le push suivant) |
 | #331 gel #283 (registre + fenêtre de migration) | `427fa15` | `619da3c` : 17 runs push + PR verts au premier essai | tout vert, Ladybird compris ; Nightly Full et ladybird-sync planifiés verts |
 | #328 relevé NMI + rapport de gel | `504fdf1` | `4dda074` : 12 runs verts au premier essai | tout vert |
-| #319 signaux, fil principal | `0243643` | `e9e0ce5` (main `504fdf1` fusionné) : 15 runs verts, dont une relance (voir §4) | en cours au moment d'écrire |
+| #319 signaux, fil principal | `0243643` | `e9e0ce5` (main `504fdf1` fusionné) : 15 runs verts, dont une relance (voir §4) | 10/10 verts |
+| #332 oracle QEMU du banc souffrance | `5471368` | `48972d5` : 10 runs verts, Native IPC après une relance (bureau B3, voir §3) | à vérifier |
 
 `integration.yml` garde les DEUX jobs `tempete-exec` et `fenetre-migration`
 et les deux entrées du gate.
@@ -52,6 +53,13 @@ et les deux entrées du gate.
   complet (7 000 lignes) et artefact (hôte Azure refusé par le proxy de la
   session) non lus : cause exacte non établie.
 
+* `native-ipc-runtime`, bureau ring 3, **bras B3 seul** (`BOUCHAUD_BUREAU_NOYAU_REFUSE
+  raison=ecran-au-compositeur`, `COMPOSITED_BUREAU_FAIL raison=ecran`,
+  scénario incomplet ; B4, B0, A verts), une fois sur #332 à `48972d5`,
+  vert à la relance et sur main au même code noyau. **Non analysé** : à
+  instruire s'il revient (course entre le bureau noyau et `composited` pour
+  l'écran ?).
+
 ## 4. #328 et #319
 
 * **#328** : défaut réel trouvé et corrigé avant fusion (`4dda074`).
@@ -63,7 +71,7 @@ et les deux entrées du gate.
 * **#319** : qualifiée sur l'arbre exact fusionné (main avec #328). Un
   échec, relancé une fois et vert : `qemu / noyau fige, proprietaire du
   verrou`, oracle QEMU de #328 tiré au sort (voir #332).
-* **#332 (ouverte)** : l'oracle QEMU du banc souffrance prenait deux
+* **#332 (fusionnée)** : l'oracle QEMU du banc souffrance prenait deux
   échantillons et exigeait le détenteur au même RIP dans `detenteur` ; le
   détenteur sert ses IRQ (IF=1). Six échantillons, trois exigés ; le banc
   efface aussi le journal et le relevé d'un run précédent (en local, la
