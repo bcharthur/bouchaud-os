@@ -217,6 +217,7 @@ impl<T: ?Sized> SpinLock<T> {
         // detient rien, et cela ne coute qu'un report d'un quantum a une
         // demande ciblee qui le viserait.
         marque_verrou_simple_pris(cpu);
+        crate::kernel::scheduler::preempt::note_fenetre(cpu, &crate::kernel::scheduler::preempt::FENETRE_VERROU);
 
         let verrou = self as *const Self as *const () as usize;
         let mut tours = 0u32;
