@@ -22,7 +22,16 @@ pub struct DateTime {
     pub second: u8,
 }
 
+// BOUCHAUD_PERF_ES_PAR_TRAME_V1 : une lecture CMOS = deux E/S (0x70, 0x71).
+static LECTURES_CMOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Lectures de registres CMOS depuis le demarrage.
+pub fn lectures_cmos() -> u64 {
+    LECTURES_CMOS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 fn cmos_read(reg: u8) -> u8 {
+    LECTURES_CMOS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     unsafe {
         outb(0x70, reg);
         inb(0x71)
@@ -133,4 +142,38 @@ pub fn now_utc() -> DateTime {
 /// Lit la date et l'heure locales affichees par l'OS (UTC+2).
 pub fn now() -> DateTime {
     add_hours(now_utc(), LOCAL_UTC_OFFSET_HOURS)
+}
+
+// BOUCHAUD_RTC_LISSE_V1
+//
+// `now` lit au moins quinze registres CMOS (deux E/S chacun), plus l'attente
+// du bit « mise a jour en cours ». Le bureau en a besoin pour AFFICHER
+// l'heure, a chaque trame qui repeint la barre du haut ou le Moniteur : une
+// lecture par seconde suffit. Sous WHPX, chaque E/S est une sortie de la VM.
+static LISSE_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+static LISSE_VALEUR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn empaquette(d: DateTime) -> u64 {
+    (d.year as u64) << 40 | (d.month as u64) << 32 | (d.day as u64) << 24
+        | (d.hour as u64) << 16 | (d.minute as u64) << 8 | d.second as u64
+}
+
+fn depaquette(v: u64) -> DateTime {
+    DateTime { year: (v >> 40) as u16, month: (v >> 32) as u8, day: (v >> 24) as u8,
+        hour: (v >> 16) as u8, minute: (v >> 8) as u8, second: v as u8 }
+}
+
+/// L'heure locale pour l'AFFICHAGE : le CMOS est relu au plus une fois par
+/// seconde d'horloge monotone ; entre deux, la derniere lecture.
+pub fn maintenant_lisse() -> DateTime {
+    use core::sync::atomic::Ordering::{Acquire, Release};
+    let t = crate::kernel::timer::monotonic_ns() / 1_000_000;
+    let lu = LISSE_MS.load(Acquire);
+    if lu != u64::MAX && t.saturating_sub(lu) < 1000 {
+        return depaquette(LISSE_VALEUR.load(Acquire));
+    }
+    let d = now();
+    LISSE_VALEUR.store(empaquette(d), Release);
+    LISSE_MS.store(t, Release);
+    d
 }

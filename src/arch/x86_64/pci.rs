@@ -34,7 +34,20 @@ pub struct PciDevice {
     pub header_type: u8,
 }
 
+// BOUCHAUD_PERF_ES_PAR_TRAME_V1 : chaque acces de configuration coute DEUX
+// instructions d'E/S (adresse puis donnee). Sous TCG elles sont emulees dans
+// la VM ; sous WHPX (et KVM) chacune est une sortie vers QEMU en mode
+// utilisateur, de quelques microsecondes. Le compte est publie par trame
+// (`BOUCHAUD_PERF_TRAMES ... pci_acces=`) : un dessin ne doit pas en faire.
+static ACCES_CONFIG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Acces de configuration PCI depuis le demarrage (lecture ou ecriture).
+pub fn acces_config() -> u64 {
+    ACCES_CONFIG.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 fn config_read32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
+    ACCES_CONFIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let address = (1u32 << 31)
         | ((bus as u32) << 16)
         | ((slot as u32) << 11)
@@ -48,6 +61,7 @@ fn config_read32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
 }
 
 fn config_write32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
+    ACCES_CONFIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let address = (1u32 << 31)
         | ((bus as u32) << 16)
         | ((slot as u32) << 11)
@@ -243,9 +257,25 @@ pub fn find_nvme() -> Option<PciDevice> {
 }
 
 /// Compte les peripheriques PCI presents, PONTS COMPRIS.
+// BOUCHAUD_PCI_COMPTE_FIXE_V1
+//
+// `count` re-enumerait le bus a CHAQUE appel : 256 bus x 32 emplacements, au
+// moins un acces de configuration chacun, soit plus de 16 000 E/S. Insights et
+// le Moniteur l'appelaient a chaque trame de leur fenetre : sous WHPX, ou
+// chaque E/S est une sortie vers QEMU, ~100 ms par trame (`fenetres_us`).
+// Bouchaud OS ne gere pas le branchement a chaud PCI : la topologie est figee
+// une fois le bus enumere, le compte l'est aussi.
+static COMPTE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Nombre de peripheriques PCI (fonctions), ponts compris. Enumere une fois.
 pub fn count() -> usize {
+    let connu = COMPTE.load(core::sync::atomic::Ordering::Relaxed);
+    if connu != usize::MAX {
+        return connu;
+    }
     let mut n = 0;
     parcours(&mut |_| { n += 1; true });
+    COMPTE.store(n, core::sync::atomic::Ordering::Relaxed);
     n
 }
 

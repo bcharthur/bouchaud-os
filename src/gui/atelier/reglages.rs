@@ -8,6 +8,10 @@
 //!   haut. Par defaut il n'y est pas -- la barre montre l'etat du systeme, pas
 //!   ses mesures ; le compteur reste ecrit dans chaque ligne du journal
 //!   (`[FPS:...]`) et lisible dans Insights.
+//! * `BO_ATELIER_PERF_TRAME=1` : une ligne `BOUCHAUD_PERF_TRAME` par trame
+//!   composee (duree, part des fenetres, presentation, E/S). Pour les bancs :
+//!   p50/p95/p99 PAR PHASE d'un scenario, que les agregats de 64 trames
+//!   melangent. Desactive par defaut (une ligne serie par trame a un cout).
 //! * `BO_ATELIER_ANIMATIONS=normales|reduites|aucune` : le mouvement des
 //!   fenetres (`atelier::animations::Mode`). « reduites » garde le fondu et
 //!   retire tout deplacement ; « aucune » ne lance rien.
@@ -16,6 +20,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use super::animations::Mode;
 
 static DIAGNOSTIC: AtomicBool = AtomicBool::new(false);
+static PERF_TRAME: AtomicBool = AtomicBool::new(false);
 static ANIMATIONS: AtomicU8 = AtomicU8::new(0);
 
 const fn code(mode: Mode) -> u8 {
@@ -49,6 +54,9 @@ pub fn charge() {
         if let Some(v) = entree.strip_prefix("BO_ATELIER_DIAGNOSTIC=") {
             DIAGNOSTIC.store(matches!(v.trim(), "1" | "oui" | "on"), Ordering::Relaxed);
         }
+        if let Some(v) = entree.strip_prefix("BO_ATELIER_PERF_TRAME=") {
+            PERF_TRAME.store(matches!(v.trim(), "1" | "oui" | "on"), Ordering::Relaxed);
+        }
         if let Some(v) = entree.strip_prefix("BO_ATELIER_ANIMATIONS=") {
             let mode = match v.trim() {
                 "reduites" | "reduit" => Mode::Reduit,
@@ -58,6 +66,11 @@ pub fn charge() {
             ANIMATIONS.store(code(mode), Ordering::Relaxed);
         }
     }
+}
+
+/// Une ligne de mesure par trame ? (`BO_ATELIER_PERF_TRAME=1`)
+pub fn perf_trame() -> bool {
+    PERF_TRAME.load(Ordering::Relaxed)
 }
 
 /// Le mode diagnostic est-il actif ?

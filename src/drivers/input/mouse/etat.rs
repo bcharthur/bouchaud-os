@@ -64,5 +64,8 @@ static PACKETS_CHANGED: AtomicU64 = AtomicU64::new(0);
 static DEFERRED_SIGNALS: AtomicU64 = AtomicU64::new(0);
 static LAST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_PACKET_NS: AtomicU64 = AtomicU64::new(0);
+// BOUCHAUD_LATENCE_OUVERTURE_V1 : date monotone du dernier changement de
+// boutons, prise dans le chemin d'entree (IRQ PS/2 ou rapport USB).
+static LAST_BUTTON_NS: AtomicU64 = AtomicU64::new(0);
 static LAST_STATUS: AtomicU8 = AtomicU8::new(0);
 static LAST_BYTE: AtomicU8 = AtomicU8::new(0);

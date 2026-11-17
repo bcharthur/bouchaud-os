@@ -603,6 +603,14 @@ fn boucle() {
     // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
     let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
     crate::gui::atelier::reglages::charge();
+    // BOUCHAUD_ANCRE_MURALE_AU_BUREAU_V1 : l'ancre de l'horloge murale n'etait
+    // posee qu'au premier `clock_gettime` d'un programme. Un bureau sans
+    // navigateur ne l'appelait jamais : le prefixe de CHAQUE ligne du journal
+    // (BOUCHAUD_PREFIXE_SANS_CMOS_V1, qui ne pose pas l'ancre lui-meme) relisait
+    // alors la RTC -- ~30 E/S CMOS par ligne, chacune une sortie de la VM sous
+    // WHPX, quel que soit le fil qui ecrit. On la pose ici, une fois, depuis un
+    // fil ordinaire.
+    let _ = crate::kernel::abi::realtime_ns();
     // BOUCHAUD_DOSSIERS_PERSONNELS_V1 : le dossier personnel de la session et
     // ses sous-dossiers existent avant la premiere fenetre.
     let _ = crate::fs::dossiers::prepare_session();
@@ -1044,6 +1052,11 @@ fn boucle() {
                         for (rect, cible) in transition::fenetre_bougee(before, cadre_fenetre(window)).iter() {
                             degats.ajoute(origine_de(cible), rect);
                         }
+                    }
+                }
+                if ended_drag.is_some() {
+                    if let Some(window) = wins.last() {
+                        journalise_geometrie(window);
                     }
                 }
                 if let Some((idx, _, _, smx, smy)) = icon_drag.take() {
@@ -1510,6 +1523,7 @@ fn boucle() {
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
                 let t_trame = crate::kernel::timer::monotonic_ns();
+                profil_trames::debut_trame();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
                 // BOUCHAUD_GPU_COMPOSITION_V2 : quelles fenetres le GPU pose.
@@ -1587,6 +1601,7 @@ fn boucle() {
                 }
 
                 crate::kernel::timer::mark_frame();
+                profil_trames::ouverture_presentee();
                 if derniere_trame != 0 {
                     profil_trames::fin_trame(crate::kernel::timer::monotonic_ns().saturating_sub(t_trame));
                 }
@@ -2309,6 +2324,10 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
             crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
     }
     let mut w = wins.remove(index);
+    // BOUCHAUD_ATELIER_GEOMETRIE_V1 : la fermeture laisse une trace, et le
+    // bouton Demarrer (dont la place depend du nombre de fenetres) se republie.
+    crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_FERMEE titre={}", w.window.title);
+    journalise_demarrer(wins.len());
     if let Some(client) = w.app.client_mut() {
         // BOUCHAUD_GPU_COMPOSITION_V2 : la texture rend la surface AVANT
         // que le client ne disparaisse.
@@ -2402,6 +2421,18 @@ pub(crate) fn journalise_demarrer(n: usize) {
     crate::serial_println!("BOUCHAUD_ATELIER_DEMARRER fenetres={} x={} y={} w={} h={}", n, r.x, r.y, r.w, r.h);
 }
 
+/// BOUCHAUD_ATELIER_GEOMETRIE_V1 : ou est une fenetre et son bouton Fermer,
+/// tels que l'Atelier les calcule, a l'ouverture et a la fin d'un geste
+/// (deplacement, redimensionnement). Un banc les vise avec la souris de QEMU
+/// au lieu de les deviner. Le titre en dernier : il peut contenir des espaces.
+fn journalise_geometrie(w: &Win) {
+    let outer = w.rect();
+    let fermer = crate::gui::windowing::close_button_rect(outer, crate::gui::windowing::WINDOW_CHROME);
+    crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_GEOMETRIE x={} y={} w={} h={} fermer_x={} fermer_y={} titre={}",
+        w.x, w.y, w.w, w.h, fermer.x + fermer.width as i32 / 2, fermer.y + fermer.height as i32 / 2,
+        w.window.title);
+}
+
 fn journalise_menu() {
     for (i, (libelle, _)) in window::MENU.iter().enumerate() {
         let r = window::rect_ligne_menu(i);
@@ -2414,9 +2445,11 @@ fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
     // une trace (le Terminal n'en laissait aucune) : c'est ce que le test de
     // l'image de livraison exige apres un double-clic REEL sur son icone.
     crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_OUVERTE titre={}", fenetre.window.title);
+    profil_trames::note_ouverture();
     // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
     // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
     crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
+    journalise_geometrie(&fenetre);
     wins.push(fenetre);
     degats.tout();
     journalise_demarrer(wins.len());
@@ -3064,6 +3097,19 @@ mod profil_trames {
     static TRAMES: AtomicU64 = AtomicU64::new(0);
     static TOTAL: AtomicU64 = AtomicU64::new(0);
     static PIRE: AtomicU64 = AtomicU64::new(0);
+    // BOUCHAUD_PERF_ES_PAR_TRAME_V1 : E/S faites PENDANT les trames (acces de
+    // configuration PCI, lectures CMOS). Le dessin n'en a aucun besoin ; sous
+    // WHPX chacune est une sortie de la VM.
+    static PCI_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static FEN_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static PRES_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static CMOS_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static PCI: AtomicU64 = AtomicU64::new(0);
+    static CMOS: AtomicU64 = AtomicU64::new(0);
+    // BOUCHAUD_PERF_TRAMES_QUANTILES_V1 : les 64 durees de la fenetre de
+    // publication, pour p50/p95/p99 (une moyenne cache les trames lentes).
+    // Ecrit par le seul fil du bureau.
+    static DUREES: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
     const NOMS: [&str; 10] = ["fond", "filigrane", "icones", "barre", "fenetres", "menu", "centre",
         "dock", "curseur", "presentation"];
     fn rang(e: Element) -> usize {
@@ -3087,16 +3133,69 @@ mod profil_trames {
         NS[9].fetch_add(ns, Relaxed);
         PIXELS.fetch_add(pixels, Relaxed);
     }
+    /// BOUCHAUD_LATENCE_OUVERTURE_V1 : latence d'ouverture mesuree DANS la VM,
+    /// du changement de bouton (chemin d'entree) a l'ouverture de la fenetre,
+    /// puis a la fin de la premiere trame presentee qui la contient. Un banc
+    /// hote ne mesure que son propre geste (appui tenu, scrutation du journal).
+    static OUVERTURE_BOUTON_NS: AtomicU64 = AtomicU64::new(0);
+    static OUVERTURE_NS: AtomicU64 = AtomicU64::new(0);
+    pub fn note_ouverture() {
+        let bouton = crate::drivers::mouse::dernier_bouton_ns();
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        // Une ouverture au clavier n'a pas de clic : un bouton vieux de plus
+        // d'une seconde n'en est pas la cause, rien n'est publie.
+        if bouton == 0 || maintenant.saturating_sub(bouton) > 1_000_000_000 {
+            return;
+        }
+        OUVERTURE_BOUTON_NS.store(bouton, Relaxed);
+        OUVERTURE_NS.store(maintenant, Relaxed);
+    }
+    pub fn ouverture_presentee() {
+        let bouton = OUVERTURE_BOUTON_NS.swap(0, Relaxed);
+        if bouton == 0 {
+            return;
+        }
+        let ouverte = OUVERTURE_NS.load(Relaxed);
+        let fin = crate::kernel::timer::monotonic_ns();
+        crate::serial_println!("BOUCHAUD_ATELIER_OUVERTURE_LATENCE bouton_a_ouverture_us={} bouton_a_presentation_us={}",
+            ouverte.saturating_sub(bouton) / 1000, fin.saturating_sub(bouton) / 1000);
+    }
+    pub fn debut_trame() {
+        FEN_DEBUT.store(NS[4].load(Relaxed), Relaxed);
+        PRES_DEBUT.store(NS[9].load(Relaxed), Relaxed);
+        PCI_DEBUT.store(crate::arch::x86_64::pci::acces_config(), Relaxed);
+        CMOS_DEBUT.store(crate::arch::x86_64::rtc::lectures_cmos(), Relaxed);
+    }
     pub fn fin_trame(ns: u64) {
         TOTAL.fetch_add(ns, Relaxed);
         PIRE.fetch_max(ns, Relaxed);
+        let pci = crate::arch::x86_64::pci::acces_config().saturating_sub(PCI_DEBUT.load(Relaxed));
+        let cmos = crate::arch::x86_64::rtc::lectures_cmos().saturating_sub(CMOS_DEBUT.load(Relaxed));
+        PCI.fetch_add(pci, Relaxed);
+        CMOS.fetch_add(cmos, Relaxed);
+        if crate::gui::atelier::reglages::perf_trame() {
+            // Horodatee en ms monotones : le banc decoupe ses phases avec.
+            crate::serial_println!("BOUCHAUD_PERF_TRAME t_ms={} us={} fenetres_us={} presentation_us={} pci_acces={} cmos_lectures={}",
+                crate::kernel::timer::monotonic_ns() / 1_000_000, ns / 1000,
+                NS[4].load(Relaxed).saturating_sub(FEN_DEBUT.load(Relaxed)) / 1000,
+                NS[9].load(Relaxed).saturating_sub(PRES_DEBUT.load(Relaxed)) / 1000, pci, cmos);
+        }
         let n = TRAMES.fetch_add(1, Relaxed) + 1;
+        DUREES[((n - 1) % 64) as usize].store(ns, Relaxed);
         if n % 64 != 0 {
             return;
         }
+        let mut durees = [0u64; 64];
+        for (d, s) in durees.iter_mut().zip(DUREES.iter()) {
+            *d = s.load(Relaxed);
+        }
+        durees.sort_unstable();
+        // Rang le plus proche (nearest-rank) sur 64 echantillons.
+        let quantile = |q: usize| durees[(q * 64).div_ceil(100).clamp(1, 64) - 1] / 1000;
         let total = TOTAL.swap(0, Relaxed);
-        let mut ligne = alloc::format!("BOUCHAUD_PERF_TRAMES n=64 moy_us={} pire_us={} kpix_presentes={}",
-            total / 64 / 1000, PIRE.swap(0, Relaxed) / 1000, PIXELS.swap(0, Relaxed) / 1000);
+        let mut ligne = alloc::format!("BOUCHAUD_PERF_TRAMES n=64 moy_us={} pire_us={} p50_us={} p95_us={} p99_us={} pci_acces={} cmos_lectures={} kpix_presentes={}",
+            total / 64 / 1000, PIRE.swap(0, Relaxed) / 1000, quantile(50), quantile(95), quantile(99),
+            PCI.swap(0, Relaxed), CMOS.swap(0, Relaxed), PIXELS.swap(0, Relaxed) / 1000);
         for (i, nom) in NOMS.iter().enumerate() {
             ligne.push_str(&alloc::format!(" {}_us={}", nom, NS[i].swap(0, Relaxed) / 64 / 1000));
             if i < 9 {
