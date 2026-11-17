@@ -54,7 +54,7 @@ Bouchaud OS est un système d'exploitation **bare-metal** : il démarre directem
 
 **Atelier** est le bureau de Bouchaud OS : barre haute, dock, centre de contrôle, fenêtres animées, icônes [Lucide](https://lucide.dev) et fond photographique. La marque est le nom seul (le croissant provisoire a été retiré le 10 novembre 2026) et **aucune fenêtre ne s'ouvre d'elle-même au démarrage** : ni Terminal, ni navigateur.
 
-> **Captures du 10 novembre 2026**, branche `claude/c22-p13-p10-gpu-kernel-0y2ucg`. Ce sont des **captures réelles de l'écran de l'hôte** (QEMU 8.2, `virtio-gpu-gl-pci`, sortie SDL sous Xvfb), en 1280×720, sans retouche. Le contenu des fenêtres DOOM et Mire y est **composé par le GPU de l'hôte** (VIRGL) ; le reste du bureau est peint par le processeur.
+> **Captures du 10 novembre 2026**, branche `claude/c22-p13-p10-gpu-kernel-0y2ucg` (archivée par `archive/prune-20261117/claude/c22-p13-p10-gpu-kernel-0y2ucg`). Ce sont des **captures réelles de l'écran de l'hôte** (QEMU 8.2, `virtio-gpu-gl-pci`, sortie SDL sous Xvfb), en 1280×720, sans retouche. Le contenu des fenêtres DOOM et Mire y est **composé par le GPU de l'hôte** (VIRGL) ; le reste du bureau est peint par le processeur.
 
 <table>
 <tr>
@@ -292,19 +292,15 @@ Sous Windows, l'équivalent est `tools/reference/IMAGE-TRIGKEY.ps1`, et l'image 
 
 Une preuve vaut pour **un SHA** et **un niveau**. Un PASS sous QEMU TCG ne dit rien de KVM, et aucun des deux ne dit rien du matériel : une CI verte n'est **pas** une preuve physique.
 
-| Famille | Où | Quand | Ce qu'elle établit |
+La CI a **trois niveaux** ; chaque SHA de branche est vérifié une seule fois par niveau.
+
+| Niveau | Quand | Workflows | Ce qu'il établit |
 |---|---|---|---|
-| Tests hôte | `tools/**/test_*.rs`, lancés par `tools/ci/run_host_tests.sh` | local, CI | la logique pure (décodeurs, politiques, A/B, rendu), incluse **telle quelle** depuis `src/` |
-| Garde-fous d'architecture | `tools/ci/run_architecture_guards.sh` (`tools/verifie-*.py`) | local, CI | invariants de code, contrats d'ABI, interdits, avec leurs témoins négatifs |
-| CI Fast | `ci.yml` | push, PR | construction, garde-fous, tests hôte : le contrôle court |
-| Integration | `integration.yml` | push, PR | démarrages QEMU, stockage, réseau, USB |
-| Reliability V3 | `reliability-v3.yml` | push, PR, chaque nuit | matrice de fiabilité, coupures, injections de pannes |
-| Native IPC Runtime | `native-ipc-runtime.yml` | push, PR (filtré par chemins) | ABI native, services ring 3, matrice A/B de `run_ab_rollback.sh` |
-| Security Runtime | `security-runtime.yml` | push, PR | tests négatifs : l'interdit échoue, l'autorisé passe |
-| Ladybird | `ladybird-native-browser.yml`, `ladybird-sync.yml` | push, PR, chaque jour | construction du navigateur, WPT, sites, robustesse, endurance |
-| P13 primitives | `p13-primitives-noyau.yml`, `p13-cible-kvm.yml` | push, PR | primitives du noyau sous TCG et KVM (SMP1/2/4) |
-| P13 strict | `p13-dedicated-kvm.yml`, `p13-final-candidate.yml` | manuel | qualification sur runners KVM4/KVM8 dédiés (**bloquée** : runners non enregistrés) |
-| Nightly, endurance, soak | `nightly.yml`, `endurance.yml`, `soak.yml` | nuit, semaine, manuel | campagnes longues |
+| A — développement | chaque `push`, toute branche | `ci.yml` (CI Fast) | compilation, 216 garde-fous d'architecture, tests hôte, contrats de CI : premier verdict en quelques minutes |
+| B — avant fusion | chaque `pull_request`, puis `main` | `integration.yml`, `reliability-v3.yml`, `non-regression.yml` ; selon les chemins : Ladybird, Native IPC, P13 primitives, GPU, sécurité, Unix/FS, Trigkey, Windows | démarrages QEMU, SMP, stockage, réseau, USB, navigateur, IPC, composition GPU, persistance |
+| C — qualification | nuit, semaine, manuel | `nightly.yml`, `endurance.yml`, `soak.yml`, `release*.yml`, `p13-*.yml` | endurance, charges combinées, release, matériel |
+
+Checks requis avant fusion : `fast-gate`, `integration-gate`, `reliability-gate`, `non-regression-gate`. **`main` n'est pas protégé sur GitHub** : ils ne sont exigés que par la procédure. `tools/ci/configure-protection.sh` les rend exécutoires.
 
 Avant de pousser, la barrière locale rejoue l'essentiel :
 
@@ -341,13 +337,7 @@ Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIO
 
 ## Travaux en cours et feuille de route
 
-**Pull requests et branches ouvertes**, état au 2026-11-10, à revérifier sur GitHub.
-
-| PR / branche | Sujet | État |
-|---|---|---|
-| `claude/c22-p13-p10-gpu-kernel-0y2ucg` | compositeur GPU des fenêtres, client graphique générique, bureau sans croissant ni Terminal imposé, qualification C22/P13 | CI verte (TCG, KVM, Ladybird sous VIRGL) ; voir [SESSION_2026-11-10](docs/current/SESSION_2026-11-10.md) |
-| [#281](https://github.com/bcharthur/bouchaud-os/pull/281) | P10 VIRGL, première version | repris et remplacé par la branche ci-dessus |
-| [#280](https://github.com/bcharthur/bouchaud-os/pull/280), [#279](https://github.com/bcharthur/bouchaud-os/pull/279) | instantané local P10, docs du 9/11 | obsolètes |
+**Branches** : `main` est la référence ; une seule branche de travail à la fois, et sa PR. L'inventaire du 17/11/2026 (55 branches mortes : 48 déjà dans `main`, prouvé fichier par fichier, et 7 à archiver en étiquettes `archive/prune-20261117/*`) et leur suppression vérifiée sont dans `tools/git/nettoie_branches_20261117.py`. Les PR ouvertes sont sur [GitHub](https://github.com/bcharthur/bouchaud-os/pulls). Point d'entrée de la documentation, avec les chantiers ouverts par priorité : [docs/current/README.md](docs/current/README.md).
 
 **Chantiers ouverts**, par ordre de priorité. Ce sont des projets, pas des fonctionnalités livrées.
 

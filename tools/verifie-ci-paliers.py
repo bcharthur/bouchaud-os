@@ -355,18 +355,18 @@ def negatifs(t: dict) -> list:
          "          R_ATTENTE"),
         ("convergence en developpement", "verdict", 'if os.environ.get("BOUCHAUD_PALIER") == contrat.QUALIFICATION:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")',
          'if True:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")'),
-        ("chemin noyau oublie (push)", "p13", "    branches: [main, 'claude/**', 'feat/**']\n    paths:\n"
+        ("chemin noyau oublie (push)", "p13", "    branches: [main]\n    paths:\n"
          "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"
          "      - 'src/kernel/process/**'\n",
-         "    branches: [main, 'claude/**', 'feat/**']\n    paths:\n"
+         "    branches: [main]\n    paths:\n"
          "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"),
         ("chemin noyau oublie (pull_request)", "p13", "  pull_request:\n    paths:\n"
          "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"
          "      - 'src/kernel/process/**'\n",
          "  pull_request:\n    paths:\n"
          "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"),
-        ("audit double", "p13", "branches: [main, 'claude/**', 'feat/**']",
-         "branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']"),
+        ("audit double", "p13", "branches: [main]",
+         "branches: [main, 'audit/p13-console-sync-ci-20261024']"),
     ]
     echecs = []
     for nom, cle, avant, apres in mutations:

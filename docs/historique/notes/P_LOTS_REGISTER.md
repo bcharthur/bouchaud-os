@@ -5,7 +5,7 @@
 > historiquement qui casse au HEAD redevient `REGRESSED`. Niveaux : STATIC,
 > HOST, TCG, KVM, PHYSICAL. Rattaché au registre de convergence le 2026-10-21 ;
 > tableau mis à jour le 2026-10-15 (campagnes `c7018e56`,
-> `f23a1247`, `77e0e5de`, `b6c99032` lues : `docs/current/AUDIT_STABILITY_2026-10-15.md`).
+> `f23a1247`, `77e0e5de`, `b6c99032` lues : `docs/historique/notes/AUDIT_STABILITY_2026-10-15.md`).
 >
 > États : UNKNOWN · NOT_STARTED · PARTIAL · EXPERIMENTAL · BLOCKED ·
 > VERIFIED_AT_LEVEL · DONE_AT_LEVEL · REGRESSED · NON_REPÉRÉ.

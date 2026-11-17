@@ -27,7 +27,7 @@ plusieurs campagnes indépendantes) · `CLOS`.
 ## Synthèse
 
 Mise à jour du 25/10, HEAD technique `7526efe6` : **P13 reste PARTIAL**.
-Le [document de reprise](../p13-reprise-20261025.md) conserve les comparaisons
+Le [document de reprise](../../p13-reprise-20261025.md) conserve les comparaisons
 KVM, les candidats retirés, les commandes et les preuves rouges. Le contrôleur
 one-shot est centralisé, mais P2 n'est pas résolu. Le candidat de faute large
 `abd7f807` est réduit à la continuation fatale : pas d'ouverture générale du
@@ -379,7 +379,7 @@ rouge sur l'image d'avant le correctif, pas une injection.
   e4216531 : non reproduit en 5 essais, pas une clôture. Le banc canonique
   `tools/ci/run_faute_persistance.sh` conserve toutes les répétitions et
   vérifie aussi 64 lignes cohérentes de dmesg ; deux essais additionnels verts
-  n'effacent pas les rouges. [Captures et empreintes](../p13/preuves/20261025/C5-extraits.txt).
+  n'effacent pas les rouges. [Captures et empreintes](../../p13/preuves/20261025/C5-extraits.txt).
 - **Limite nouvelle** : printf_core+0, instruction lue `push r15`, mais faute
   de lecture CR2=0 ; autres occurrences au milieu d'une instruction ou sur
   movaps avec pile mal alignée. La cause demeure inconnue. Aucune attribution
@@ -751,7 +751,7 @@ qualifie 8/8 bras et passe P1-P5 : P2 on/off 378/434 us (precedent essai
 ses mesures ne qualifient pas P13. La preuve KVM du candidat reste requise.
 
 Comparaisons exhaustives de reference, hypotheses et commandes de reprise :
-[document de reprise du 25 octobre](../p13-reprise-20261025.md).
+[document de reprise du 25 octobre](../../p13-reprise-20261025.md).
 
 Le TCG SMP4 du meme candidat reste NON_CONVAINCANT, 6/8 bras valides : P4
 tour 1 on 6046 > 3694 + 2173 us et tour 1 off non qualifiant. L'attribution

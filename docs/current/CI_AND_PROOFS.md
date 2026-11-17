@@ -1,66 +1,141 @@
 # CI et preuves
 
-Les familles de workflows, et ce que chacune établit : [README principal](../../README.md#tests-et-ci). Les runs d'un SHA donné : [status.json](status.json) → `ci`. Le tableau de runs ci-dessous est un **relevé historique du 2026-11-02** ; il ne décrit pas `main` aujourd'hui.
+Référence unique de la CI depuis le 17/11/2026 (`BOUCHAUD_CI_TROIS_NIVEAUX_V1`). L'ancien relevé du 2/11 est conservé dans [docs/historique/notes/CI_AND_PROOFS_2026-11-02.md](../historique/notes/CI_AND_PROOFS_2026-11-02.md).
 
 ## Contrat de preuve
 
-STATIC → HOST → TCG → KVM → PHYSICAL. Pas d'inférence entre niveaux. `NON_QUALIFIANT`, `INCONCLUSIF`, `cancelled`, `skipped` et une preuve absente **ne sont pas PASS**. Une CI de développement Ladybird n'est pas le palier `qualification` du workflow.
+Les niveaux de preuve sont, dans l'ordre : STATIC → HOST → TCG → KVM → PHYSICAL. Aucune preuve ne se déduit d'un autre niveau.
 
-Relevé historique du 2026-11-02 :
+Ne valent **pas** PASS :
 
-| Workflow | Run | SHA | Event | Résultat au relevé | Qualification réelle / limites |
-|---|---:|---|---|---|---|
-| CI Fast | 41534263901 | `ba4244fea534` | push main | success | Garde syntaxe, hôte et politique ; ne qualifie pas SMP8/physique |
-| Reliability V3 | 41534263911 | `ba4244fea534` | push main | success | Matrice, tests hôte/fiabilité ; ne suffit pas au gate P13 |
-| CI Fast | 41532849519 | b8436617 | push main | success | SHA antérieur ; pas preuve du HEAD |
-| Reliability V3 | 41532849530 | b8436617 | push main | success | SHA antérieur |
-| Integration | 41532849374 | b8436617 | push main | success | SHA antérieur |
-| CI Fast | 41530447782 | `5c3cd43a7a2a` | push main | success | Gate court |
-| Integration | 41530447736 | `5c3cd43a7a2a` | push main | success | QEMU/assemblage, pas qualification physique |
-| Reliability V3 | 41530447906 | `5c3cd43a7a2a` | push main | success | Tests de fiabilité |
-| Native IPC Runtime | 41530447729 | `5c3cd43a7a2a` | push main | success | IPC natif ; pas preuve filesystem ou driver physique |
-| Security Runtime | 41530447803 | `5c3cd43a7a2a` | push main | success | Tests de sécurité ciblés |
-| ladybird-native-browser | 41530447823 | `5c3cd43a7a2a` | push main | in_progress | Build/diagnostic produit, non conclusion finale au relevé |
-| p13-primitives-noyau | 41530447865 | `5c3cd43a7a2a` | push main | in_progress | Ne confondre avec gate strict final |
-| userland-legacy | 41530447851 | `5c3cd43a7a2a` | push main | in_progress | Fabrique legacy, distinct des services ring3 canoniques |
-| ladybird-native-browser | 41518023294 | head `5c3cd43a7a2a`; checkout `84105df8bf1c` | pull_request | success | C22 6/6 KVM ; le job a testé le merge SHA synthétique, **pas** une convergence P13 ni une preuve main same-SHA |
-| Nightly Full | 41424125876 | 788c5446 | schedule | failure | Artefact Ladybird absent ; ancien SHA |
-| Nightly Full | 41475434027 | 47d96f0c | workflow_dispatch | success | Autre SHA V26 : ne qualifie pas main |
-| Endurance hebdomadaire | UNKNOWN | UNKNOWN | schedule/manual | UNKNOWN | Aucune preuve actuelle récupérée sur ce HEAD |
-| P13 dedicated KVM | UNKNOWN | UNKNOWN | dispatch | UNKNOWN | Rien de concluant sur ce SHA |
-| P13 final | UNKNOWN | UNKNOWN | dispatch | UNKNOWN | `P13_FINAL_STRICT_OK` non démontré |
+- `skipped` ;
+- `cancelled` ;
+- `NON_QUALIFIANT` ou `INCONCLUSIF` ;
+- une preuve absente.
 
-Les identifiants ci-dessus sont des **runs réels**, pas des simulations. Pour les événements `pull_request`, distinguer systématiquement le `head_sha` exposé par le run du `github.sha`/checkout de merge synthétique réellement exécuté. Les durées détaillées, tous les jobs skipped et la provenance binaire au niveau artefact restent **UNKNOWN** lorsqu'ils n'ont pas été inspectés individuellement. En particulier, l'artefact de `41518023294` doit être vérifié par `tools/ci/verifie_artefact_ladybird.sh` lors de toute réutilisation.
+Un verdict vaut pour **un SHA** :
 
-## C22 V29 — dossier causal compact
+- un run `pull_request` teste le commit de fusion ;
+- un run `push` teste la tête de branche.
 
-```text
-SYMPTÔME   : augmentation intermittente du RSS WebContent après répétitions de fermetures d'onglets.
-OBSERVATION: ancien candidat B4 +1252 Kio > 1024 ; V29 candidat M2-M1 144..164 Kio.
-HYPOTHÈSES: mimalloc/decommit, références Document, Request callbacks, streams et GC ; les tests
-            antérieurs ne permettent PAS d'exclure universellement toutes ces contributions.
-CAUSE RETENUE COMME CANDIDAT: racines fortes conservées après réponse réseau normalement terminée,
-            et timer de curseur capturant potentiellement Document après destruction.
-CORRECTIF:  tools/ladybird/prepare-echange-processus.py, sections
-            BOUCHAUD_C22_V29_RELEASE_COMPLETED_REQUEST_ROOTS et DROP_DESTROYED_DOCUMENT_TIMER.
-            defer_teardown() après user_on_finish ; stop + detach timer et garde anti-restart.
-AVANT      : témoin historique intermittent ; GitHub 41511176390 6/6 candidat vert,
-            0/6 témoin rouge => ancien gate échouait sans échec produit.
-APRÈS      : 41518023294, head source 5c3cd43a, checkout/merge SHA 84105df8, 6/6 KVM sur V29, croissance 144..164 Kio, borne 1024 Kio.
-LIMITES    : pas de preuve PHYSICAL ; pas de preuve que toute fuite générale est supprimée ;
-            durée/couverture limitées à la fixture et aux 10 onglets/phase.
-```
+## Trois niveaux
 
-**Gate produit** : `BO_QEMU_KVM=1`, 6 essais, 10 onglets par phase, `MEMOIRE_PROCESSUS ... WebContent ... verdict=borne`, `LADYBIRD_MEMOIRE_OK`, seuil **inchangé 1024 Kio**, source et artefact liés au SHA. **Banc causal** : témoin historique hors gate bloquant parce qu'intermittent. Le conserver comme recherche séparée pour observer la sensibilité, sans exiger une fuite artificielle.
+| Niveau | Quand | Workflows | Objectif |
+|---|---|---|---|
+| **A — développement** | chaque `push`, sur toute branche | `ci.yml` (CI Fast) | premier verdict en quelques minutes : compilation, garde-fous, tests hôte, contrats de CI |
+| **B — avant fusion** | chaque `pull_request`, puis le `push` sur `main` après fusion | `integration.yml`, `reliability-v3.yml`, `non-regression.yml`, et selon les chemins modifiés `ladybird-native-browser.yml`, `native-ipc-runtime.yml`, `p13-primitives-noyau.yml`, `gpu-composition.yml`, `security-runtime.yml`, `unix-fs-reliability.yml`, `trigkey-ab-preflight.yml`, `doom-port-windows.yml`, `ladybird-run-selector-v7.yml`, `ladybird-sync.yml` | QEMU, SMP, stockage, réseau, USB, Ladybird, IPC, GPU, sécurité, persistance, sur le commit de fusion |
+| **C — qualification** | nuit, semaine ou manuel | `nightly.yml`, `endurance.yml`, `reliability-v3.yml` (planifié, soak de 20 min), `soak.yml`, `release*.yml`, `p13-*.yml`, `os-primitives.yml`, `governance-audit.yml`, `release-evidence.yml` | endurance, charges combinées, fuites, release, matériel |
+
+**Un SHA de branche n'est testé qu'une fois par niveau** :
+
+- A tourne sur le push de la branche.
+- B tourne sur la PR.
+- Aucun workflow ne se déclenche à la fois sur `pull_request` et sur le push d'une branche de travail.
+
+`tools/ci/check_pipeline_policy.py` l'exige en lisant les déclencheurs, et `tools/ci/reliability/test_politique_ci_niveaux.py` vérifie que chaque régression le fait échouer.
+
+Mesure au 17/11, avant ce découpage :
+
+- **15 runs par SHA de branche en médiane** (maximum 18) sur 24 SHA ;
+- 7 workflows exécutés en double, push et PR, sur le même arbre ;
+- CI Fast : 18 min en médiane avant son verdict, dont l'attente de runners.
+
+### Checks requis sur `main`
+
+Les quatre checks requis sont `fast-gate`, `integration-gate`, `reliability-gate` et `non-regression-gate`. Ce sont des noms inchangés, des jobs `if: always()`, dont la liste est dans `tools/ci/configure-protection.sh`.
+
+- **`fast-gate`** est publié sur la tête de la PR par le run `push` de CI Fast. Son workflow se déclenche sur toutes les branches, sans filtre (`tools/ci/declencheurs.py`).
+- **Les trois autres** sont publiés par les runs `pull_request`.
+
+> **`main` n'est pas protégé sur GitHub** : `tools/verifie-protection-main.py` le constate. Ces quatre checks ne sont exigés que par la procédure. Pour les rendre exécutoires, un administrateur lance `tools/ci/configure-protection.sh`, qui pose aussi `strict: true` (branche à jour avec `main`).
+
+Une **PR ouverte depuis un fork** ne reçoit pas `fast-gate`, puisque le push a lieu dans le fork. Elle reste donc bloquée : c'est un refus, pas un faux vert. Le dépôt n'a qu'un contributeur. Pour qu'une telle PR soit testée, sa branche est poussée dans ce dépôt, comme le fait déjà la production Ladybird, qui refuse les forks.
+
+CI Fast classe **le delta cumulé de la branche** depuis sa bifurcation de `main`, jamais le seul dernier push (`BOUCHAUD_CI_DELTA_CUMULE_V1`). Sinon, un push documentaire après un push noyau rouge sauterait les contrôles du noyau sur la tête de la PR.
+
+### Fusionner
+
+1. La branche contient le dernier `main`. Sinon : fusionner `main` et pousser. A retourne alors sur l'arbre fusionné, et B sur la PR.
+2. Les quatre checks requis sont `success` au **SHA de tête**. Un `skipped` ou un `cancelled` n'en est pas un.
+3. Les workflows B déclenchés par les chemins modifiés sont `success` au même SHA.
+4. Après la fusion : la CI de `main` est vérifiée au SHA fusionné.
+
+## Ce que fait chaque niveau
+
+### A — CI Fast (`ci.yml`)
+
+Jobs parallèles, chacun décidé par `classify-changes` :
+
+| Job | Contenu |
+|---|---|
+| `kernel / compile + invariants` | P10 avec et sans VIRGL ; noyau par défaut **en dernier**, car le garde de profondeur de pile lit ce binaire ; noyau UEFI, sonde ; 216 garde-fous d'architecture ; budgets ; frontend UI |
+| `kernel / clippy + variantes` | clippy (lints `deny`), jeton BRDP armé et désarmé, compositeur ring 3 freestanding, SDK natif et contrat d'ABI |
+| `host / tests + preuves de mise a jour` | noyau construit, puis `run_host_tests.sh` avec `BOUCHAUD_EXIGE_NOYAU=1` : la symbolisation échoue au lieu de se sauter (tests Rust `test_*.rs`, unittest de `tools/ci/reliability`), preuves A/B, anti-retour et OTA, Ed25519 contre OpenSSL/libsodium, agent OTA et TLS strict |
+| `browser / engine tests` | QuickJS, tests du moteur, jalons sans régression |
+| `windows / scripts` | exécution des scripts PowerShell de sélection et Trigkey |
+| `ci / policy` | `check_pipeline_policy.py` |
+
+Correction de classement (`BOUCHAUD_CI_BASE_PREMIER_PUSH_V1`) : au premier push d'une branche (`before = 0…0`), le classificateur compare désormais à la bifurcation de `main`. Avant, il ne classait que le dernier commit, et une série dont le dernier commit ne touchait que la documentation sautait la compilation. Le test associé est `tools/ci/reliability/test_classe_premier_push.py`.
+
+### B — avant fusion
+
+- **Integration** exécute ses suites sur **chaque** PR. Avant ce découpage, son run PR n'en lançait aucune sans le libellé `ci:integration`, et `integration-gate` y était vert sans rien avoir exécuté. Seule une PR strictement documentaire n'en lance aucune, et le verdict l'écrit : `INTEGRATION_GATE_DOCS_ONLY`.
+- **Reliability V3** n'a plus le job `reliability / host`. Il rejouait exactement les scripts de CI Fast sur le même SHA, ce qui faisait quatre exécutions des tests hôte par commit. Restent la propriété (64 graines), le bootimage et la matrice SMP1/2/4/8.
+- **Workflows filtrés par chemins** : Ladybird, Native IPC, P13 primitives, GPU, sécurité, Unix et FS, Trigkey, DOOM et sélecteur Windows ne tournent que si leurs chemins changent.
+  - Le job `dedoublonne` de Ladybird, Native IPC et P13 décide « aucun run push sur la tête », puis exécute ses tests.
+  - Il ne reflète plus rien, puisque ces workflows ne tournent plus sur les branches.
+
+### C — qualification
+
+- `nightly.yml` (02:30) : suites QEMU noyau, DNS, produit Ladybird, dette Windows.
+- `reliability-v3.yml` planifié (01:20) : matrice complète et soak hébergé de 20 min.
+- `endurance.yml` : chaque dimanche.
+- Manuels :
+  - `soak.yml` (8 à 72 h) et `p13-final-candidate.yml` demandent des runners auto-hébergés **non enregistrés**. Ils n'ont jamais tourné : `soak` a 0 run, et les 4 runs de `p13-final` ont été annulés faute de runner.
+  - `release.yml` (étiquettes `v*`), `release-trigkey.yml` (environnement protégé), `os-primitives.yml` et `p13-cible-kvm.yml`.
+- Aucune campagne de release, d'écriture disque physique ou destructive n'est déclenchée automatiquement.
+
+## Inventaire des 26 workflows (17/11/2026)
+
+Les durées sont mesurées sur 400 runs du 14 au 17/11, file d'attente comprise, en médiane / p95, en minutes.
+
+| Workflow | Avant | Après | Décision | Justification |
+|---|---|---|---|---|
+| `ci.yml` CI Fast | push branches + PR ; 18,4 / 64,3 | **A** : push toute branche | CONSERVER, refondu | barrière requise ; doublon PR retiré ; un job de 12 min scindé en 3 jobs parallèles |
+| `integration.yml` | push branches + PR (PR sans suites sauf libellé) ; 28,6 / 79,0 | **B** : PR + push `main` | CONSERVER, refondu | barrière requise ; le run PR exécute réellement les suites |
+| `reliability-v3.yml` | push branches + PR + nuit ; 34,6 / 74,1 | **B** + **C** (nuit) | CONSERVER, job `host` FUSIONNÉ dans CI Fast | `host` = mêmes scripts que CI Fast |
+| `non-regression.yml` | PR + push `main` ; 0,8 / 26,0 | **B** | CONSERVER | barrière requise, sans doublon |
+| `ladybird-native-browser.yml` | push branches + PR ; 58,3 / 123,4 | **B** (chemins) + `main` | DÉPLACER (hors push de branche) | doublon push/PR sur 15 SHA |
+| `native-ipc-runtime.yml` | push branches + PR ; 26,5 / 93,0 | **B** (chemins) + `main` | DÉPLACER | doublon sur 14 SHA |
+| `p13-primitives-noyau.yml` | push branches + PR ; 50,8 / 93,1 | **B** (chemins) + `main` | DÉPLACER | doublon sur 14 SHA |
+| `gpu-composition.yml` | push `main`/`claude/**` + PR ; 17,7 / 52,7 | **B** (chemins) + `main` | DÉPLACER | doublon sur 6 SHA |
+| `security-runtime.yml` | PR + push `main` ; 9,1 / 29,1 | **B** | CONSERVER | sans doublon |
+| `unix-fs-reliability.yml` | PR + push `main` ; 6,5 / 18,3 | **B** | CONSERVER | sans doublon |
+| `trigkey-ab-preflight.yml` | PR (chemins) ; 6,7 / 9,2 | **B** | CONSERVER | image A/B sous QEMU, non physique |
+| `doom-port-windows.yml` | PR (chemins) ; 9,2 / 9,7 | **B** | CONSERVER | seul build Windows du port DOOM |
+| `ladybird-run-selector-v7.yml` | PR (chemins) + push d'une branche supprimée ; 0 run | **B** | CONSERVER, déclencheur mort retiré | seule exécution réelle sous Windows PowerShell 5.1 |
+| `ladybird-sync.yml` | PR + push `main` + nuit ; 1,3 / 7,7 | **B** / **C** | CONSERVER | épinglage amont |
+| `nightly.yml` | nuit ; 4,7 / 68,1 | **C** | CONSERVER | |
+| `endurance.yml` | semaine ; 89 (1 run) | **C** | CONSERVER | |
+| `release-evidence.yml` | nuit + PR (chemins) ; 0,2 / 0,3 | **C** | CONSERVER | rapport, jamais une barrière |
+| `governance-audit.yml` | manuel | **C** | CONSERVER | audit à la demande, coût nul |
+| `os-primitives.yml` | manuel + `workflow_call` | **C** (appelé par Ladybird, P13) | CONSERVER | workflow réutilisé, ne peut pas être supprimé |
+| `p13-cible-kvm.yml` | manuel + push d'une branche supprimée | **C** | CONSERVER, déclencheur mort retiré | témoins négatifs ciblés KVM |
+| `p13-final-candidate.yml` | manuel (runners dédiés) | **C** | CONSERVER, absorbe `p13-dedicated-kvm` | entrée `perimetre` (complet, baseline, smp8, smp8-soak) ; seul `complet` rend le verdict final |
+| `p13-dedicated-kvm.yml` | manuel ; **0 run** | — | **SUPPRIMÉ** (FUSIONNÉ) | mêmes scripts et mêmes runners que `p13-final-candidate` ; durées d'endurance reprises (`soak_minutes`) |
+| `soak.yml` | manuel ; 0 run | **C** | CONSERVER | seule endurance 8 à 72 h ; runner `bouchaud-soak` à enregistrer |
+| `userland.yml` | push `main` (chemins) ; 22,4 / 38,4 | **C** | CONSERVER | fabrique du userland historique, téléchargé par `tools/userland.ps1` |
+| `release.yml` | étiquette `v*` | **C** | CONSERVER | release attestée |
+| `release-trigkey.yml` | manuel, environnement protégé | **C** | CONSERVER | release signée |
+
+Résultat : 26 → **25** workflows.
+
+Aucune assertion ni aucun seuil n'a été modifié. Aucune suite n'a été retirée : une seule exécution l'a été, celle qui était refaite sur le même arbre.
 
 ## Points de surveillance des faux verts
 
-- `pull_request` peut exécuter un SHA de merge synthétique ; noter HEAD de branche, `github.sha`, parent testé et manifeste Ladybird.
-- `workflow_dispatch` sur `main` vs ancien SHA : même nom de workflow ne prouve pas identité.
-- `if: always()`, `skipped` et déduplication : vérifier le job de convergence et sa sortie, pas la couleur générale seule.
-- Des `|| true` peuvent être nécessaires pour **collecter des logs**, jamais pour convertir une erreur en succès. Auditer leur placement avant toute modification.
-- Manque d'artefact, de marqueur, de mesure M0/M1/M2, de QEMU, ou de contrôle d'identité = inconclusif/rouge, pas zéro.
-- `tools/ci/analyse_memoire.py` exige des échantillons stables, le même processus et une fenêtre M2-M1 ; `g2 > 1024` est le critère lu dans le code.
-- Ne pas requalifier P13 avec `P13_STRICT=0` ou un runner KVM4 hébergé utilisé comme SMP8.
-
-Les 17 workflows actuellement conservés dans le dépôt : ci, reliability-v3, integration, native-ipc-runtime, security-runtime, ladybird-native-browser, ladybird-sync, os-primitives, p13-primitives-noyau, p13-cible-kvm, p13-dedicated-kvm, p13-final-candidate, nightly, endurance, soak, release, userland. Aucun n'a été supprimé pendant cette préparation.
+- Un `skipped` n'est jamais un PASS. Les gates écrivent pourquoi une suite n'a pas tourné : `INTEGRATION_GATE_DOCS_ONLY`, `RELIABILITY_GATE_DOCS_ONLY`, `P13_PERIMETRE_PARTIEL`.
+- Une recherche de texte dans un workflow est satisfaite par un commentaire. Les contrats de déclencheurs lisent le YAML : `check_pipeline_policy.py` et `declencheurs.py`. `verifie-protection-main.py` cherchait `pull_request` comme sous-chaîne, et un commentaire le satisfaisait.
+- Pour un `pull_request`, distinguer la tête de branche du commit de fusion testé.
+- Un `|| true` peut servir à recueillir des journaux, jamais à convertir une erreur.
+- Ne jamais requalifier P13 avec `P13_STRICT=0`, ni avec un runner KVM4 hébergé utilisé comme SMP8.

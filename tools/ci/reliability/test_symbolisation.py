@@ -39,6 +39,17 @@ def noyau_disponible():
     return None
 
 
+def sans_noyau(cas, message):
+    """Sans ELF : saute en local, ECHOUE la ou la CI exige le noyau.
+
+    Un saut silencieux en CI rendait vertes dix verifications qui n'avaient
+    rien lu (revue #334) ; BOUCHAUD_EXIGE_NOYAU=1 l'interdit.
+    """
+    if os.environ.get("BOUCHAUD_EXIGE_NOYAU") == "1":
+        cas.fail("BOUCHAUD_EXIGE_NOYAU=1 et " + message)
+    cas.skipTest(message)
+
+
 def sha256(chemin):
     h = hashlib.sha256()
     with open(chemin, "rb") as f:
@@ -74,10 +85,8 @@ class Symbolisation(unittest.TestCase):
     def setUp(self):
         self.noyau = noyau_disponible()
         if self.noyau is None:
-            self.skipTest(
-                "aucun noyau construit ; lancer `cargo build` d'abord. "
-                "Ce cas ne peut pas s'inventer un ELF."
-            )
+            sans_noyau(self, "aucun noyau construit ; lancer `cargo build` d'abord. "
+                             "Ce cas ne peut pas s'inventer un ELF.")
 
     def test_une_adresse_connue_est_symbolisee(self):
         adresse, nom = premiere_fonction(self.noyau)
@@ -154,7 +163,7 @@ class LecteurElfAutonome(unittest.TestCase):
     def setUp(self):
         self.noyau = noyau_disponible()
         if self.noyau is None:
-            self.skipTest("aucun noyau construit")
+            sans_noyau(self, "aucun noyau construit")
         import importlib.util
         spec = importlib.util.spec_from_file_location("sym", OUTIL)
         self.m = importlib.util.module_from_spec(spec)

@@ -1,31 +1,27 @@
 name: CI Fast
 
-# Barriere courte. Une branche avec PR n'est testee qu'une fois via pull_request.
-# Les pushes directs ne relancent cette barriere que sur main.
+# NIVEAU A -- DEVELOPPEMENT RAPIDE (BOUCHAUD_CI_TROIS_NIVEAUX_V1).
+#
+# Chaque push, sur TOUTE branche, est verifie UNE fois : compilation, garde-fous,
+# tests hote, contrats de CI. Plus de declencheur `pull_request` : le run push
+# publie deja `fast-gate` sur le commit de tete de la PR (meme SHA), et le run
+# PR refaisait exactement le meme travail (21 doublons sur 24 SHA de branche
+# releves du 14 au 17/11). Les suites longues (niveau B) se declenchent sur
+# `pull_request` ; les campagnes (niveau C) la nuit ou a la main.
+# Detail et inventaire : docs/current/CI_AND_PROOFS.md.
 on:
-  pull_request:
-      # Les branches de travail Claude declenchent la meme barriere que `main`.
-      #
-      # Sans cette ligne, un push sur `claude/**` ne lancait AUCUN workflow :
-      # les suites hote et les garde-fous tournaient sur la machine de
-      # developpement, et rien ne le confirmait cote GitHub. Un « tout est
-      # vert » qu'aucun run ne montre n'est pas une preuve, c'est une
-      # affirmation.
-      #
-      # Le declencheur est sur, et c'est pourquoi il est ajoute ici plutot que
-      # d'ouvrir la barriere : ces workflows sont en lecture seule
-      # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
-      # `main` ni sa protection.
   push:
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
+    branches: ['**']
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Un push remplace le precedent sur une branche de travail ; sur `main`, chaque
+# SHA fusionne garde son verdict.
 concurrency:
-  group: ci-fast-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-fast-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -46,11 +42,21 @@ jobs:
       - name: Classer les changements
         id: classify
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
         run: |
+          # BOUCHAUD_CI_DELTA_CUMULE_V1 : sur une branche de travail, le verdict
+          # de CI Fast est celui de la TETE de la PR. Il classe donc TOUT le
+          # delta de la branche depuis sa bifurcation de main (base 0...0 ->
+          # merge-base, tools/ci/classify_changes.py), jamais le seul dernier
+          # push : un push documentaire apres un push noyau rouge sautait les
+          # controles noyau et rendait fast-gate vert sur la tete (revue #334).
+          # Sur main, chaque SHA fusionne est classe contre le precedent.
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then
             python3 tools/ci/classify_changes.py --head "$HEAD_SHA" --all
+          elif [ "$REF" != refs/heads/main ]; then
+            python3 tools/ci/classify_changes.py --base 0000000000000000000000000000000000000000 --head "$HEAD_SHA"
           else
             python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"
           fi
@@ -60,13 +66,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
-    # BOUCHAUD_CI_FAST_DELAI_V1 : ce delai est celui de l'HEBERGEUR, pas un
-    # critere -- aucune etape n'en depend. A 12 min, le job etait coupe avec
-    # TOUTES ses etapes vertes, pendant l'enregistrement du cache : runs push
-    # 43011896758 (e66f66d) et 42999617668 (80dc75e, deux fois), a 12 min 00
-    # pile ; le meme job, sur le meme SHA en PR, prenait 9 min 40. Les etapes
-    # mesurees : compilation 2 min 45, P10 1 min 20, gardes 1 min, tests hote
-    # 4 min 50, BRDP 50 s. 20 min laissent de la marge sans rien masquer.
+    # BOUCHAUD_CI_FAST_DELAI_V1 : delai de l'HEBERGEUR, pas un critere.
+    # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : l'ancien job unique enchainait 12 min
+    # d'etapes independantes (compilation 2 min 45, P10 1 min 20, gardes 1 min,
+    # tests hote 4 min 50, BRDP 50 s...). Elles sont reparties en trois jobs
+    # paralleles ; celui-ci rend le premier verdict sur le noyau (compilation,
+    # garde-fous, budgets).
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -86,12 +91,12 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
-      - name: Compiler le noyau
-        run: |
-          cargo build
-          cargo build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features uefi-boot,reference-desktop
-          cargo build --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml --target x86_64-unknown-uefi
 
+      # P10 AVANT la compilation par defaut. `verifie-pile-noyau-profondeur.py`
+      # LIT le dernier binaire construit dans target/x86_64-bouchaud_os/debug :
+      # quand P10 passait apres, il analysait le noyau `p10-*`, pas celui qui
+      # est livre (Reliability V3 le refaisait sur le bon binaire -- un doublon
+      # qui masquait l'ecart). Le noyau par defaut est donc construit EN DERNIER.
       # P10 : ne jamais laisser un code GPU optionnel passer uniquement
       # les tests du chemin CPU par defaut.
       # Meme toolchain, meme cible noyau et criteres de build.
@@ -109,55 +114,22 @@ jobs:
             rustc --edition 2021 --test "$source" -o "$fichier"
             "$fichier"
           done
-
-      # Clippy n'est PAS un controle de style ici : les 220 avertissements de
-      # confort ne font rien echouer. Ce qui echoue, ce sont ses lints
-      # « deny par defaut » -- les fautes de correction, comme une comparaison
-      # dont un cote est toujours faux. Le depot en portait deux.
-      #
-      # `cargo fmt --check` n'est deliberement PAS ici : l'arbre en est a
-      # 25 000 lignes d'ecart, et le rendre vert demanderait un reformatage
-      # massif qui detruirait une mise en page voulue et tout le `git blame`.
-      # Un controle qu'on ne peut pas rendre vert sans casser le depot n'est
-      # pas une barriere, c'est une alarme qu'on apprend a ignorer.
-      - name: Lints de correction (clippy)
+      - name: Compiler le noyau
         run: |
-          rustup component add clippy
-          cargo clippy
-
+          cargo build
+          cargo build --target targets/x86_64-bouchaud_os_uefi.json --no-default-features --features uefi-boot,reference-desktop
+          cargo build --manifest-path tools/reference/uefi-preboot-probe/Cargo.toml --target x86_64-unknown-uefi
       # DECOUVERTS, pas enumeres. Cinq garde-fous avaient cesse de fonctionner
       # sans que personne le voie, parce que la liste du workflow ne suivait
       # pas celle du depot. Une regle ajoutee est desormais executee le jour
       # meme.
       - name: Garde-fous d'architecture
         run: tools/ci/run_architecture_guards.sh
-
-      - name: Suites de tests hote
-        run: tools/ci/run_host_tests.sh
-
-      # BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA de l'anneau 3 (Rust std, musl),
-      # ses tests, puis son TLS STRICT -- la pile du noyau sur un socket Linux --
-      # contre de vrais serveurs TLS 1.3 : CA de banc acceptee, CA inconnue et
-      # nom non couvert refuses AVANT toute requete.
-      - name: Agent OTA anneau 3 (tests, TLS strict sur l'hote)
-        run: |
-          ( cd / && cargo +"$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")" test --release \
-              --manifest-path "$GITHUB_WORKSPACE/userland/services/ota/Cargo.toml" --target x86_64-unknown-linux-gnu )
-          tools/ci/test_bo_ota_tls.sh
-
-      # ICI, ET PAS DANS INTEGRATION. Ce banc construit le noyau deux fois, une
-      # fois avec jeton et une fois sans ; il n'a de sens que la ou le cache
-      # cargo est deja chaud, sinon il paie deux constructions froides pour
-      # verifier une constante. Integration part d'une image telechargee.
-      - name: Jeton BRDP (image armee / image sans serveur)
-        run: tools/ci/run_brdp_jeton.sh
-
       # Ce qui a ete gagne ne doit pas se reperdre : un site d'acquisition du
       # gros verrou rajoute dans un sous-systeme qu'on venait d'alleger
       # n'echoue a aucun test, et annule pourtant le travail.
       - name: Budgets d'architecture
         run: python3 tools/ci/check_budgets.py
-
       # BOUCHAUD_UI_V1 : l'entree part du processus navigateur par la file
       # upstream (`enqueue_input_event`) ; l'ancienne sonde d'accuse de
       # reception de l'injection locale dans WebContent n'a plus d'objet. Ce
@@ -173,6 +145,50 @@ jobs:
           # jobs Ladybird en deux minutes (run 37589065373).
           python3 tools/verifie-scripts-python-compilent.py
 
+  kernel-variantes:
+    name: kernel / clippy + variantes
+    needs: changes
+    if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fast-variantes-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            fast-variantes-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            fast-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      # Clippy n'est PAS un controle de style ici : les 220 avertissements de
+      # confort ne font rien echouer. Ce qui echoue, ce sont ses lints
+      # « deny par defaut » -- les fautes de correction, comme une comparaison
+      # dont un cote est toujours faux. Le depot en portait deux.
+      #
+      # `cargo fmt --check` n'est deliberement PAS ici : l'arbre en est a
+      # 25 000 lignes d'ecart, et le rendre vert demanderait un reformatage
+      # massif qui detruirait une mise en page voulue et tout le `git blame`.
+      # Un controle qu'on ne peut pas rendre vert sans casser le depot n'est
+      # pas une barriere, c'est une alarme qu'on apprend a ignorer.
+      - name: Lints de correction (clippy)
+        run: |
+          rustup component add clippy
+          cargo clippy
+      # ICI, ET PAS DANS INTEGRATION. Ce banc construit le noyau deux fois, une
+      # fois avec jeton et une fois sans ; il n'a de sens que la ou le cache
+      # cargo est deja chaud, sinon il paie deux constructions froides pour
+      # verifier une constante. Integration part d'une image telechargee.
+      - name: Jeton BRDP (image armee / image sans serveur)
+        run: tools/ci/run_brdp_jeton.sh
       # Le service ring 3 est freestanding : le compiler ici coute quelques
       # secondes et attrape ce qu'aucun test hote ne verra -- un en-tete qui ne
       # compile plus pour la cible ring 3, une charge utile dont la taille a
@@ -185,7 +201,61 @@ jobs:
       # cette affirmation de redevenir fausse.
       - name: Compositeur ring 3 (compilation freestanding)
         run: bash userland/services/composited/build.sh
+      - name: SDK natif et contrat ABI (statique + compilation)
+        run: |
+          python3 tools/verifie-contrat-abi-v1.py
+          python3 tools/ci/verifie_sdk_abi.py
+          B=userland/libs/bouchaud-sdk/build-program.sh
+          $B target/sdk/healthd userland/services/healthd/healthd.c
+          $B target/sdk/serviced userland/services/serviced/serviced.c
+          $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
+          $B target/sdk/native-process-probe userland/tests/native-process-probe.c
+          $B target/sdk/healthd-defaillant userland/tests/healthd-defaillant.c
+          $B target/sdk/updated userland/services/updated/updated.c
+          $B target/sdk/logd userland/services/logd/logd.c
 
+  host-tests:
+    name: host / tests + preuves de mise a jour
+    needs: changes
+    if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fast-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            fast-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            fast-cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+      # Les tests de symbolisation lisent l'ELF du noyau : sans lui ils se
+      # SAUTAIENT (revue #334). Le noyau est construit ici, et
+      # BOUCHAUD_EXIGE_NOYAU transforme son absence en echec.
+      - name: Noyau pour les tests de symbolisation
+        run: cargo build
+      - name: Suites de tests hote
+        env:
+          BOUCHAUD_EXIGE_NOYAU: '1'
+        run: tools/ci/run_host_tests.sh
+      # BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA de l'anneau 3 (Rust std, musl),
+      # ses tests, puis son TLS STRICT -- la pile du noyau sur un socket Linux --
+      # contre de vrais serveurs TLS 1.3 : CA de banc acceptee, CA inconnue et
+      # nom non couvert refuses AVANT toute requete.
+      - name: Agent OTA anneau 3 (tests, TLS strict sur l'hote)
+        run: |
+          ( cd / && cargo +"$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")" test --release \
+              --manifest-path "$GITHUB_WORKSPACE/userland/services/ota/Cargo.toml" --target x86_64-unknown-linux-gnu )
+          tools/ci/test_bo_ota_tls.sh
       # BOUCHAUD_NATIVE_SERVICES_V1 : l'ABI native a UNE description C (le
       # SDK) et UN contrat gele ; les deux sont compares au noyau ici, et les
       # programmes natifs (service, superviseur, sonde de cycles) doivent
@@ -225,18 +295,6 @@ jobs:
           target-venv-crypto/bin/pip install -q 'cryptography==46.0.3' 'pynacl==1.6.2'
           rustc --edition 2021 -O tools/update/ed25519_oracle.rs -o target-ed25519-oracle
           target-venv-crypto/bin/python tools/update/ed25519_adversarial.py ./target-ed25519-oracle --strict
-      - name: SDK natif et contrat ABI (statique + compilation)
-        run: |
-          python3 tools/verifie-contrat-abi-v1.py
-          python3 tools/ci/verifie_sdk_abi.py
-          B=userland/libs/bouchaud-sdk/build-program.sh
-          $B target/sdk/healthd userland/services/healthd/healthd.c
-          $B target/sdk/serviced userland/services/serviced/serviced.c
-          $B target/sdk/native-cycles-probe userland/tests/native-cycles-probe.c
-          $B target/sdk/native-process-probe userland/tests/native-process-probe.c
-          $B target/sdk/healthd-defaillant userland/tests/healthd-defaillant.c
-          $B target/sdk/updated userland/services/updated/updated.c
-          $B target/sdk/logd userland/services/logd/logd.c
 
   browser-engine:
     name: browser / engine tests
@@ -383,19 +441,21 @@ jobs:
   fast-gate:
     name: fast-gate
     if: always()
-    needs: [changes, kernel-fast, browser-engine, windows-scripts, policy]
+    needs: [changes, kernel-fast, kernel-variantes, host-tests, browser-engine, windows-scripts, policy]
     runs-on: ubuntu-latest
     steps:
       - name: Verdict unique pour branch protection
         env:
           CHANGES: ${{ needs.changes.result }}
           KERNEL: ${{ needs.kernel-fast.result }}
+          VARIANTES: ${{ needs.kernel-variantes.result }}
+          HOST: ${{ needs.host-tests.result }}
           BROWSER: ${{ needs.browser-engine.result }}
           WINDOWS: ${{ needs.windows-scripts.result }}
           POLICY: ${{ needs.policy.result }}
         run: |
-          printf '%-12s %s\n' changes "$CHANGES" kernel "$KERNEL" browser "$BROWSER" windows "$WINDOWS" policy "$POLICY"
-          for r in "$CHANGES" "$KERNEL" "$BROWSER" "$WINDOWS" "$POLICY"; do
+          printf '%-12s %s\n' changes "$CHANGES" kernel "$KERNEL" variantes "$VARIANTES" host "$HOST" browser "$BROWSER" windows "$WINDOWS" policy "$POLICY"
+          for r in "$CHANGES" "$KERNEL" "$VARIANTES" "$HOST" "$BROWSER" "$WINDOWS" "$POLICY"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo FAST_GATE_OK

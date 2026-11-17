@@ -4,7 +4,7 @@
 
 ## 0. Lire d'abord
 
-1. Ce fichier, puis `BOUCHAUD_AI_CONTEXT.md`, `docs/current/README.md` et `docs/current/HANDOFF_CODEX_2026-10-08.md`.
+1. Ce fichier, puis `BOUCHAUD_AI_CONTEXT.md`, `docs/current/README.md` et `docs/historique/notes/HANDOFF_CODEX_2026-10-08.md`.
 2. `git status --short`, `git branch --show-current`, `git rev-parse HEAD`, `git log --oneline -10`.
 3. Examiner `git show --stat HEAD~1`, puis les diffs introduits par le checkpoint P19.
 4. Confirmer les marqueurs et validations **sur le HEAD de reprise**, pas uniquement sur les journaux anciens.

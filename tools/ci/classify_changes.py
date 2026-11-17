@@ -18,8 +18,30 @@ def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+def base_de_branche(head: str) -> str | None:
+    """Base d'une branche poussee pour la premiere fois : sa bifurcation de main.
+
+    BOUCHAUD_CI_BASE_PREMIER_PUSH_V1 : au premier push d'une branche, GitHub
+    donne `before = 000...0`. Le repli historique sur `head^` ne classait que le
+    DERNIER commit : une serie dont le dernier commit ne touche que la
+    documentation sautait la compilation et les garde-fous -- un vert qui ne
+    disait rien des commits precedents. La base est donc la bifurcation de
+    `main`, et a defaut (main absent, ou head sur main) `head^`.
+    """
+    for ref in ("origin/main", "main"):
+        try:
+            mb = git("merge-base", ref, head)
+        except subprocess.CalledProcessError:
+            continue
+        if mb and mb != git("rev-parse", head):
+            return mb
+    return None
+
+
 def changed_files(base: str | None, head: str) -> list[str]:
     if not base or base == ZERO:
+        base = base_de_branche(head)
+    if not base:
         try:
             base = git("rev-parse", f"{head}^")
         except subprocess.CalledProcessError:

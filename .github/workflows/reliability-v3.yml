@@ -9,20 +9,11 @@ on:
   # QEMU et le gate le DIT (RELIABILITY_GATE_DOCS_ONLY), au lieu de pretendre
   # avoir teste quoi que ce soit.
   pull_request:
-      # Les branches de travail Claude declenchent la meme barriere que `main`.
-      #
-      # Sans cette ligne, un push sur `claude/**` ne lancait AUCUN workflow :
-      # les suites hote et les garde-fous tournaient sur la machine de
-      # developpement, et rien ne le confirmait cote GitHub. Un « tout est
-      # vert » qu'aucun run ne montre n'est pas une preuve, c'est une
-      # affirmation.
-      #
-      # Le declencheur est sur, et c'est pourquoi il est ajoute ici plutot que
-      # d'ouvrir la barriere : ces workflows sont en lecture seule
-      # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
-      # `main` ni sa protection.
+  # NIVEAU B (BOUCHAUD_CI_TROIS_NIVEAUX_V1) : plus de push de branche de
+  # travail, que le run PR refaisait sur le meme arbre (19 doublons sur 24 SHA
+  # releves du 14 au 17/11). Apres fusion, `main` est requalifie par push.
   push:
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
+    branches: [main]
     paths:
       - 'src/**'
       - 'tools/**'
@@ -39,7 +30,7 @@ permissions:
 
 concurrency:
   group: reliability-v3-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -65,50 +56,13 @@ jobs:
             echo docs_only=false >> "$GITHUB_OUTPUT"
           fi
 
-  host:
-    name: reliability / host
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 18
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustc --version
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-            target
-          key: reliability-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            reliability-host-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            cargo-${{ runner.os }}-
-      # LE NOYAU AVANT LES GARDE-FOUS, ET C'EST OBLIGATOIRE.
-      #
-      # `verifie-pile-noyau-profondeur.py` LIT un binaire : il somme les
-      # prologues le long du graphe d'appels. Sans noyau construit il n'a rien
-      # a analyser, et ce job le lancait avant toute compilation -- 77/78.
-      #
-      # Le rendre permissif en l'absence de binaire aurait rendu vert un
-      # garde-fou qui ne verifie rien, ce qui est pire que rouge. Le noyau est
-      # donc construit ici, dans le MEME profil que l'artefact livre : le
-      # bootimage sort de `target/x86_64-bouchaud_os/debug/`, et une analyse
-      # faite sur un binaire `release` ne dirait rien de ce qui est flashe --
-      # l'inlining y change les trames.
-      - name: Construire le noyau analyse par les garde-fous
-        run: cargo build
-      - name: Architecture + host properties
-        run: |
-          tools/ci/run_architecture_guards.sh
-          tools/ci/run_host_tests.sh
-          python3 tools/ci/check_budgets.py
-          python3 tools/ci/check_pipeline_policy.py
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : l'ancien job `reliability / host` relancait
+  # EXACTEMENT les scripts de CI Fast (run_architecture_guards.sh,
+  # run_host_tests.sh, check_budgets.py, check_pipeline_policy.py) sur le meme
+  # SHA, push et PR : quatre executions des tests hote par commit. Ils restent
+  # exiges avant fusion par `fast-gate` (check requis, publie sur la tete de la
+  # PR par le push). Le binaire analyse par le garde de profondeur de pile est
+  # desormais le noyau par defaut dans CI Fast, comme il l'etait ici.
 
   property-fuzz:
     name: reliability / property fuzz
@@ -162,7 +116,8 @@ jobs:
 
   build:
     name: reliability / bootimage
-    needs: host
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 22
     steps:
@@ -261,7 +216,7 @@ jobs:
   reliability-gate:
     name: reliability-gate
     if: always()
-    needs: [changes, host, property-fuzz, build, smp, nightly-soak]
+    needs: [changes, property-fuzz, build, smp, nightly-soak]
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
@@ -269,13 +224,12 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           EVENEMENT: ${{ github.event_name }}
-          HOST: ${{ needs.host.result }}
           PROP: ${{ needs.property-fuzz.result }}
           BUILD: ${{ needs.build.result }}
           SMP: ${{ needs.smp.result }}
           SOAK: ${{ needs.nightly-soak.result }}
         run: |
-          printf '%-10s %s\n' changes "$CHANGES" host "$HOST" property "$PROP" build "$BUILD" smp "$SMP" soak "$SOAK"
+          printf '%-10s %s\n' changes "$CHANGES" property "$PROP" build "$BUILD" smp "$SMP" soak "$SOAK"
           [ "$CHANGES" = success ] || exit 1
           if [ "$EVENEMENT" = pull_request ] && [ "$DOCS_ONLY" = true ]; then
             # Aucun fichier executable modifie : rien a qualifier, et le
@@ -283,7 +237,7 @@ jobs:
             echo RELIABILITY_GATE_DOCS_ONLY
             exit 0
           fi
-          for r in "$HOST" "$PROP" "$BUILD" "$SMP"; do
+          for r in "$PROP" "$BUILD" "$SMP"; do
             [ "$r" = success ] || exit 1
           done
           if [ "$SOAK" != skipped ] && [ "$SOAK" != success ]; then

@@ -62,19 +62,20 @@ workflow = need(
     "artifact_manifest.py verify",
     "BOUCHAUD_ARTIFACT_MANIFEST.json",
 )
-# Verify required protected branch patterns without requiring a byte-for-byte
-# list: extra maintained branches must not make CI red.
-branch_lists = re.findall(r"^\s*branches:\s*\[([^\]]+)\]", workflow, re.M)
-required_branches = {"main", "claude/**", "feat/**"}
+# BOUCHAUD_CI_TROIS_NIVEAUX_V1 : Ladybird est un niveau B. Il doit tourner sur
+# CHAQUE pull_request (toutes les branches de travail y passent) et sur le push
+# de `main` apres fusion. Les motifs `claude/**`/`feat/**` en push sont retires :
+# ils doublaient le run PR sur le meme arbre.
+entete_lb = workflow.split("\njobs:", 1)[0]
+branch_lists = re.findall(r"^\s*branches:\s*\[([^\]]+)\]", entete_lb, re.M)
 parsed_branch_sets = [
     {part.strip().strip('"').strip("'") for part in line.split(",")}
     for line in branch_lists
 ]
-if not any(required_branches.issubset(branches) for branches in parsed_branch_sets):
-    errors.append(
-        ".github/workflows/ladybird-native-browser.yml: "
-        "protected branches main, claude/**, feat/** absent"
-    )
+if not re.search(r"^  pull_request:", entete_lb, re.M):
+    errors.append(".github/workflows/ladybird-native-browser.yml: declencheur pull_request absent")
+if not any("main" in branches for branches in parsed_branch_sets):
+    errors.append(".github/workflows/ladybird-native-browser.yml: push de main absent")
 
 need("tools/ladybird/artifact_manifest.py", "PT_INTERP", "sha256_tree", "bouchaud_head")
 

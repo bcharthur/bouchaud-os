@@ -27,6 +27,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
+from declencheurs import publie_sur_tete_pr  # noqa: E402
+
 RACINE = Path(__file__).resolve().parents[1]
 WORKFLOWS = RACINE / ".github/workflows"
 SCRIPT_SH = RACINE / "tools/ci/configure-protection.sh"
@@ -49,7 +52,9 @@ def jobs_des_workflows():
         entete, _, corps = source.partition("\njobs:")
         if not corps:
             continue
-        sur_pr = "pull_request" in entete
+        # Pas une recherche de sous-chaine : le mot dans un commentaire ne
+        # declenche rien (tools/ci/declencheurs.py).
+        sur_pr = publie_sur_tete_pr(entete)
         # Les bornes viennent des DEBUTS DE JOB successifs. Chercher la
         # prochaine ligne commencant par deux espaces trouverait la premiere
         # cle INDENTEE du job lui-meme -- `    name:` commence bien par deux
@@ -146,8 +151,9 @@ def main():
             continue
         if not job["pull_request"]:
             fautes.append(
-                "le check « %s » (%s) ne se declenche pas sur pull_request ; "
-                "il ne rapporterait jamais." % (nom, job["workflow"])
+                "le check « %s » (%s) n'est publie sur la tete d'une PR ni par "
+                "`pull_request` ni par un push sur toutes les branches ; il ne "
+                "rapporterait jamais." % (nom, job["workflow"])
             )
         if not job["always"]:
             fautes.append(
@@ -163,8 +169,8 @@ def main():
         return 1
 
     print(
-        "protection main : les %d checks exiges existent, se declenchent sur "
-        "pull_request et rapportent toujours" % len(exiges_sh)
+        "protection main : les %d checks exiges existent, sont publies sur la "
+        "tete des PR et rapportent toujours" % len(exiges_sh)
     )
     controle_en_ligne(fautes)
     return 0

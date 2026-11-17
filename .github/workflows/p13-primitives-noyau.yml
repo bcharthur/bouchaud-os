@@ -81,8 +81,10 @@ on:
       - 'tools/userland/build.sh'
       - 'tools/userland/mkdisk.sh'
       - 'tools/ci/dedoublonne_pr.py'
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
+  # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
   push:
-    branches: [main, 'claude/**', 'feat/**']
+    branches: [main]
     paths:
       - '.github/workflows/os-primitives.yml'
       - '.github/workflows/p13-primitives-noyau.yml'
