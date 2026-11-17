@@ -232,6 +232,21 @@ class Banc:
                    and m is not None, "l'APPLICATION recoit l'appui puis le relachement (protocole GUI)")
         self.latence_clic_s = time.perf_counter() - t0
 
+        # 1b. Appui dans le contenu, relachement HORS du contenu (a gauche et
+        # au-dessus) : l'application capturee recoit quand meme le relachement,
+        # en coordonnees NEGATIVES (revue #335 : un u32 replie etait refuse
+        # par le noyau et le relachement perdu).
+        avant = self.taille()
+        self.mon.bouton(True)
+        time.sleep(0.3)
+        self.mon.bouge(-60, -50)
+        time.sleep(0.4)
+        self.mon.bouton(False)
+        r = self.attend(r"MIRE_GPU_ENTREE pointeur x=(-?\d+) y=(-?\d+) boutons=0", 15, avant)
+        self.exige(r is not None and int(r.group(1)) < 0 and int(r.group(2)) < 0,
+                   "relachement hors du contenu recu en coordonnees negatives "
+                   f"({r.group(1) + ',' + r.group(2) if r else 'absent'})")
+
         # 2. Glisser la fenetre 0 par sa barre de titre.
         f0 = self.fenetres()[0]
         bx, by = f0["x"] + 60, f0["y"] - 12

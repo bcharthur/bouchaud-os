@@ -1040,6 +1040,14 @@ static int sous_pointeur(u32 x, u32 y, int *zone)
     return -1;
 }
 
+/* Coordonnee d'ecran relative a une origine, SIGNEE puis etendue sur 64
+ * bits : un pointeur a gauche ou au-dessus du contenu donne un negatif que
+ * le noyau accepte (i32), jamais un u32 replie qu'il refuse (revue #335). */
+static u64 relatif(u32 a, u32 origine)
+{
+    return (u64)(i64)((i64)a - (i64)origine);
+}
+
 static void route(int i, u64 genre, u64 a, u64 b, u64 c, u64 d)
 {
     if (i < 0 || !fens[i].vivante) return;
@@ -1168,18 +1176,17 @@ static int traite_entrees(void)
                 glisse = -1;
             }
             if (capture >= 0 && fens[capture].visible) {
-                route(capture, ENTREE_POINTEUR, x - fens[capture].x, y - fens[capture].y, boutons, 0);
+                route(capture, ENTREE_POINTEUR, relatif(x, fens[capture].x), relatif(y, fens[capture].y), boutons, 0);
             }
             capture = -1;
         } else {
             /* Survol (ou appui maintenu dans un contenu) : au contenu concerne. */
             int cible = capture >= 0 ? capture : (zone == ZONE_CONTENU ? i : -1);
             if (cible >= 0 && fens[cible].visible)
-                route(cible, ENTREE_POINTEUR, (u64)(i64)((i64)x - fens[cible].x),
-                      (u64)(i64)((i64)y - fens[cible].y), boutons, 0);
+                route(cible, ENTREE_POINTEUR, relatif(x, fens[cible].x), relatif(y, fens[cible].y), boutons, 0);
         }
         if (molette != 0 && zone == ZONE_CONTENU && i >= 0)
-            route(i, ENTREE_MOLETTE, (u64)(i64)molette, x - fens[i].x, y - fens[i].y, 0);
+            route(i, ENTREE_MOLETTE, (u64)(i64)molette, relatif(x, fens[i].x), relatif(y, fens[i].y), 0);
         boutons_prec = boutons;
         bouge_curseur(x, y);
         evenements++;
