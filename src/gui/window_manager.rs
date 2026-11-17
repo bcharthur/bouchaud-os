@@ -1601,6 +1601,7 @@ fn boucle() {
                 }
 
                 crate::kernel::timer::mark_frame();
+                profil_trames::ouverture_presentee();
                 if derniere_trame != 0 {
                     profil_trames::fin_trame(crate::kernel::timer::monotonic_ns().saturating_sub(t_trame));
                 }
@@ -2444,6 +2445,7 @@ fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
     // une trace (le Terminal n'en laissait aucune) : c'est ce que le test de
     // l'image de livraison exige apres un double-clic REEL sur son icone.
     crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_OUVERTE titre={}", fenetre.window.title);
+    profil_trames::note_ouverture();
     // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
     // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
     crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
@@ -3130,6 +3132,33 @@ mod profil_trames {
     pub fn note_presentation(ns: u64, pixels: u64) {
         NS[9].fetch_add(ns, Relaxed);
         PIXELS.fetch_add(pixels, Relaxed);
+    }
+    /// BOUCHAUD_LATENCE_OUVERTURE_V1 : latence d'ouverture mesuree DANS la VM,
+    /// du changement de bouton (chemin d'entree) a l'ouverture de la fenetre,
+    /// puis a la fin de la premiere trame presentee qui la contient. Un banc
+    /// hote ne mesure que son propre geste (appui tenu, scrutation du journal).
+    static OUVERTURE_BOUTON_NS: AtomicU64 = AtomicU64::new(0);
+    static OUVERTURE_NS: AtomicU64 = AtomicU64::new(0);
+    pub fn note_ouverture() {
+        let bouton = crate::drivers::mouse::dernier_bouton_ns();
+        let maintenant = crate::kernel::timer::monotonic_ns();
+        // Une ouverture au clavier n'a pas de clic : un bouton vieux de plus
+        // d'une seconde n'en est pas la cause, rien n'est publie.
+        if bouton == 0 || maintenant.saturating_sub(bouton) > 1_000_000_000 {
+            return;
+        }
+        OUVERTURE_BOUTON_NS.store(bouton, Relaxed);
+        OUVERTURE_NS.store(maintenant, Relaxed);
+    }
+    pub fn ouverture_presentee() {
+        let bouton = OUVERTURE_BOUTON_NS.swap(0, Relaxed);
+        if bouton == 0 {
+            return;
+        }
+        let ouverte = OUVERTURE_NS.load(Relaxed);
+        let fin = crate::kernel::timer::monotonic_ns();
+        crate::serial_println!("BOUCHAUD_ATELIER_OUVERTURE_LATENCE bouton_a_ouverture_us={} bouton_a_presentation_us={}",
+            ouverte.saturating_sub(bouton) / 1000, fin.saturating_sub(bouton) / 1000);
     }
     pub fn debut_trame() {
         FEN_DEBUT.store(NS[4].load(Relaxed), Relaxed);

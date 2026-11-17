@@ -84,6 +84,9 @@ unsafe fn apply_packet(with_wheel: bool) {
     MX.store(new_x, Ordering::Release);
     MY.store(new_y, Ordering::Release);
     BTN.store(new_btn, Ordering::Release);
+    if new_btn != old_btn {
+        LAST_BUTTON_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Release);
+    }
 
     if with_wheel {
         let wheel = PKT[3] as i8 as i32;
@@ -119,6 +122,11 @@ pub fn pos() -> (usize, usize) {
 
 pub fn left_down() -> bool {
     BTN.load(Ordering::Acquire) & 0x01 != 0
+}
+
+/// Date monotone (ns) du dernier changement d'etat des boutons, 0 si aucun.
+pub fn dernier_bouton_ns() -> u64 {
+    LAST_BUTTON_NS.load(Ordering::Acquire)
 }
 
 pub fn buttons() -> u8 {
@@ -225,6 +233,9 @@ pub fn inject_usb_report(source: usize, buttons: u8, dx: i8, dy: i8, wheel: i8) 
     MX.store(new_x, Ordering::Release);
     MY.store(new_y, Ordering::Release);
     BTN.store(new_btn, Ordering::Release);
+    if new_btn != old_btn {
+        LAST_BUTTON_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Release);
+    }
     if wheel != 0 {
         let wheel = wheel as i32;
         let _ = WHEEL_DELTA.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {

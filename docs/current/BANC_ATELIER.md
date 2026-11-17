@@ -20,8 +20,16 @@ Par phase : trames composées, `p50/p95/p99/max` (µs), `fps` (trames composées
 par seconde de geste : borné par le rythme des gestes du moniteur, ~16/s ;
 c'est un point de comparaison A/B, pas la fréquence d'affichage), part des
 fenêtres, présentation, accès PCI et lectures CMOS par trame, `cpu_pct` max du
-fil `desktop` (`[PROC-SAMPLE]`), pics `HID_LATENCY_SPIKE`, et la latence
-clic → `BOUCHAUD_ATELIER_FENETRE_OUVERTE` de chaque ouverture.
+fil `desktop` (`[PROC-SAMPLE]`), pics `HID_LATENCY_SPIKE`.
+
+Latence d'ouverture (`BOUCHAUD_LATENCE_OUVERTURE_V1`), mesurée DANS la VM :
+du changement de bouton daté par le pilote souris (IRQ PS/2 ou rapport USB)
+à l'ouverture de la fenêtre (`bouton_a_ouverture_us`), puis à la fin de la
+première trame présentée qui la contient (`bouton_a_presentation_us`). Le
+banc échoue si une ouverture n'a pas de mesure. Une première version la
+mesurait côté hôte : elle relevait 41 ms sous KVM comme sous TCG, c'est-à-dire
+l'appui de 40 ms tenu par le banc lui-même, à 50 ms de scrutation près —
+une mesure du banc, pas de l'OS.
 
 Le noyau écrit une ligne `BOUCHAUD_PERF_TRAME` par trame parce que l'autorun
 du banc exporte `BO_ATELIER_PERF_TRAME=1` (désactivé par défaut). Cette ligne
@@ -91,6 +99,29 @@ Correctifs : `BOUCHAUD_PCI_COMPTE_FIXE_V1` (topologie figée après
 énumération), `BOUCHAUD_RELEVE_SECONDE_V1` (Insights et le Moniteur relèvent
 leurs compteurs une fois par seconde), `BOUCHAUD_RTC_LISSE_V1` (l'heure
 affichée relit le CMOS une fois par seconde).
+
+## CI, image corrigée (B), runner GitHub, SMP2 — `ca02672`
+
+Job `qemu / reactivite Atelier (KVM, TCG)`, run 44124869263 : `BANC_ATELIER_OK`
+sous KVM et TCG, **0 accès PCI** dans toutes les phases.
+
+| phase | KVM p50 / p95 / p99 (µs) | TCG p50 / p95 / p99 (µs) | fenêtres moy. KVM / TCG (µs) |
+|---|---|---|---|
+| bureau vide | 18 / 141 / 426 | 126 / 985 / 1 169 | 0 / 0 |
+| ouverture | 150 / 3 028 / 5 007 | 1 188 / 27 045 / 33 421 | 717 / 3 068 |
+| fermeture | 1 251 / 2 575 / 4 550 | 668 / 25 298 / 27 196 | 993 / 4 430 |
+| survol | 36 / 930 / 1 193 | 368 / 7 158 / 7 408 | 43 / 454 |
+| déplacement | 916 / 1 269 / 1 491 | 7 486 / 8 350 / 9 137 | 437 / 4 063 |
+| redimensionnement | 20 / 888 / 1 262 | 146 / 7 105 / 7 541 | 23 / 224 |
+
+Sous KVM, la pire trame de toute la campagne est de 7,6 ms (ouverture) ; le
+déplacement tient 1,5 ms au p99. `desktop` : 2 % CPU max sous KVM, 9 % sous
+TCG. Aucun `HID_LATENCY_SPIKE`. Le bras A (avant correctif) n'a pas été
+joué sous KVM : il échoue l'oracle PCI par construction ; l'A/B KVM/WHPX se
+fait avec la procédure Windows ci-dessus.
+
+Latence d'ouverture mesurée dans la VM (local, TCG SMP2, image B + mesure) :
+bouton → ouverture 0,4–1,2 ms ; bouton → première trame présentée 10,8–15,3 ms.
 
 ## Ce qui reste à mesurer
 

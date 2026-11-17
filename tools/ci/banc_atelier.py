@@ -258,16 +258,15 @@ class Banc:
         self.mon.va(lx + lw // 2, ly + lh // 2)
         time.sleep(0.2)
         avant = self.taille()
-        t0 = time.perf_counter()
         self.mon.clic()
         if not self.attend(r"BOUCHAUD_ATELIER_FENETRE_OUVERTE titre=", 20, avant):
             raise RuntimeError("Insights ne s'ouvre pas")
-        self.latences_ouverture.append(round((time.perf_counter() - t0) * 1000, 1))
+        self.ouvertures += 1
         return self.geometrie(avant)
 
     def joue(self) -> None:
         o = self.o
-        self.latences_ouverture = []
+        self.ouvertures = 0
         if not self.attend(r"BOUCHAUD_BOOT_POINT bureau-premiere-trame", o.demarrage):
             raise RuntimeError("le bureau n'a pas compose sa premiere trame")
         time.sleep(o.repos)
@@ -329,8 +328,19 @@ class Banc:
     def analyse(self) -> dict:
         resultat = {"accel": self.o.accel, "smp": self.o.smp, "memoire_mio": self.o.memoire,
                     "affichage": self.o.affichage,
-                    "etiquette": self.o.etiquette, "latences_ouverture_ms": self.latences_ouverture,
-                    "phases": {}}
+                    "etiquette": self.o.etiquette, "phases": {}}
+        # BOUCHAUD_LATENCE_OUVERTURE_V1 : mesuree dans la VM (changement de
+        # bouton -> ouverture -> premiere trame presentee). L'hote ne mesure
+        # que son geste : appui tenu 40 ms, journal scrute toutes les 50 ms.
+        lat = [tuple(map(int, m.groups())) for m in re.finditer(
+            r"BOUCHAUD_ATELIER_OUVERTURE_LATENCE bouton_a_ouverture_us=(\d+) "
+            r"bouton_a_presentation_us=(\d+)", self.texte())]
+        resultat["ouvertures"] = getattr(self, "ouvertures", 0)
+        resultat["latence_ouverture"] = {
+            "mesures": len(lat),
+            "bouton_a_ouverture_us": [a for a, _ in lat],
+            "bouton_a_presentation_us": [b for _, b in lat],
+        }
         rx = re.compile(r"BOUCHAUD_PERF_TRAME t_ms=(\d+) us=(\d+) fenetres_us=(\d+) "
                         r"presentation_us=(\d+) pci_acces=(\d+) cmos_lectures=(\d+)")
         cumul = {}
@@ -414,7 +424,14 @@ def main(argv) -> int:
             print(f"BANC_ATELIER_ECHEC raison=es_pci_pendant_les_trames phase={nom} "
                   f"pci_acces_total={r['pci_acces_total']} pci_acces_par_trame={r['pci_acces_par_trame']}")
             code = 1
-    print(f"BANC_ATELIER latences_ouverture_ms={resultat['latences_ouverture_ms']}")
+    lo = resultat["latence_ouverture"]
+    print(f"BANC_ATELIER latence_ouverture mesures={lo['mesures']} "
+          f"bouton_a_ouverture_us={lo['bouton_a_ouverture_us']} "
+          f"bouton_a_presentation_us={lo['bouton_a_presentation_us']}")
+    if code == 0 and lo["mesures"] != resultat["ouvertures"]:
+        print(f"BANC_ATELIER_ECHEC raison=latence_ouverture_non_mesuree "
+              f"ouvertures={resultat['ouvertures']} mesures={lo['mesures']}")
+        code = 1
     print("BANC_ATELIER_OK" if code == 0 else "BANC_ATELIER_ECHEC")
     return code
 
