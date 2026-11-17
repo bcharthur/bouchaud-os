@@ -109,7 +109,7 @@ Trois formes de gel, toutes vues sur `main` :
    - les CPU 2 et 3 ne reçoivent plus d'IPI ;
 3. **silence** : plus aucune ligne, pas même celle de l'IRQ.
 
-#325 ajoute le site où le détenteur a pris le verrou, `#[track_caller]` sur `Mm::lock`, et des lignes non tronquées dans les extraits. Écrire `Location::caller()` dans `SpinLock::try_lock` arrêtait la console asynchrone au démarrage (3/3 sous QEMU) ; cause non établie, laissée ouverte.
+#325 ajoute le site où le détenteur a pris le verrou, `#[track_caller]` sur `Mm::lock`, et des lignes non tronquées dans les extraits. **Correction du 15/11** : le blocage attribué à l'écriture de `Location::caller()` dans `SpinLock::try_lock` était un faux constat. L'image « normale » du banc local contenait en fait le témoin, que `cargo bootimage` n'avait pas reconstruit. `try_lock` enregistre de nouveau son site, et le banc vérifie maintenant le contenu des deux images.
 
 ## 3. Anomalies ouvertes, non attribuées
 
