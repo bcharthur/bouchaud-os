@@ -66,9 +66,44 @@ serveur ne manipulerait que des **identifiants de surface** et des
      58 trames/s, dessin 202 µs + présentation 16 µs. Coût mesuré à résorber :
      la relecture d'empreinte de chaque présentation. Pas encore : DOOM et
      Ladybird, plusieurs fenêtres, déplacement, entrées.
-3. **Entrées** : un service d'entrées ring 3 reçoit les événements HID et les
-   route selon `windowd` (focus, z-order). Preuve : un client qui plante ne gèle
-   ni les entrées ni le bureau.
+   - **2B — plusieurs fenêtres, déplacement, empilement, cycle de vie** : bras
+     B2 à B4 du même banc (deux clients, déplacement scripté, remontée,
+     minimisation, redimensionnement, fermeture polie, relance, mort d'un
+     client sans perte du survivant), captures au pixel.
+3. **Entrées** — **fait le 17/11, preuve TCG locale + CI Native IPC
+   (`BOUCHAUD_ENTREES_RING3_V1`, ABI native 1.5)**. Le noyau garde le pilote
+   (IRQ, décodage, disposition AZERTY) et ne donne au compositeur qu'une
+   lecture, sur la capacité `Display` qu'il est seul à détenir :
+   `bo_display_entrees(affichage, tampon*, touches_max)` (position, boutons,
+   crans de molette, transitions de touches déjà traduites). La capacité est
+   LISIBLE tant qu'une entrée attend : `composited` la met dans son waitset et
+   dort entre deux gestes (l'IRQ publie une activité différée, sans
+   ordonnanceur ; la moitié basse du minuteur réveille). `composited` décide
+   seul : zone sous le pointeur, remontée, foyer (`Configure` au perdant et au
+   gagnant), saisie de la barre et glisser, case de fermeture, routage des
+   frappes à la fenêtre active ; il route UN événement vers UNE fenêtre par
+   `bo_fenetre_entree(fenetre, genre, …)` et le noyau écrit le message du
+   protocole GUI (`Pointer`, `Wheel`, `Key`) au client, qui ne voit jamais le
+   compositeur. Propriétaire unique : à la première lecture, le clavier est
+   confié au compositeur, la file est purgée de ce qui précédait la passation
+   (frappes du shell, accusés 0xFA du 8042), et le shell noyau ne vole plus de
+   frappes.
+   Preuve (`tools/ci/banc_bureau_ring3_entrees.py`, vrais gestes par le
+   moniteur QEMU, trois clients `mire-gpu` dont un qui plante) : clic en (30,30)
+   du contenu → foyer → l'application reçoit appui et relâchement aux mêmes
+   coordonnées ; barre saisie et glissée de (150,90) au pixel près ; `a`,`b`
+   frappés → l'application active reçoit `q` (AZERTY) puis `b`, une seule fois ;
+   une application meurt d'une faute de page et la frappe suivante arrive
+   encore ; case de fermeture → l'application sort d'elle-même ; aucune
+   panique ; 9 refus de `bo_fenetre_entree` (genre inconnu, boutons > 7, x hors
+   i32, Unicode 0x110000, appui 2, molette nulle, capacités croisées, tampon
+   noyau). Non-régression : bras B0–B4 au pixel inchangés (curseur et cases de
+   fermeture n'apparaissent qu'après la première entrée réelle).
+   Mesure TCG : un pas de glisser coûte 90–135 ms (`deplacement_us`), dû aux
+   écritures ligne à ligne dans la région partagée (≈ 4 appels système par
+   ligne) — c'est le chantier suivant (écriture rectangulaire).
+   Pas encore : routage selon `windowd`, curseur matériel, USB HID sous ce
+   chemin, DOOM et Ladybird sous `composited`.
 4. **Applications natives** (Fichiers, Notes, Terminal, Calculatrice) en
    processus ring 3 sur le même protocole GUI.
 5. **Retrait** du fil noyau `window_manager::boucle` ; le noyau ne garde que le
