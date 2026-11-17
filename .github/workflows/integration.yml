@@ -1,22 +1,18 @@
 name: Integration
 
-# Integration automatique uniquement apres merge/push sur main.
-# Sur une PR, ajouter le label `ci:integration` pour la demander explicitement.
+# NIVEAU B -- VALIDATION AVANT FUSION (BOUCHAUD_CI_TROIS_NIVEAUX_V1).
+#
+# Sur chaque PR (le commit de fusion), et apres fusion sur `main`. Plus sur
+# chaque push de branche de travail : ce run et le run PR refaisaient le meme
+# arbre (19 doublons sur 24 SHA releves du 14 au 17/11), et le run PR, lui, ne
+# lancait AUCUNE suite QEMU sans libelle -- `integration-gate` y etait vert sans
+# rien avoir execute. Desormais le run PR EXECUTE les suites ; seule une PR
+# strictement documentaire n'en lance aucune, et le verdict le DIT.
 on:
-      # Les branches de travail Claude declenchent la meme barriere que `main`.
-      #
-      # Sans cette ligne, un push sur `claude/**` ne lancait AUCUN workflow :
-      # les suites hote et les garde-fous tournaient sur la machine de
-      # developpement, et rien ne le confirmait cote GitHub. Un « tout est
-      # vert » qu'aucun run ne montre n'est pas une preuve, c'est une
-      # affirmation.
-      #
-      # Le declencheur est sur, et c'est pourquoi il est ajoute ici plutot que
-      # d'ouvrir la barriere : ces workflows sont en lecture seule
-      # (`permissions: contents: read`), ils ne publient rien et ne touchent ni
-      # `main` ni sa protection.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
+    branches: [main]
     paths:
       - 'src/**'
       - 'tools/**'
@@ -26,8 +22,6 @@ on:
       - 'targets/**'
       - '.cargo/**'
       - '.github/workflows/integration.yml'
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       suite:
@@ -42,7 +36,7 @@ permissions:
 
 concurrency:
   group: integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   gate:
@@ -50,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.gate.outputs.run }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
       health: ${{ steps.classify.outputs.health }}
       mm: ${{ steps.classify.outputs.mm }}
       primitives: ${{ steps.classify.outputs.primitives }}
@@ -60,37 +55,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Autorisation du niveau integration
-        id: gate
-        env:
-          EVENT: ${{ github.event_name }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          run=false
-          if [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; then run=true; fi
-          case ",$LABELS," in *,ci:integration,*) run=true ;; esac
-
-          # Certains changements ne se VERIFIENT que sous QEMU.
-          #
-          # Une modification du verrouillage, de l'ordonnanceur ou de la table
-          # des taches compile parfaitement et passe toutes les suites hote
-          # tout en produisant un noyau qui se fige ou ne demarre pas : la
-          # propriete en cause est une course entre coeurs, et aucun test
-          # d'hote ne la voit. Attendre un label pour ces chemins-la revient a
-          # ne jamais les valider, puisque c'est justement la ou l'on croit le
-          # moins en avoir besoin.
-          if [ "$run" != true ] && [ -n "$BASE_SHA" ]; then
-            if git diff --name-only "$BASE_SHA...$HEAD_SHA" \
-                 | grep -qE '^src/(kernel/(sync|process|scheduler)|arch/x86_64/(smp|cpu_local|idt))'; then
-              echo "chemin critique touche : integration forcee"
-              run=true
-            fi
-          fi
-
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "integration enabled=$run"
       - name: Classer les changements
         id: classify
         env:
@@ -116,6 +80,23 @@ jobs:
           else
             python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"
           fi
+
+      # La decision vient APRES le classement : elle en depend.
+      - name: Autorisation du niveau integration
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          DOCS_ONLY: ${{ steps.classify.outputs.docs_only }}
+        run: |
+          # push main, lancement manuel, PR : les suites tournent. La seule
+          # exception est une PR strictement documentaire (docs/, README.md) :
+          # aucun fichier executable n'a change, et le verdict le dira.
+          run=true
+          if [ "$EVENT" = pull_request ] && [ "$DOCS_ONLY" = true ]; then
+            run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "integration enabled=$run (event=$EVENT docs_only=$DOCS_ONLY)"
 
   kernel-build:
     name: kernel / bootimage once
@@ -842,6 +823,8 @@ jobs:
       - name: Synthese
         env:
           ENABLED: ${{ needs.gate.outputs.run }}
+          EVENT: ${{ github.event_name }}
+          DOCS_ONLY: ${{ needs.gate.outputs.docs_only }}
           KERNEL: ${{ needs.kernel-build.result }}
           BOOT: ${{ needs.qemu-smoke.result }}
           NVME: ${{ needs.nvme-gpt.result }}
@@ -862,9 +845,13 @@ jobs:
           BRDP: ${{ needs.brdp-qemu-e2e.result }}
         run: |
           if [ "$ENABLED" != true ]; then
-            echo 'INTEGRATION NON DEMANDEE : aucune suite QEMU n a tourne.'
-            echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
-            exit 0
+            # Seul cas : PR strictement documentaire (aucun fichier executable).
+            if [ "$EVENT" = pull_request ] && [ "$DOCS_ONLY" = true ]; then
+              echo 'INTEGRATION_GATE_DOCS_ONLY : PR strictement documentaire, aucune suite QEMU.'
+              exit 0
+            fi
+            echo "ECHEC: integration non lancee hors PR documentaire (event=$EVENT docs_only=$DOCS_ONLY)."
+            exit 1
           fi
           printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" tempete "$TEMPETE" fenetre "$FENETRE" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 

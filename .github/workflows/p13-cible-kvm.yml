@@ -12,13 +12,10 @@ name: p13-cible-kvm
 #            (banc-reveil-historique : dormeur bloque attendu).
 #
 # Un temoin VERT est un echec : le banc ne prouverait plus rien. Ne remplace
-# ni os-primitives ni la qualification P13. Declenchement manuel, ou push sur
-# la seule branche candidate (un workflow absent de main n'est pas
-# dispatchable ; meme precedent que p13-console-sync-proof.yml).
+# ni os-primitives ni la qualification P13. Declenchement manuel.
 on:
-  push:
-    branches:
-      - p13/candidat-20261027c
+  # Le declencheur push visait p13/candidat-20261027c, branche supprimee :
+  # declencheur mort, retire. Lancement manuel uniquement (niveau C).
   workflow_dispatch:
     inputs:
       repetitions:

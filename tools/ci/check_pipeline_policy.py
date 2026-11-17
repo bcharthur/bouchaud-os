@@ -41,7 +41,8 @@ canon = need(
     ("name: ladybird-native-browser", "bouchaud-ladybird-native-browser"),
 )
 
-fast = need(root / "ci.yml", ("name: CI Fast", "fast-gate", "run_architecture_guards.sh", "run_host_tests.sh"))
+fast = need(root / "ci.yml", ("name: CI Fast", "fast-gate", "run_architecture_guards.sh", "run_host_tests.sh",
+                              "check_budgets.py", "check_pipeline_policy.py"))
 integration = need(
     root / "integration.yml",
     ("name: Integration", "integration-gate", "run_qemu_smoke.sh", "run_mm_ng6.sh"),
@@ -57,7 +58,6 @@ reliability = need(
         "cpu: [1, 2, 4, 8]",
         "qemu_matrix.py",
         "test_rendezvous_property.rs",
-        "check_budgets.py",
     ),
 )
 release = need(
@@ -230,6 +230,70 @@ if "non-regression-gate" not in protection.read_text(encoding="utf-8"):
     errors.append("protection main: non-regression-gate non requis")
 if "continue-on-error: true" in regression:
     errors.append("non-regression: echec ignore par le workflow")
+
+# BOUCHAUD_CI_TROIS_NIVEAUX_V1 : chaque SHA de branche est verifie UNE fois par
+# niveau. Proprietes lues dans les DECLENCHEURS (pas dans le texte, que les
+# commentaires satisfont) :
+#  A. ci.yml : push sur toutes les branches, sans filtre, et PAS de
+#     `pull_request` (le push publie deja `fast-gate` sur la tete de la PR) ;
+#  B. aucun workflow ne se declenche a la fois sur `pull_request` et sur le push
+#     d'une branche de travail : le meme arbre etait teste deux fois ;
+#  C. Integration EXECUTE ses suites sur une PR : plus de libelle
+#     `ci:integration`, et seule une PR documentaire est exemptee, dite telle ;
+#  D. dans CI Fast, P10 est construit AVANT le noyau par defaut : le garde de
+#     profondeur de pile lit le dernier binaire, qui doit etre celui livre.
+import yaml  # noqa: E402
+
+def declencheurs(nom: str) -> dict:
+    d = yaml.safe_load((root / nom).read_text(encoding="utf-8")) or {}
+    on = d.get(True, d.get("on")) or {}
+    if isinstance(on, str):
+        on = {on: None}
+    elif isinstance(on, list):
+        on = {k: None for k in on}
+    return on
+
+def branches_push(on: dict) -> list[str] | None:
+    push = on.get("push")
+    if "push" not in on:
+        return None
+    if not isinstance(push, dict) or "branches" not in push:
+        return ["**"] if not (isinstance(push, dict) and "tags" in push) else []
+    return [str(b) for b in push["branches"]]
+
+on_ci = declencheurs("ci.yml")
+if "pull_request" in on_ci:
+    errors.append("ci.yml: declencheur pull_request (doublon du push sur le meme SHA)")
+push_ci = on_ci.get("push") or {}
+if branches_push(on_ci) != ["**"] or any(k in push_ci for k in ("paths", "paths-ignore", "branches-ignore")):
+    errors.append("ci.yml: le niveau A doit tourner sur le push de TOUTE branche, sans filtre")
+
+for chemin in sorted(root.glob("*.yml")):
+    on = declencheurs(chemin.name)
+    if "pull_request" not in on:
+        continue
+    br = branches_push(on)
+    if br is None:
+        continue
+    travail = [b for b in br if b != "main"]
+    if travail:
+        errors.append(f"{chemin.name}: pull_request ET push de branches de travail {travail} "
+                      "(le meme arbre teste deux fois)")
+
+if "ci:integration" in integration:
+    errors.append("integration.yml: libelle ci:integration -- une PR doit executer les suites sans libelle")
+if "INTEGRATION_GATE_DOCS_ONLY" not in integration:
+    errors.append("integration.yml: l'exemption documentaire doit etre dite (INTEGRATION_GATE_DOCS_ONLY)")
+
+_kf = yaml.safe_load(fast)["jobs"]["kernel-fast"]["steps"]
+_noms = [e.get("name", "") for e in _kf]
+try:
+    if _noms.index("P10 GPU - compilation avec et sans compositeur VIRGL") > _noms.index("Compiler le noyau"):
+        errors.append("ci.yml: P10 construit APRES le noyau par defaut -- le garde de pile lirait le binaire p10")
+    if _noms.index("Garde-fous d'architecture") < _noms.index("Compiler le noyau"):
+        errors.append("ci.yml: garde-fous lances avant la compilation du noyau analyse")
+except ValueError as exc:
+    errors.append(f"ci.yml: etape attendue absente de kernel-fast ({exc})")
 
 if errors:
     print("\n".join("ECHEC: " + e for e in errors), file=sys.stderr)

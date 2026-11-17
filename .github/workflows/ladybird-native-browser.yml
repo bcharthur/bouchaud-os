@@ -104,9 +104,11 @@ on:
       - 'src/drivers/api/gpu.rs'
       - 'src/drivers/block/**'
       - 'src/kernel/native/**'
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
+  # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
   push:
     # BOUCHAUD_P13_BUILD_SUR_BRANCHES
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024', 'chatgpt/active']
+    branches: [main]
     paths:
       - 'tools/ladybird/**'
       - 'tools/e2e/**'

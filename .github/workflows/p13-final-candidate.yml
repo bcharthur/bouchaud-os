@@ -2,7 +2,24 @@ name: P13 final - single SHA strict gates
 # Dispatch only after native C22 and Nightly were both run on the same SHA.
 # Do not queue dedicated-host jobs for workflow-only edits.
 on:
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : absorbe p13-dedicated-kvm.yml (supprime), qui
+  # jouait les MEMES scripts sur les MEMES runners dedies, une campagne a la
+  # fois. `perimetre` garde ce choix ; seul `complet` peut rendre le verdict
+  # final -- un perimetre partiel ne le rend jamais.
   workflow_dispatch:
+    inputs:
+      perimetre:
+        description: 'complet (verdict final), baseline (SMP1/2/4 KVM4), smp8 (qualification KVM8), smp8-soak (endurance KVM8)'
+        type: choice
+        required: true
+        default: complet
+        options: [complet, baseline, smp8, smp8-soak]
+      soak_minutes:
+        description: 'Endurance SMP8 (minutes)'
+        type: choice
+        required: true
+        default: '30'
+        options: ['30', '60', '90', '150']
 
 permissions:
   contents: read
@@ -15,12 +32,14 @@ concurrency:
 jobs:
   hosted-primitives-strict:
     name: P13 / hosted diagnostic and strict primitives
+    if: inputs.perimetre == 'complet'
     uses: ./.github/workflows/os-primitives.yml
     with:
       p13_strict: true
 
   dedicated-three-campaigns:
     name: P13 / 3 independent SMP1-2-4 campaigns / dedicated KVM4
+    if: inputs.perimetre == 'complet' || inputs.perimetre == 'baseline'
     runs-on: [self-hosted, Linux, X64, bouchaud-kvm4]
     timeout-minutes: 600
     env:
@@ -55,6 +74,7 @@ jobs:
 
   dedicated-smp8:
     name: P13 / SMP8 qualification and 30min endurance / dedicated KVM8
+    if: inputs.perimetre == 'complet' || inputs.perimetre == 'smp8' || inputs.perimetre == 'smp8-soak'
     runs-on: [self-hosted, Linux, X64, bouchaud-kvm8]
     timeout-minutes: 240
     env:
@@ -72,13 +92,15 @@ jobs:
         shell: bash
         run: tools/ci/build_kernel.sh
       - name: Qualify SMP8 on the delivered kernel
+        if: inputs.perimetre != 'smp8-soak'
         shell: bash
         env:
           P13_QUALIFICATION_OUT: ${{ github.workspace }}/target/p13-smp8-${{ github.run_id }}
         run: |
           bash tools/ci/run_p13_dedicated_kvm.sh \
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin smp8
-      - name: Run original 30-minute SMP8 endurance
+      - name: Run SMP8 endurance (30 min for the final verdict)
+        if: inputs.perimetre != 'smp8'
         shell: bash
         run: |
           tools/ci/fabrique-scenario-endurance.sh endurance-scenario
@@ -86,7 +108,7 @@ jobs:
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             --disk endurance-scenario/endurance.img \
             --markers endurance-scenario/marqueurs-endurance.txt \
-            --minutes 30 \
+            --minutes "${{ inputs.perimetre == 'complet' && '30' || inputs.soak_minutes }}" \
             --output "target/p13-smp8-soak-$GITHUB_RUN_ID"
       - name: Publish original SMP8 evidence even when red
         if: always()
@@ -111,10 +133,22 @@ jobs:
           HOSTED: ${{ needs.hosted-primitives-strict.result }}
           BASELINE: ${{ needs.dedicated-three-campaigns.result }}
           SMP8: ${{ needs.dedicated-smp8.result }}
+          PERIMETRE: ${{ inputs.perimetre }}
         shell: bash
         run: |
           set -euo pipefail
-          printf 'P13_GATES hosted=%s baseline=%s smp8=%s sha=%s\n' "$HOSTED" "$BASELINE" "$SMP8" "$GITHUB_SHA"
+          printf 'P13_GATES perimetre=%s hosted=%s baseline=%s smp8=%s sha=%s\n' "$PERIMETRE" "$HOSTED" "$BASELINE" "$SMP8" "$GITHUB_SHA"
+          if [ "$PERIMETRE" != complet ]; then
+            # Perimetre partiel : la campagne choisie doit reussir, et AUCUN
+            # verdict final n'est rendu.
+            case "$PERIMETRE" in
+              baseline) test "$BASELINE" = success ;;
+              smp8|smp8-soak) test "$SMP8" = success ;;
+              *) echo "perimetre inconnu" ; exit 1 ;;
+            esac
+            echo "P13_PERIMETRE_PARTIEL perimetre=$PERIMETRE : pas de P13_FINAL_STRICT_OK"
+            exit 0
+          fi
           test "$HOSTED" = success
           test "$BASELINE" = success
           test "$SMP8" = success

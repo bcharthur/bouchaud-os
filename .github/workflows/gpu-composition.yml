@@ -22,8 +22,10 @@ on:
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/bench_ladybird.py'
       - '.github/workflows/gpu-composition.yml'
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
+  # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
   push:
-    branches: [main, 'claude/**']
+    branches: [main]
     paths:
       - 'src/drivers/display/**'
       - 'src/gui/**'

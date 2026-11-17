@@ -101,6 +101,6 @@ Action humaine restante (jeton a usage unique, jamais commite) :
      --labels bouchaud-$LABEL --name bouchaud-$LABEL-\$(hostname -s) --work _work --unattended'
   echo BOUCHAUD_DEDICATED_HOST=YES | sudo -u $RUNNER_USER tee -a ~$RUNNER_USER/actions-runner/.env
   sudo ~$RUNNER_USER/actions-runner/svc.sh install $RUNNER_USER && sudo ~$RUNNER_USER/actions-runner/svc.sh start
-Puis : workflow_dispatch de p13-dedicated-kvm.yml (campaign=$([ "$LABEL" = kvm4 ] && echo baseline || echo smp8)) ;
+Puis : workflow_dispatch de p13-final-candidate.yml (perimetre=$([ "$LABEL" = kvm4 ] && echo baseline || echo smp8)) ;
 le preflight tools/ci/p13_kvm_host_preflight.py re-verifie l'hote au debut de chaque job.
 EOF

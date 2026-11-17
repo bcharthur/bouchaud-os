@@ -38,6 +38,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
+from declencheurs import publie_sur_tete_pr  # noqa: E402
+
 RACINE = Path(__file__).resolve().parent.parent
 WORKFLOWS = RACINE / ".github" / "workflows"
 PROTECTION = RACINE / "tools" / "ci" / "configure_protection.ps1"
@@ -59,9 +62,10 @@ def main() -> int:
     planifiees: dict[str, str] = {}
     for chemin in sorted(WORKFLOWS.glob("*.yml")):
         texte = chemin.read_text(encoding="utf-8")
-        # Le declencheur, lu dans le bloc `on:` de tete.
+        # Le declencheur, lu dans le bloc `on:` de tete : `pull_request`, ou
+        # `push` sur toutes les branches sans filtre (tools/ci/declencheurs.py).
         entete = texte.split("\njobs:", 1)[0]
-        sur_pull_request = re.search(r"^\s*pull_request:", entete, re.M) is not None
+        sur_pull_request = publie_sur_tete_pr(entete)
         for nom in JOB.findall(texte):
             if sur_pull_request:
                 barrieres[nom] = chemin.name
@@ -81,8 +85,9 @@ def main() -> int:
         ou = planifiees.get(nom)
         if ou:
             fautes.append(
-                f"  `{nom}` est exigee sur main mais son workflow ({ou}) ne se "
-                f"declenche pas sur `pull_request` : GitHub attendrait un "
+                f"  `{nom}` est exigee sur main mais son workflow ({ou}) ne "
+                f"publie pas sur la tete d'une PR (ni `pull_request`, ni push "
+                f"sur toutes les branches sans filtre) : GitHub attendrait un "
                 f"statut que personne ne publie sur la tete d'une PR, et toute "
                 f"fusion serait bloquee pour toujours"
             )

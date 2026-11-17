@@ -60,8 +60,10 @@ on:
       - 'tools/ci/run_bureau_ring3.sh'
       - 'tools/ci/verifie_capture_bureau_ring3.py'
       - '.github/workflows/native-ipc-runtime.yml'
+  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
+  # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
   push:
-    branches: [main, 'claude/**', 'feat/**', 'audit/p13-console-sync-ci-20261024']
+    branches: [main]
     paths:
       - 'src/kernel/process/**'
       - 'src/kernel/scheduler/**'
