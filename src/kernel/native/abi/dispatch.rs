@@ -670,6 +670,15 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
                 _ => Err(Error::WrongType),
             }
         }
+        numbers::SHM_FILL_RECT => {
+            let entry = handle::current_table().lookup_kind(
+                HandleId::from_raw(args[0]), Rights::WRITE, ObjectKind::SharedRegion
+            )?;
+            match entry.object.as_ref() {
+                Object::SharedRegion(region) => region.remplit_rect(args[1], args[2], args[3], args[4], args[5]),
+                _ => Err(Error::WrongType),
+            }
+        }
 
         numbers::PROCESS_SPAWN => process_spawn(args),
         numbers::PROCESS_INFO => process_info(args),

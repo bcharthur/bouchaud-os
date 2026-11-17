@@ -4,7 +4,7 @@ pub const ABI_MAJOR: u16 = 1;
 /// 1.1 (BOUCHAUD_NATIVE_ABI_1_1) : PROCESS_SPAWN/INFO/KILL, WAITSET_WAIT,
 /// TIME_NOW, objet Process, signal TERMINATED, erreur TimedOut. Purement
 /// additif : un programme 1.0 ne voit aucune difference.
-pub const ABI_MINOR: u16 = 5;
+pub const ABI_MINOR: u16 = 6;
 pub const ABI_VERSION_PACKED: u64 = ((ABI_MAJOR as u64) << 16) | ABI_MINOR as u64;
 
 /// Native syscall namespace. Linux x86-64 syscalls currently used by the

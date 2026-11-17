@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 5
+#define BO_ABI_MINOR 6
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -45,6 +45,7 @@ typedef unsigned long      bo_usize;
 #define BO_NR_SHM_SIZE            (BO_NATIVE_BASE + 0x41)
 #define BO_NR_SHM_READ            (BO_NATIVE_BASE + 0x42)
 #define BO_NR_SHM_WRITE           (BO_NATIVE_BASE + 0x43)
+#define BO_NR_SHM_FILL_RECT       (BO_NATIVE_BASE + 0x44)
 #define BO_NR_PROCESS_SPAWN       (BO_NATIVE_BASE + 0x50)
 #define BO_NR_PROCESS_INFO        (BO_NATIVE_BASE + 0x51)
 #define BO_NR_PROCESS_KILL        (BO_NATIVE_BASE + 0x52)

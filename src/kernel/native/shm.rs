@@ -5,6 +5,9 @@ use crate::kernel::sync::SpinLock;
 
 use super::abi::types::{Error, Result, Signals};
 
+#[path = "shm_rect_contrat.rs"]
+pub mod rect;
+
 pub const MAX_SHARED_REGION: usize = 64 * 1024 * 1024;
 
 /// Shared kernel region.
@@ -46,6 +49,24 @@ impl SharedRegion {
     pub fn avec_octets_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> R {
         let mut bytes = self.bytes.lock();
         f(&mut bytes)
+    }
+
+    /// Lecture en place, sous le verrou de la region : le noyau en pose les
+    /// lignes sans tampon intermediaire (`affichage::present`).
+    pub fn avec_octets<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        let bytes = self.bytes.lock();
+        f(&bytes)
+    }
+
+    /// BOUCHAUD_SHM_RECT_V1 : `bo_shm_fill_rect`. Valide sous le verrou (la
+    /// taille de la region y est lue), puis remplit sur place : ni copie
+    /// depuis l'appelant, ni allocation. Rend le nombre de pixels ecrits.
+    pub fn remplit_rect(&self, decalage: u64, couleur: u64, pixels: u64, lignes: u64, pas: u64) -> Result<u64> {
+        let mut bytes = self.bytes.lock();
+        let r = rect::valide(decalage, couleur, pixels, lignes, pas, bytes.len())
+            .map_err(|_| Error::InvalidArgument)?;
+        rect::applique(&r, &mut bytes);
+        Ok(pixels * lignes)
     }
 
     pub fn signals(&self) -> Signals { Signals::READABLE | Signals::WRITABLE }

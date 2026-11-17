@@ -35,6 +35,10 @@ pub const SHM_CREATE: u64 = NATIVE_BASE + 0x40;
 pub const SHM_SIZE: u64 = NATIVE_BASE + 0x41;
 pub const SHM_READ: u64 = NATIVE_BASE + 0x42;
 pub const SHM_WRITE: u64 = NATIVE_BASE + 0x43;
+/// BOUCHAUD_SHM_RECT_V1 (ABI 1.6) : remplir un rectangle d'une region (WRITE)
+/// sans rien lire de l'appelant (region, decalage, couleur, pixels, lignes,
+/// pas) -> pixels ecrits. Bornes : `shm_rect_contrat::valide`.
+pub const SHM_FILL_RECT: u64 = NATIVE_BASE + 0x44;
 
 pub const PROCESS_SPAWN: u64 = NATIVE_BASE + 0x50;
 pub const PROCESS_INFO: u64 = NATIVE_BASE + 0x51;
@@ -114,6 +118,7 @@ pub const fn name(number: u64) -> &'static str {
         SHM_SIZE => "bo_shm_size",
         SHM_READ => "bo_shm_read",
         SHM_WRITE => "bo_shm_write",
+        SHM_FILL_RECT => "bo_shm_fill_rect",
         PROCESS_SPAWN => "bo_process_spawn",
         PROCESS_INFO => "bo_process_info",
         PROCESS_KILL => "bo_process_kill",
