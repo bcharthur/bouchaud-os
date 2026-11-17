@@ -165,15 +165,28 @@ class Banc:
 
     def demarre(self) -> None:
         disque = self.sortie / "scenario.img"
-        disque_scenario(disque, "export BO_ATELIER_PERF_TRAME=1\n"
-                        f"export BO_ATELIER_ANIMATIONS={self.o.animations}\ndesktop\n")
+        # Chemin d'affichage. `std` (defaut) : le bochs-display de QEMU, celui
+        # de la livraison. `virtio` / `virtio-gl` : EXPERIMENTAL, pour comparer
+        # le chemin virtio-gpu (scanout 2D ; composition GPU sous VIRGL, qui
+        # demande un affichage GL : `--qemu-extra "-display sdl,gl=on"`).
+        # Jamais active par defaut avant qualification.
+        lignes = ["export BO_ATELIER_PERF_TRAME=1", f"export BO_ATELIER_ANIMATIONS={self.o.animations}"]
+        if self.o.affichage == "virtio-gl":
+            lignes.append(f"gpu-composition {self.o.gpu_composition}")
+        disque_scenario(disque, "\n".join(lignes + ["desktop", ""]))
         port = port_libre()
+        extra = self.o.qemu_extra.split()
+        affichage = {"std": ["-vga", "std"],
+                     "virtio": ["-vga", "none", "-device", "virtio-gpu-pci"],
+                     "virtio-gl": ["-vga", "none", "-device", "virtio-gpu-gl-pci"]}[self.o.affichage]
+        if "-display" not in extra:
+            affichage += ["-display", "none"]
         a = [self.o.qemu, "-machine", "pc", "-m", str(self.o.memoire), "-smp", str(self.o.smp),
              "-drive", f"format=raw,file={self.o.boot},snapshot=on",
              "-drive", f"format=raw,file={disque},snapshot=on",
-             "-vga", "std", "-nic", "none", "-display", "none", "-no-reboot",
+             *affichage, "-nic", "none", "-no-reboot",
              "-monitor", f"tcp:127.0.0.1:{port},server=on,wait=off",
-             "-serial", f"file:{self.log}"]
+             "-serial", f"file:{self.log}", *extra]
         if self.o.accel == "tcg":
             a += ["-accel", "tcg", "-cpu", "max"]
         elif self.o.accel == "kvm":
@@ -222,7 +235,7 @@ class Banc:
 
     def geometrie(self, depuis: int = 0):
         m = self.attend(r"BOUCHAUD_ATELIER_FENETRE_GEOMETRIE x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) "
-                        r"fermer_x=(-?\d+) fermer_y=(-?\d+) titre=([^\r\n]*)", 30, depuis)
+                        r"fermer_x=(-?\d+) fermer_y=(-?\d+) titre=(.*)", 30, depuis)
         if not m:
             raise RuntimeError("geometrie de fenetre non publiee")
         return tuple(map(int, m.groups()[:6]))
@@ -315,6 +328,7 @@ class Banc:
 
     def analyse(self) -> dict:
         resultat = {"accel": self.o.accel, "smp": self.o.smp, "memoire_mio": self.o.memoire,
+                    "affichage": self.o.affichage,
                     "etiquette": self.o.etiquette, "latences_ouverture_ms": self.latences_ouverture,
                     "phases": {}}
         rx = re.compile(r"BOUCHAUD_PERF_TRAME t_ms=(\d+) us=(\d+) fenetres_us=(\d+) "
@@ -359,6 +373,11 @@ def main(argv) -> int:
     p.add_argument("--demarrage", type=float, default=300.0)
     p.add_argument("--animations", default="normales")
     p.add_argument("--etiquette", default="")
+    p.add_argument("--affichage", choices=["std", "virtio", "virtio-gl"], default="std")
+    p.add_argument("--gpu-composition", choices=["on", "off"], default="on")
+    p.add_argument("--qemu-extra", default="", help="options QEMU ajoutees, separees par des espaces")
+    p.add_argument("--exige-sans-es", action="store_true",
+                   help="echec si une phase fait un acces de configuration PCI pendant ses trames")
     o = p.parse_args(argv)
     sortie = Path(o.sortie)
     sortie.mkdir(parents=True, exist_ok=True)
@@ -382,6 +401,13 @@ def main(argv) -> int:
         print("BANC_ATELIER " + " ".join([f"phase={nom}"] + [f"{k}={v}" for k, v in r.items()]))
         if not r["trames"]:
             print(f"BANC_ATELIER_ECHEC raison=aucune_trame_mesuree phase={nom}")
+            code = 1
+        # BOUCHAUD_PERF_ES_PAR_TRAME_V1 : un dessin ne fait aucune E/S PCI. Les
+        # lectures CMOS sont publiees sans etre exigees : le prefixe des lignes
+        # serie relit l'horloge tant que l'heure murale n'est pas ancree.
+        elif o.exige_sans_es and r["pci_acces_par_trame"]:
+            print(f"BANC_ATELIER_ECHEC raison=es_pci_pendant_les_trames phase={nom} "
+                  f"pci_acces_par_trame={r['pci_acces_par_trame']}")
             code = 1
     print(f"BANC_ATELIER latences_ouverture_ms={resultat['latences_ouverture_ms']}")
     print("BANC_ATELIER_OK" if code == 0 else "BANC_ATELIER_ECHEC")
