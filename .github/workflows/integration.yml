@@ -410,8 +410,8 @@ jobs:
         with:
           name: integration-tempete-exec
           path: |
-            tempete-exec-smp4/serie.log
-            tempete-exec-smp1/serie.log
+            tempete-exec-smp4/serie.log*
+            tempete-exec-smp1/serie.log*
           if-no-files-found: warn
 
   os-primitives:

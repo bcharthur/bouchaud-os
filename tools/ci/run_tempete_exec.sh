@@ -28,6 +28,16 @@
 # Sur un gel, le rapport automatique est imprime (tools/ci/reliability/
 # rapport_gel.py), symbolise avec le noyau ELF du meme build s'il est present.
 #
+# SILENCE TOTAL (BOUCHAUD_TEMPETE_SILENCE_V1). Un noyau fige interruptions
+# masquees sur le coeur 0 n'emet meme plus la ligne [DIAG-EN-SOUFFRANCE] :
+# la sortie serie s'arrete au milieu d'une ligne et QEMU tourne a 170 % (vu
+# localement le 17/11, main@65f1e65 et cbf2d0a, apres ~1 min de tempete). Le
+# banc le declare apres SILENCE_S secondes hote sans un octet (90), releve
+# alors l'etat de chaque vCPU par le moniteur QEMU (tools/ci/
+# releve_cpus_qemu.py, s'il est present) AVANT d'arreter QEMU, et imprime la
+# fin du journal serie dans la sortie du job : un echec porte ses preuves,
+# meme quand l'artefact n'est pas lisible.
+#
 # BO_SMP : nombre de coeurs (4). BO_QEMU_KVM=1 : sous KVM.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -41,6 +51,10 @@ OUT=$(cd "$OUT" && pwd)
 SCENARIO="$OUT/scenario"
 IMAGE="$OUT/disque.img"
 LOG="$OUT/serie.log"
+MONITEUR="$OUT/moniteur.sock"
+# Un chemin de socket UNIX tient en 107 octets.
+if [ "${#MONITEUR}" -ge 100 ]; then MONITEUR=$(mktemp -u /tmp/bo-tempete-XXXXXX.sock); fi
+SILENCE_S=${SILENCE_S:-90}
 (cd tools/userland && OUT=out-tempete-exec ./build.sh musl >/dev/null)
 cp tools/userland/out-tempete-exec/tempete-exec-probe "$SCENARIO/bin/"
 cat > "$SCENARIO/autorun" <<EOF
@@ -64,6 +78,7 @@ qemu-system-x86_64 $ACCEL \
   -drive format=raw,file="$BOOT",snapshot=on \
   -drive format=raw,file="$IMAGE" \
   -m 2048 -smp "$SMP" -display none -no-reboot \
+  -monitor unix:"$MONITEUR",server,nowait \
   -serial file:"$LOG" &
 PID=$!
 # Borne hote : le temps invite avance plus lentement sous TCG. Un gel est
@@ -75,8 +90,16 @@ propre() { sed -E 's/\x1b\[[0-9;]*m//g' "$LOG"; }
 # La SORTIE d'`echo TEMPETE_BANC_FIN`, pas sa trace (`+ echo ...`) ; awk lit
 # tout son flux (pas de lecteur tronquant sous pipefail).
 fin_vue() { awk '/TEMPETE_BANC_FIN/ && !/\+ echo/ { vu = 1 } END { exit !vu }' <<<"$texte"; }
+taille_vue=-1
+depuis=$SECONDS
 while kill -0 "$PID" 2>/dev/null; do
   if (( SECONDS >= LIMITE )); then break; fi
+  taille=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+  if [ "$taille" != "$taille_vue" ]; then
+    taille_vue=$taille; depuis=$SECONDS
+  elif (( SECONDS - depuis >= SILENCE_S )); then
+    etat=silence; break
+  fi
   texte=$(propre)
   if grep -aqE 'KERNEL PANIC|panicked at' <<<"$texte"; then etat=panique; sleep 2; break; fi
   if [ "$(grep -acF '[DIAG-EN-SOUFFRANCE]' <<<"$texte" || true)" -ge 2 ]; then etat=fige; break; fi
@@ -86,6 +109,14 @@ while kill -0 "$PID" 2>/dev/null; do
   fi
   sleep 2
 done
+if [ "$etat" = silence ] || [ "$etat" = echeance ] || [ "$etat" = fige ]; then
+  # QEMU tourne encore : l'etat des vCPU, AVANT de l'arreter.
+  if [ -f tools/ci/releve_cpus_qemu.py ] && [ -S "$MONITEUR" ]; then
+    python3 tools/ci/releve_cpus_qemu.py "$MONITEUR" "$LOG.cpus" || true
+  else
+    echo "QEMU_CPUS_ABSENT raison=outil_ou_moniteur_absent"
+  fi
+fi
 kill -TERM "$PID" 2>/dev/null || true
 sleep 1
 kill -KILL "$PID" 2>/dev/null || true
@@ -105,9 +136,18 @@ case "$etat" in
   fini) ok "le banc est alle au bout" ;;
   panique) echec "panique noyau"; grep -aE 'KERNEL PANIC|panicked at' <<<"$texte" | sed -n 1,3p ;;
   fige) echec "noyau fige ([DIAG-EN-SOUFFRANCE])" ;;
+  silence) echec "silence total : aucun octet serie depuis ${SILENCE_S} s, QEMU vivant" ;;
   *) echec "echeance hote sans fin ni gel declare" ;;
 esac
-if [ "$etat" = fige ] || [ "$etat" = echeance ]; then
+if [ "$etat" != fini ]; then
+  echo "---- fin du journal serie (60 lignes) ----"
+  awk -v n="$(wc -l <<<"$texte")" 'NR > n - 60 { print substr($0, 1, 240) }' <<<"$texte"
+  echo "---- lignes [DIAG-EN-SOUFFRANCE] ----"
+  awk '/\[DIAG-EN-SOUFFRANCE\]/ { print substr($0, 1, 600) }' <<<"$texte"
+  echo "---- derniers [PROC-STAT] ----"
+  awk '/\[PROC-STAT\]/ { l[NR % 8] = substr($0, 1, 240) } END { for (i in l) print l[i] }' <<<"$texte"
+fi
+if [ "$etat" = fige ] || [ "$etat" = echeance ] || [ "$etat" = silence ]; then
   if [ -f tools/ci/reliability/rapport_gel.py ]; then
     python3 tools/ci/reliability/rapport_gel.py "$LOG" target/x86_64-bouchaud_os/debug/bouchaud-os || true
   fi
