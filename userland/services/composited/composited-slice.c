@@ -594,6 +594,8 @@ static int nfen;
 static int ordre[FEN_MAX];   /* ordre[0] : fond ... ordre[nfen-1] : premier plan */
 static i64 affichage_g, region_g;
 static u64 lit_ns, lit_max, pres_ns, pres_max, trames_total, pixels_total, recompositions;
+/* Appels systeme d'ecriture dans la region (segments, lignes de curseur). */
+static u64 appels_region;
 
 struct rect { u32 x, y, l, h; };
 
@@ -617,6 +619,7 @@ static int intersecte(struct rect a, struct rect b, struct rect *out)
 static i64 ecris_segment(u32 x, u32 y, u32 l, u32 couleur)
 {
     for (u32 c = 0; c < l; c++) ligne_bureau[c] = couleur;
+    appels_region++;
     return sys6(BO_SHM_WRITE, (u64)region_g, ((u64)y * ecran_l + x) * 4u, (u64)ligne_bureau, (u64)l * 4u, 0, 0);
 }
 
@@ -973,6 +976,8 @@ static u32 changements_vus;
 static int changements_init;
 static u64 entrees_routees, entrees_refusees, touches_routees;
 static u64 dernier_deplacement_ns;
+/* Tous les pas du glisser en cours : nombre, somme, pire, appels a la region. */
+static u64 depl_pas, depl_somme_ns, depl_max_ns, depl_appels;
 
 static struct rect rect_curseur(void)
 {
@@ -996,6 +1001,7 @@ static void superpose_curseur(struct rect r)
             if (p == 'X') ligne[x - i.x] = 0x000000u;
             else if (p == 'O') ligne[x - i.x] = 0xffffffu;
         }
+        appels_region++;
         sys6(BO_SHM_WRITE, (u64)region_g, decalage, (u64)ligne, (u64)i.l * 4u, 0, 0);
     }
 }
@@ -1163,15 +1169,34 @@ static int traite_entrees(void)
             if (nx > (i64)ecran_l - 40) nx = (i64)ecran_l - 40;
             if (ny > (i64)ecran_h - 20) ny = (i64)ecran_h - 20;
             if ((u32)nx != f->x || (u32)ny != f->y) {
-                u64 t0 = maintenant_ns();
+                u64 t0 = maintenant_ns(), a0 = appels_region;
                 deplace(glisse, (u32)nx, (u32)ny);
                 dernier_deplacement_ns = maintenant_ns() - t0;
+                depl_pas++;
+                depl_somme_ns += dernier_deplacement_ns;
+                if (dernier_deplacement_ns > depl_max_ns) depl_max_ns = dernier_deplacement_ns;
+                depl_appels += appels_region - a0;
             }
         } else if (!gauche && gauche_prec) {
             /* Relachement : fin du glisser, ou du clic dans un contenu. */
             if (glisse >= 0) {
                 publie_entree("COMPOSITED_ENTREE_DEPOSE fenetre=", glisse, fens[glisse].x, fens[glisse].y);
                 ecris_nombre("[COMPOSITED] deplacement_us=", (i64)(dernier_deplacement_ns / 1000));
+                {
+                    char t[192]; unsigned long n = 0;
+                    ajoute_texte(t, &n, "COMPOSITED_GLISSER_MESURE pas=");
+                    ajoute_nombre(t, &n, depl_pas);
+                    ajoute_texte(t, &n, " moyen_us=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_somme_ns / depl_pas / 1000 : 0);
+                    ajoute_texte(t, &n, " max_us=");
+                    ajoute_nombre(t, &n, depl_max_ns / 1000);
+                    ajoute_texte(t, &n, " appels_region_par_pas=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_appels / depl_pas : 0);
+                    ajoute_texte(t, &n, "\n");
+                    t[n] = 0;
+                    ecris(t);
+                }
+                depl_pas = depl_somme_ns = depl_max_ns = depl_appels = 0;
                 publie_fenetre(glisse, "COMPOSITED_BUREAU_FENETRE indice=");
                 glisse = -1;
             }
@@ -1417,6 +1442,7 @@ static int bureau(i64 affichage, u64 *pile)
 
     ecris_nombre("COMPOSITED_BUREAU_BILAN trames=", (i64)trames_total);
     ecris_nombre("[COMPOSITED] entrees_routees=", (i64)entrees_routees);
+    ecris_nombre("[COMPOSITED] appels_region=", (i64)appels_region);
     ecris_nombre("[COMPOSITED] entrees_refusees=", (i64)entrees_refusees);
     ecris_nombre("[COMPOSITED] touches_routees=", (i64)touches_routees);
     for (int k = 0; k < nfen; k++) publie_trames(k);
