@@ -64,9 +64,19 @@ if "(resident, promises) = {" not in memory_usage or "octets_virtuels(&promises)
 metrics = source("src/kernel/process/thread/metriques.rs")
 loop_start = metrics.find("for task in tasks().iter()")
 none_start = metrics.find("None => {", loop_start)
-usage_call = metrics.find("crate::kernel::resource::memory_usage(process)", loop_start)
-if min(loop_start, none_start, usage_call) < 0 or usage_call < none_start:
-    raise SystemExit("rss-o1: le RSS doit etre lu dans la branche nouveau PID")
+note_pid = metrics.find("a_mesurer.push(", none_start)
+# BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 (#283) : une lecture par processus
+# (branche nouveau PID), mais APRES la lecture du registre : aucun `Mm` sous
+# le parcours des taches.
+apres = metrics.find("for process in a_mesurer", note_pid)
+usage_call = metrics.find("crate::kernel::resource::memory_usage(&process)", apres)
+if min(loop_start, none_start, note_pid, apres, usage_call) < 0:
+    raise SystemExit("rss-o1: le RSS doit etre note dans la branche nouveau PID et lu apres le parcours")
+fin_parcours = metrics.find("let (rss_snapshots, rss_pages)", loop_start)
+if "memory_usage(" in metrics[loop_start:apres] or ".mm.lock()" in metrics[loop_start:apres]:
+    raise SystemExit("rss-o1: verrou Mm pris sous la lecture du registre (gel #283)")
+if not (apres < fin_parcours):
+    raise SystemExit("rss-o1: le RSS doit etre lu avant le releve [MM-RSS-O1]")
 if "[MM-RSS-O1]" not in metrics:
     raise SystemExit("rss-o1: preuve runtime absente")
 
