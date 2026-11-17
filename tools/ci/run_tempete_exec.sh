@@ -124,6 +124,10 @@ wait "$PID" 2>/dev/null || true
 texte=$(propre)
 if [ "$etat" = echeance ] && fin_vue; then
   etat=fini   # QEMU s'est eteint de lui-meme apres l'autorun
+elif [ "$etat" = echeance ] && [ ! -s "$LOG" ] && (( SECONDS < LIMITE )); then
+  # QEMU mort sans un octet serie avant l'echeance : il n'a jamais demarre
+  # (image verrouillee, option refusee...). Ni un gel, ni un budget depasse.
+  etat=qemu_absent
 fi
 
 grep -aoE 'TEMPETE_EXEC_FIN mode=[a-z]+ cycles=[0-9]+ echecs=[0-9]+' <<<"$texte" || true
@@ -137,6 +141,7 @@ case "$etat" in
   panique) echec "panique noyau"; grep -aE 'KERNEL PANIC|panicked at' <<<"$texte" | sed -n 1,3p ;;
   fige) echec "noyau fige ([DIAG-EN-SOUFFRANCE])" ;;
   silence) echec "silence total : aucun octet serie depuis ${SILENCE_S} s, QEMU vivant" ;;
+  qemu_absent) echec "QEMU n'a jamais demarre (environnement, pas le noyau) : voir son message ci-dessus" ;;
   *) echec "echeance hote sans fin ni gel declare" ;;
 esac
 if [ "$etat" != fini ]; then
