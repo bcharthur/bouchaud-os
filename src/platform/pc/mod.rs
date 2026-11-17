@@ -21,6 +21,9 @@ pub mod banc_io;
 /// Temoin du noyau fige (#283), derriere son drapeau : voir `banc_souffrance.rs`.
 #[cfg(feature = "banc-souffrance-verrou")]
 pub mod banc_souffrance;
+/// Temoin de la fenetre de migration (#283) : voir `banc_fenetre.rs`.
+#[cfg(feature = "banc-fenetre-migration")]
+pub mod banc_fenetre;
 /// BOUCHAUD_CLE_USB_TEST_V1 : sonde d'ecriture du banc, QEMU uniquement.
 #[cfg(feature = "banc-ecriture-interne")]
 pub mod sonde_ecriture_interne;

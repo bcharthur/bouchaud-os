@@ -127,9 +127,24 @@ fn note_refus(index: usize) {
 fn local_id() -> Option<CpuId> { CpuId::from_index(smp::cpu_index()) }
 
 pub fn disable() {
-    if let Some(id) = local_id() {
+    // BOUCHAUD_FENETRE_MIGRATION_V1 : lire l'indice du coeur et poser la
+    // marque forment UNE operation, faite interruptions coupees. Seule une
+    // IRQ peut commuter un fil noyau (preemption ciblee) ; entre la lecture
+    // et l'increment, le compteur est encore nul et la tache preemptible.
+    // Commutee la, elle reprenait ailleurs et incrementait le coeur QUITTE :
+    // celui-ci restait non preemptible pour toujours, et `enable()`, sur le
+    // nouveau coeur, passait sous zero (`preempt_count underflow`, Ladybird
+    // perf avant-simple du 15/11, coeur 3). Une fois la marque posee, la
+    // tache ne peut plus etre commutee : `note_fenetre` le verifie.
+    let marque = x86_64::instructions::interrupts::without_interrupts(|| {
+        let id = local_id()?;
+        #[cfg(feature = "banc-fenetre-migration")]
+        crate::platform::pc::banc_fenetre::pause();
         cpu_local::local(id).preempt_disable();
-        note_fenetre(id.as_usize(), &FENETRE_PREEMPT);
+        Some(id.as_usize())
+    });
+    if let Some(marque) = marque {
+        note_fenetre(marque, &FENETRE_PREEMPT);
     }
 }
 
