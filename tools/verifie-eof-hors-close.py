@@ -102,9 +102,14 @@ def verifie(racine: Path) -> list[str]:
         if pose < 0 or relache < 0 or ferme_ < 0:
             fautes.append(f"{nom.strip('(')} : l'ancien descripteur n'est plus ferme hors verrou puis reveille")
 
-    exec_ = corps(proc, "pub fn sys_execve(")
-    if exec_ is None:
-        fautes.append(f"{PROC} : sys_execve introuvable")
+    # BOUCHAUD_SORTIE_SANS_REFERENCE_V1 : le travail d'execve vit dans
+    # `prepare_execve`, qui REVIENT ; `sys_execve` ne fait plus que sauter.
+    exec_ = corps(proc, "fn prepare_execve(")
+    saut = corps(proc, "pub fn sys_execve(")
+    if exec_ is None or saut is None:
+        fautes.append(f"{PROC} : prepare_execve ou sys_execve introuvable")
+    elif "prepare_execve(" not in saut:
+        fautes.append("execve : sys_execve ne passe plus par prepare_execve")
     else:
         retire = exec_.find("let fermes = process.files.lock().close_on_exec();")
         if retire < 0 or exec_.find("ferme_hors_verrou(fermes)", retire) < 0:

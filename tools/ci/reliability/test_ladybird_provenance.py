@@ -266,7 +266,10 @@ class AttenteTests(unittest.TestCase):
         self.assertLess(par_heure, 200, f"{len(api.appels)} appels en 150 min")
 
     def test_production_echouee_puis_plus_rien_echoue(self):
-        api = ApiProduction(tours=3, conclusion="failure")
+        # « Echouee » = son build a echoue : elle n'est pas une source, et la
+        # relecture finale des productions terminees ne la retient pas.
+        api = ApiProduction(tours=3, conclusion="failure",
+                            jobs={7: {"jobs": [{"name": lp.JOB_BUILD, "conclusion": "failure"}]}})
         with self.assertRaises(RuntimeError):
             self.attends(api, grace=0)
 
@@ -315,6 +318,88 @@ class VerdictProductionTests(unittest.TestCase):
                    {"P_MODE": "reutilise", "P_BUILD": "skipped"}, {"P_MODE": ""}, {"P_PROVENANCE": ""}):
             with self.subTest(kw=kw):
                 self.assertFalse(self.v(**kw))
+
+
+class SourceProductionTests(unittest.TestCase):
+    """BOUCHAUD_LADYBIRD_SOURCE_PRODUCTION_V1 / _PRODUCTION_SUR_ATTENTE_V1."""
+
+    def test_source_hors_fenetre_des_artefacts_retrouvee_parmi_les_productions(self):
+        # Nightly 43701000573 : 40 copies republiees par des reutilisations
+        # (sans build once) masquaient la vraie source, la production 7.
+        copies = {rid: {"jobs": []} for rid in range(100, 140)}
+        prod = production(7, statut="completed", conclusion="failure")
+        api = Api({7: prod, **{rid: run(rid) for rid in copies}}, jobs=copies, en_cours=[prod])
+        liste = [artefact(rid, rid) for rid in copies]
+        d = decide(liste, api, {**{sha(r): E for r in copies}, sha(7): E})
+        self.assertEqual((d["mode"], d["source_run"]), ("reutilise", "7"), d)
+
+    def test_production_terminee_d_une_autre_empreinte_jamais_retenue(self):
+        prod = production(7, statut="completed")
+        api = Api({7: prod}, en_cours=[prod])
+        d = decide([], api, {sha(7): AUTRE})
+        self.assertNotEqual(d["source_run"], "7")
+
+    def test_production_terminee_sans_build_reel_ecartee(self):
+        prod = production(7, statut="completed")
+        api = Api({7: prod}, jobs={7: {"jobs": []}}, en_cours=[prod])
+        d = decide([], api, {sha(7): E})
+        self.assertNotEqual(d["source_run"], "7")
+
+    def test_titre_sans_prefixe_de_production_ignore(self):
+        prod = production(7, statut="completed", display_title="autre chose")
+        api = Api({7: prod}, en_cours=[prod])
+        d = decide([], api, {sha(7): E})
+        self.assertNotEqual(d["source_run"], "7")
+
+
+class AttenteDeclencheTests(AttenteTests):
+    def test_rien_nulle_part_declenche_puis_attend_la_production(self):
+        prod = production(7, statut="queued")
+        api = ApiProduction(tours=3)
+        api.en_cours = []
+        declencheur = Declencheur()
+
+        def declenche():
+            declencheur()
+            api.en_cours = [api.prod]
+        rid, _ = self.attends(api, declenche=declenche)
+        self.assertEqual((rid, declencheur.appels), (7, 1))
+        del prod
+
+    def test_production_deja_en_cours_ne_redeclenche_pas(self):
+        api = ApiProduction(tours=3)
+        declencheur = Declencheur()
+        self.assertEqual(self.attends(api, declenche=declencheur)[0], 7)
+        self.assertEqual(declencheur.appels, 0)
+
+    def test_declenchement_impossible_echoue_explicitement(self):
+        declencheur = Declencheur(panne=RuntimeError("HTTP 403 Resource not accessible"))
+        with self.assertRaisesRegex(RuntimeError, "production impossible"):
+            self.attends(Api({}), declenche=declencheur)
+
+    def test_artefact_present_ne_declenche_rien(self):
+        api = Api({1: run(1)})
+        declencheur = Declencheur()
+        self.assertEqual(self.attends(api, lambda: [artefact(1, 10)], declenche=declencheur)[0], 1)
+        self.assertEqual(declencheur.appels, 0)
+
+    def test_production_declenchee_qui_echoue_finit_en_echec(self):
+        api = ApiProduction(tours=2, conclusion="failure",
+                            jobs={7: {"jobs": [{"name": lp.JOB_BUILD, "conclusion": "failure"}]}})
+        api.en_cours = []
+        def declenche():
+            api.en_cours = [api.prod]
+        with self.assertRaises(RuntimeError):
+            self.attends(api, declenche=declenche, grace=0)
+
+    def test_artefact_invalide_jamais_retenu_meme_apres_production(self):
+        # Production terminee « en succes » mais sans corpus WPT : ecartee.
+        api = ApiProduction(tours=2, artefacts={7: {"artifacts": [{"name": lp.ARTEFACT, "expired": False}]}})
+        api.en_cours = []
+        def declenche():
+            api.en_cours = [api.prod]
+        with self.assertRaises(RuntimeError):
+            self.attends(api, declenche=declenche, grace=0)
 
 
 if __name__ == "__main__":

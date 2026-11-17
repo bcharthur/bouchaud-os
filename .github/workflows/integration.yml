@@ -378,6 +378,42 @@ jobs:
           path: souffrance-verrou/*.log
           if-no-files-found: warn
 
+  tempete-exec:
+    # BOUCHAUD_TEMPETE_EXEC_V1 : le motif de la batterie de workers de Ladybird
+    # (fork + execve en rafale depuis un processus multi-fils, enfants qui
+    # fautent, protegent, creent un fil et sortent), sans Ladybird. Exige zero
+    # echec, zero gel, et AUCUNE FUITE DE PROCESSUS (processus_crees -
+    # processus_detruits borne par les vivants) : avant
+    # BOUCHAUD_SORTIE_SANS_REFERENCE_V1, aucun processus sorti par exit_group
+    # ou ayant fait execve n'etait detruit, et la RAM etait pleine en ~2 000
+    # cycles. SMP4 puis SMP1.
+    name: qemu / tempete fork+exec (fuite de processus)
+    needs: [gate, kernel-build]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Tempete fork+exec, SMP4
+        run: BO_SMP=4 OUT=tempete-exec-smp4 tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 40
+      - name: Tempete fork+exec, SMP1
+        run: BO_SMP=1 OUT=tempete-exec-smp1 tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-tempete-exec
+          path: |
+            tempete-exec-smp4/serie.log*
+            tempete-exec-smp1/serie.log*
+          if-no-files-found: warn
+
   fenetre-migration:
     # BOUCHAUD_FENETRE_MIGRATION_V1 (#283) : aucune marque par coeur
     # (`preempt_count`, `verrous_simples`) posee sur un autre coeur que celui
@@ -784,7 +820,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, fenetre-migration, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, tempete-exec, fenetre-migration, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -796,6 +832,7 @@ jobs:
           HEALTH: ${{ needs.system-health.result }}
           PYDISK: ${{ needs.python-disque.result }}
           SOUFFRANCE: ${{ needs.souffrance-verrou.result }}
+          TEMPETE: ${{ needs.tempete-exec.result }}
           FENETRE: ${{ needs.fenetre-migration.result }}
           PRIMITIVES: ${{ needs.os-primitives.result }}
           MM: ${{ needs.mm-ng6.result }}
@@ -813,7 +850,7 @@ jobs:
             echo 'Ce resultat vert ne dit RIEN du comportement a l execution.'
             exit 0
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" fenetre "$FENETRE" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" tempete "$TEMPETE" fenetre "$FENETRE" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -823,7 +860,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$FENETRE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -832,7 +869,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$FENETRE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK
