@@ -125,9 +125,11 @@ jobs:
     name: nightly / resolve Ladybird
     runs-on: ubuntu-latest
     timeout-minutes: 250
+    # `actions: write` : declencher la production canonique de l'empreinte
+    # quand aucun artefact n'existe (BOUCHAUD_LADYBIRD_PRODUCTION_SUR_ATTENTE_V1).
     permissions:
       contents: read
-      actions: read
+      actions: write
     outputs:
       run_id: ${{ steps.resolve.outputs.source_run }}
       found: ${{ steps.resolve.outputs.found }}
@@ -140,8 +142,11 @@ jobs:
           DEPOT: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           REQUESTED: ${{ inputs.ladybird_run_id }}
-          GRACE_ATTENTE: '0'
+          # La production declenchee doit avoir le temps d'apparaitre dans la
+          # liste des runs en cours ; l'attente reste bornee par DELAI_ATTENTE.
+          GRACE_ATTENTE: '600'
           DELAI_ATTENTE: '14400'
+          REF_PRODUCTION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ -n "$REQUESTED" ]; then
@@ -152,7 +157,7 @@ jobs:
             echo "source_run=$REQUESTED" >> "$GITHUB_OUTPUT"
           elif ! python3 tools/ci/ladybird_provenance.py attends; then
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "::error::Aucun artefact Ladybird de l'empreinte du HEAD. Produire le binaire (ladybird-native-browser) avant le Nightly."
+            echo "::error::Aucun artefact Ladybird de l'empreinte du HEAD, et la production declenchee n'a pas abouti dans le delai (voir les lignes PROVENANCE)."
             exit 1
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
