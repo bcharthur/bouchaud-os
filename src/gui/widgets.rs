@@ -308,7 +308,8 @@ fn draw_topbar(centre_ouvert: bool, survol_bouton: bool) {
     fb::draw_text_prop(x, ligne, "Bouchaud OS", j::ENCRE, corps, true);
 
     // Date et heure, au centre.
-    let dt = rtc::now();
+    // BOUCHAUD_RTC_LISSE_V1 : heure d'affichage, CMOS relu au plus 1 fois/s.
+    let dt = rtc::maintenant_lisse();
     let horloge = format!("{} {} {}   {:02}:{:02}",
         JOURS[jour_semaine(dt.year, dt.month, dt.day)], dt.day,
         MOIS[(dt.month.clamp(1, 12) - 1) as usize], dt.hour, dt.minute);
