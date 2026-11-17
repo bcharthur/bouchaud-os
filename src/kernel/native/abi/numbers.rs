@@ -77,6 +77,13 @@ pub const FENETRE_FERME: u64 = NATIVE_BASE + 0x93;
 /// Sur la capacite Display : relancer le client configure de ce rang ; rend
 /// une nouvelle capacite Fenetre (affichage, rang).
 pub const DISPLAY_RELANCE_CLIENT: u64 = NATIVE_BASE + 0x82;
+/// BOUCHAUD_ENTREES_RING3_V1 (ABI 1.5) : sur la capacite Display (droit
+/// DISPLAY_PRESENT), lire les entrees (affichage, tampon*, touches_max) ->
+/// nombre de transitions de touche ecrites apres l'en-tete.
+pub const DISPLAY_ENTREES: u64 = NATIVE_BASE + 0x83;
+/// Sur une capacite Fenetre (WRITE) : router une entree vers ce client
+/// (fenetre, genre, a, b, c, d).
+pub const FENETRE_ENTREE: u64 = NATIVE_BASE + 0x94;
 
 #[inline]
 pub const fn is_native(number: u64) -> bool {
@@ -124,6 +131,8 @@ pub const fn name(number: u64) -> &'static str {
         FENETRE_CONFIGURE => "bo_fenetre_configure",
         FENETRE_FERME => "bo_fenetre_ferme",
         DISPLAY_RELANCE_CLIENT => "bo_display_relance_client",
+        DISPLAY_ENTREES => "bo_display_entrees",
+        FENETRE_ENTREE => "bo_fenetre_entree",
         _ => "bo_unknown",
     }
 }

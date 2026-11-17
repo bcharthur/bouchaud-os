@@ -690,6 +690,8 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
         numbers::FENETRE_CONFIGURE => crate::kernel::native::fenetre::configure(args),
         numbers::FENETRE_FERME => crate::kernel::native::fenetre::ferme(args),
         numbers::DISPLAY_RELANCE_CLIENT => crate::kernel::native::affichage::relance(args),
+        numbers::DISPLAY_ENTREES => crate::kernel::native::entrees::lit(args),
+        numbers::FENETRE_ENTREE => crate::kernel::native::fenetre::entree(args),
 
         _ => Err(Error::InvalidCall),
     }

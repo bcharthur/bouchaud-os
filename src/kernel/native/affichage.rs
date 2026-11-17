@@ -42,6 +42,11 @@ pub fn ecran_reserve_au_compositeur() -> bool {
 }
 static ECRAN_AU_COMPOSITEUR: AtomicBool = AtomicBool::new(false);
 
+/// Le bureau NOYAU tient-il l'ecran (et donc les entrees) ?
+pub fn bureau_noyau_actif() -> bool {
+    BUREAU_NOYAU.load(Ordering::Acquire)
+}
+
 /// Le compositeur ring 3 a pris l'ecran (premiere presentation acceptee).
 pub fn ecran_au_compositeur() -> bool {
     ECRAN_AU_COMPOSITEUR.load(Ordering::Acquire)
@@ -70,9 +75,11 @@ pub fn bureau_noyau_demarre() -> bool {
 /// Seul chemin qui fait naitre une capacite d'affichage.
 pub const COMPOSITEUR: &str = "/bin/composited";
 
-/// Droits de la capacite donnee au compositeur : presenter, inspecter. Ni
-/// DUP ni TRANSFER : elle ne se multiplie pas et ne se passe pas.
-pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0);
+/// Droits de la capacite donnee au compositeur : presenter, inspecter, et
+/// l'ATTENDRE dans un waitset (BOUCHAUD_ENTREES_RING3_V1 : elle est lisible
+/// quand une entree attend). Ni DUP ni TRANSFER : elle ne se multiplie pas et
+/// ne se passe pas.
+pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0 | Rights::WAIT.0);
 
 /// BOUCHAUD_BUREAU_RING3_2A : configuration du bureau ring 3, posee dans
 /// l'image. Premiere ligne : `CHEMIN [VAR=VALEUR ...]` -- le client confie au

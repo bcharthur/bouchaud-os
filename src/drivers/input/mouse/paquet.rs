@@ -137,6 +137,12 @@ pub fn wheel_pending() -> bool {
     WHEEL_DELTA.load(Ordering::Acquire) != 0
 }
 
+/// BOUCHAUD_ENTREES_RING3_V1 : compteur des paquets qui ont CHANGE l'etat
+/// (position, boutons, molette). Le compositeur ring 3 compare au dernier vu.
+pub fn changements() -> u64 {
+    PACKETS_CHANGED.load(Ordering::Acquire)
+}
+
 pub fn take_wheel() -> i32 {
     WHEEL_DELTA.swap(0, Ordering::AcqRel)
 }

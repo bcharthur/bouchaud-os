@@ -101,8 +101,8 @@ def verifie(racine: Path) -> list:
 
 def temoins():
     negatifs = [
-        (AFF, "DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0);",
-         "DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0 | Rights::DUP.0);"),
+        (AFF, "DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0 | Rights::WAIT.0);",
+         "DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0 | Rights::WAIT.0 | Rights::DUP.0);"),
         (AFF, "    contrat::valide(&d, region.len(), el, eh)", "    let _ = (&d, el, eh); Ok::<(), contrat::Refus>(())"),
         (AFF, "table.lookup_kind(HandleId::from_raw(args[0]), Rights::DISPLAY_PRESENT, ObjectKind::Display)",
          "table.lookup_kind(HandleId::from_raw(args[0]), Rights::NONE, ObjectKind::Display)"),

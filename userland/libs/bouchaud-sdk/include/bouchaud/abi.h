@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 4
+#define BO_ABI_MINOR 5
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -64,6 +64,8 @@ typedef unsigned long      bo_usize;
 #define BO_NR_FENETRE_CONFIGURE   (BO_NATIVE_BASE + 0x92)
 #define BO_NR_FENETRE_FERME       (BO_NATIVE_BASE + 0x93)
 #define BO_NR_DISPLAY_RELANCE_CLIENT (BO_NATIVE_BASE + 0x82)
+#define BO_NR_DISPLAY_ENTREES     (BO_NATIVE_BASE + 0x83)
+#define BO_NR_FENETRE_ENTREE      (BO_NATIVE_BASE + 0x94)
 
 /* Errors are returned as negative values: -BO_E_xxx. */
 #define BO_E_INVALID_CALL      1

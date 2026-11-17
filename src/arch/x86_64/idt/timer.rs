@@ -171,6 +171,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack: InterruptStackFrame) {
 
         // Le point indispensable que le timer minimal avait retire.
         crate::kernel::sync::reveil::flush_interface_irq();
+        // BOUCHAUD_ENTREES_RING3_V1 : les entrees confiees au compositeur
+        // ring 3 reveillent ses attentes natives ici, hors IRQ d'entree.
+        crate::kernel::native::activite::flush_differe();
 
         crate::kernel::blackbox::timer_stage(blackbox_cpu, 6);
 
