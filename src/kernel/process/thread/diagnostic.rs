@@ -65,11 +65,13 @@ pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
         temps_recycle: TempsRecycle::neuf(),
         appels: AppelsSyscall::neuf(),
     });
+    note_processus_cree();
     PROCESSES.lock().push(process.clone());
     Some(process)
 }
 
 /// Enregistre un processus cree par `fork` (espace deja duplique).
 pub fn register_process(process: Arc<Process>) {
+    note_processus_cree();
     PROCESSES.lock().push(process);
 }

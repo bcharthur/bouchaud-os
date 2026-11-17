@@ -200,14 +200,6 @@ impl<T: ?Sized> SpinLock<T> {
 
     #[track_caller]
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        let cpu = Self::current_cpu();
-
-        debug_assert!(
-            self.owner_cpu.load(Ordering::Relaxed) != cpu,
-            "SpinLock recursive acquisition on CPU {}",
-            cpu
-        );
-
         // LA MARQUE EST POSEE AVANT LA PRISE, ET C'EST L'ORDRE QUI COMPTE.
         //
         // La poser apres laisserait une fenetre d'une instruction ou le verrou
@@ -216,7 +208,27 @@ impl<T: ?Sized> SpinLock<T> {
         // rend un coeur QUI TOURNE non preemptible : c'est sans danger, il ne
         // detient rien, et cela ne coute qu'un report d'un quantum a une
         // demande ciblee qui le viserait.
-        marque_verrou_simple_pris(cpu);
+        //
+        // BOUCHAUD_FENETRE_MIGRATION_V1 : et la lecture du coeur fait partie
+        // de la marque. Lue puis marquee en deux temps, interruptions
+        // ouvertes, une tache noyau commutee entre les deux marquait le coeur
+        // QU'ELLE QUITTAIT, prenait le verrou ailleurs avec `owner_cpu`
+        // perime, et y restait preemptible verrou tenu -- l'interblocage que
+        // cette marque existe pour empecher.
+        let cpu = x86_64::instructions::interrupts::without_interrupts(|| {
+            let cpu = Self::current_cpu();
+            #[cfg(feature = "banc-fenetre-migration")]
+            crate::platform::pc::banc_fenetre::pause();
+            marque_verrou_simple_pris(cpu);
+            cpu
+        });
+        crate::kernel::scheduler::preempt::note_fenetre(cpu, &crate::kernel::scheduler::preempt::FENETRE_VERROU);
+
+        debug_assert!(
+            self.owner_cpu.load(Ordering::Relaxed) != cpu,
+            "SpinLock recursive acquisition on CPU {}",
+            cpu
+        );
 
         let verrou = self as *const Self as *const () as usize;
         let mut tours = 0u32;
@@ -269,13 +281,16 @@ impl<T: ?Sized> SpinLock<T> {
 
     #[track_caller]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
-        let cpu = Self::current_cpu();
-
-        if self.owner_cpu.load(Ordering::Relaxed) == cpu {
-            return None;
-        }
-
-        marque_verrou_simple_pris(cpu);
+        // BOUCHAUD_FENETRE_MIGRATION_V1 : meme operation unique que `lock`.
+        let cpu = x86_64::instructions::interrupts::without_interrupts(|| {
+            let cpu = Self::current_cpu();
+            if self.owner_cpu.load(Ordering::Relaxed) == cpu {
+                return None;
+            }
+            marque_verrou_simple_pris(cpu);
+            Some(cpu)
+        })?;
+        crate::kernel::scheduler::preempt::note_fenetre(cpu, &crate::kernel::scheduler::preempt::FENETRE_VERROU);
         if self
             .locked
             .compare_exchange(
