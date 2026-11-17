@@ -1046,6 +1046,11 @@ fn boucle() {
                         }
                     }
                 }
+                if ended_drag.is_some() {
+                    if let Some(window) = wins.last() {
+                        journalise_geometrie(window);
+                    }
+                }
                 if let Some((idx, _, _, smx, smy)) = icon_drag.take() {
                     let moved = (mx - smx).abs().max((my - smy).abs());
                     if moved < 6 {
@@ -2310,6 +2315,10 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
             crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
     }
     let mut w = wins.remove(index);
+    // BOUCHAUD_ATELIER_GEOMETRIE_V1 : la fermeture laisse une trace, et le
+    // bouton Demarrer (dont la place depend du nombre de fenetres) se republie.
+    crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_FERMEE titre={}", w.window.title);
+    journalise_demarrer(wins.len());
     if let Some(client) = w.app.client_mut() {
         // BOUCHAUD_GPU_COMPOSITION_V2 : la texture rend la surface AVANT
         // que le client ne disparaisse.
@@ -2403,6 +2412,18 @@ pub(crate) fn journalise_demarrer(n: usize) {
     crate::serial_println!("BOUCHAUD_ATELIER_DEMARRER fenetres={} x={} y={} w={} h={}", n, r.x, r.y, r.w, r.h);
 }
 
+/// BOUCHAUD_ATELIER_GEOMETRIE_V1 : ou est une fenetre et son bouton Fermer,
+/// tels que l'Atelier les calcule, a l'ouverture et a la fin d'un geste
+/// (deplacement, redimensionnement). Un banc les vise avec la souris de QEMU
+/// au lieu de les deviner. Le titre en dernier : il peut contenir des espaces.
+fn journalise_geometrie(w: &Win) {
+    let outer = w.rect();
+    let fermer = crate::gui::windowing::close_button_rect(outer, crate::gui::windowing::WINDOW_CHROME);
+    crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_GEOMETRIE x={} y={} w={} h={} fermer_x={} fermer_y={} titre={}",
+        w.x, w.y, w.w, w.h, fermer.x + fermer.width as i32 / 2, fermer.y + fermer.height as i32 / 2,
+        w.window.title);
+}
+
 fn journalise_menu() {
     for (i, (libelle, _)) in window::MENU.iter().enumerate() {
         let r = window::rect_ligne_menu(i);
@@ -2418,6 +2439,7 @@ fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
     // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
     // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
     crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
+    journalise_geometrie(&fenetre);
     wins.push(fenetre);
     degats.tout();
     journalise_demarrer(wins.len());

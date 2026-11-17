@@ -11,6 +11,7 @@ pub mod file_explorer;
 pub mod journal;
 pub mod rustpad;
 pub mod notes;
+pub(crate) mod releve;
 pub mod insights;
 pub mod system_info;
 pub mod services;

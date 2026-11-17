@@ -12,11 +12,13 @@ pub(crate) fn draw(bx: usize, by: usize, bw: usize, bh: usize) {
     fb::draw_text_prop(bx + 18, by + 12, "Bouchaud Insights", 0xf7c569, 23.0, true);
     fb::draw_text_prop(bx + 18, by + 40, "Etat direct du noyau — mesures disponibles", 0x9db0c9, 12.0, false);
 
-    let (used, free, total) = crate::kernel::heap::stats();
-    let (user_keys, desktop_keys, fullscreen) = crate::gui::window_manager::stats_entree();
-    let services = crate::kernel::process::count();
-    let nodes = crate::fs::ramfs::used_nodes_relaxed();
-    let pci = crate::arch::x86_64::pci::count();
+    // BOUCHAUD_RELEVE_SECONDE_V1 : releve a la seconde, pas a la trame (voir
+    // `releve`). `pci::count()` a lui seul re-enumerait le bus a chaque trame.
+    let r = super::releve::courant();
+    let (used, free, total) = (r.heap_utilise, r.heap_libre, r.heap_total);
+    let (user_keys, desktop_keys, fullscreen) = (r.touches_client, r.touches_bureau,
+        r.invalidations_plein_ecran);
+    let (services, nodes, pci) = (r.processus, r.noeuds_ramfs, r.pci);
     let seconds = crate::kernel::timer::seconds();
 
     let lines = [
