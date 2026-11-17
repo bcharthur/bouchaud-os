@@ -603,6 +603,14 @@ fn boucle() {
     // qu'elle a peint (cellule + infobulle) pour l'effacer en la quittant.
     let mut survol_dock: Option<(crate::gui::atelier::dock::Cible, Rect)> = None;
     crate::gui::atelier::reglages::charge();
+    // BOUCHAUD_ANCRE_MURALE_AU_BUREAU_V1 : l'ancre de l'horloge murale n'etait
+    // posee qu'au premier `clock_gettime` d'un programme. Un bureau sans
+    // navigateur ne l'appelait jamais : le prefixe de CHAQUE ligne du journal
+    // (BOUCHAUD_PREFIXE_SANS_CMOS_V1, qui ne pose pas l'ancre lui-meme) relisait
+    // alors la RTC -- ~30 E/S CMOS par ligne, chacune une sortie de la VM sous
+    // WHPX, quel que soit le fil qui ecrit. On la pose ici, une fois, depuis un
+    // fil ordinaire.
+    let _ = crate::kernel::abi::realtime_ns();
     // BOUCHAUD_DOSSIERS_PERSONNELS_V1 : le dossier personnel de la session et
     // ses sous-dossiers existent avant la premiere fenetre.
     let _ = crate::fs::dossiers::prepare_session();
