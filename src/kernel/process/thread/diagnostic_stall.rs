@@ -664,10 +664,45 @@ pub fn stall_probe_from_timer() {
             (age, STALL_IPI_RIP[cpu].load(Ordering::Acquire), STALL_IPI_USER[cpu].load(Ordering::Acquire))
         };
         let (i0, i1, i2, i3) = (ipi(0), ipi(1), ipi(2), ipi(3));
+        // BOUCHAUD_RELEVE_NMI_V1 : ou s'executent VRAIMENT les autres coeurs.
+        // `nmi=[cN:rip/k|u/if0|if1:mot,mot,...]` ; `cN:-` si pas de reponse.
+        let repondu = releve_nmi_des_autres();
+        let nmi = |cpu: usize| -> (bool, u64, char, u8, [u64; NMI_MOTS_PILE]) {
+            let mut pile = [0u64; NMI_MOTS_PILE];
+            for (i, mot) in pile.iter_mut().enumerate() {
+                *mot = NMI_PILE[cpu][i].load(Ordering::Relaxed);
+            }
+            (
+                repondu & (1 << cpu) != 0,
+                NMI_RIP[cpu].load(Ordering::Relaxed),
+                if NMI_CS[cpu].load(Ordering::Relaxed) & 3 == 0 { 'k' } else { 'u' },
+                ((NMI_FLAGS[cpu].load(Ordering::Relaxed) >> 9) & 1) as u8,
+                pile,
+            )
+        };
+        let (n0, n1, n2, n3) = (nmi(0), nmi(1), nmi(2), nmi(3));
+        struct Nmi((bool, u64, char, u8, [u64; NMI_MOTS_PILE]), usize);
+        impl core::fmt::Display for Nmi {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                let (ok, rip, mode, si, pile) = &self.0;
+                if !ok {
+                    return write!(f, "c{}:-", self.1);
+                }
+                write!(f, "c{}:{:#x}/{}/if{}:", self.1, rip, mode, si)?;
+                let mut premier = true;
+                for mot in pile.iter().filter(|m| **m != 0) {
+                    if !premier { write!(f, ",")?; }
+                    write!(f, "{:#x}", mot)?;
+                    premier = false;
+                }
+                Ok(())
+            }
+        }
         crate::serial_println!(
             "[DIAG-EN-SOUFFRANCE] t={} demande_ms={} fil={} cur=[{},{},{},{}] site=[{} {} {} {}] \
 spin=[{:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{} {:#x}/{}/p{}@{}:{}<{}:{}] \
-ipi=[{}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{}]",
+ipi=[{}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{}] \
+nmi=[{} {} {} {}]",
             now,
             debut_ns.saturating_sub(depuis) / 1_000_000,
             DIAG_FIL_LANCE.load(Ordering::Relaxed) as u8,
@@ -678,6 +713,7 @@ ipi=[{}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{} {}/{:#x}/u{}]",
             s2.0, s2.1, s2.2, s2.3, s2.4, s2.5, s2.6,
             s3.0, s3.1, s3.2, s3.3, s3.4, s3.5, s3.6,
             i0.0, i0.1, i0.2, i1.0, i1.1, i1.2, i2.0, i2.1, i2.2, i3.0, i3.1, i3.2,
+            Nmi(n0, 0), Nmi(n1, 1), Nmi(n2, 2), Nmi(n3, 3),
         );
     }
 }
@@ -1206,6 +1242,95 @@ cle_attente={} echeance={} commute={} courant_du_coeur={}",
                 if occupe >= 0 { courant_du_coeur(occupe as usize) as i64 } else { -1 }
             },
         );
+    }
+}
+
+// BOUCHAUD_RELEVE_NMI_V1 (#283) -- OU S'EXECUTE UN COEUR FIGE, IF=0 COMPRIS.
+//
+// `STALL_IPI_RIP` est perime des qu'un coeur cesse de recevoir des IPI, et
+// `RIP_TIMER` n'existe que pour le BSP. Au gel de main@eb6f115, le coeur 1
+// tenait le verrou `Mm` attendu par le coeur 0 depuis 820 s, et son dernier RIP
+// connu (`vma::protege`) datait de 820 s. La ligne de souffrance demande donc
+// une NMI aux autres coeurs : chacun note ici son cadre interrompu et, s'il
+// etait en mode noyau, les premiers mots de sa pile qui ressemblent a des
+// adresses de l'image du noyau (pas de pointeurs de trame : la pile est
+// balayee, la symbolisation hors ligne trie).
+const NMI_MOTS_PILE: usize = 6;
+const NMI_BALAYAGE: usize = 96;
+/// Bornes plausibles de l'image du noyau (texte et donnees), en dessous de
+/// 64 Mio : le chargeur legacy la projette a son adresse de lien, autour de
+/// 0x200000. Le tas (0x1819...) et l'espace utilisateur (0x4000...) sont hors.
+const NMI_IMAGE_MIN: u64 = 0x20_0000;
+const NMI_IMAGE_MAX: u64 = 0x400_0000;
+static NMI_SEQ: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static NMI_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static NMI_CS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static NMI_FLAGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static NMI_PILE: [[AtomicU64; NMI_MOTS_PILE]; MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; NMI_MOTS_PILE] }; MAX_CPUS];
+
+/// Appelee par le gestionnaire NMI. Aucune impression, aucun verrou.
+pub fn note_nmi(rip: u64, cs: u64, rsp: u64, rflags: u64) {
+    let cpu = local_cpu().min(MAX_CPUS - 1);
+    NMI_RIP[cpu].store(rip, Ordering::Relaxed);
+    NMI_CS[cpu].store(cs, Ordering::Relaxed);
+    NMI_FLAGS[cpu].store(rflags, Ordering::Relaxed);
+    let mut n = 0usize;
+    // CS ring 0 ne suffit pas : dans la fenetre d'entree de `syscall`, RSP
+    // est encore la pile UTILISATEUR. On ne lit que si la page de RSP est de
+    // la RAM connue, dans la projection directe ou vivent les piles noyau
+    // (allouees sur le tas) : jamais une adresse utilisateur, jamais un trou.
+    let decalage = crate::kernel::memory::phys_offset();
+    let pile_noyau = cs & 3 == 0
+        && rsp & 7 == 0
+        && rsp >= decalage
+        && crate::kernel::memory::est_ram_connue((rsp - decalage) & !0xFFF, 0x1000);
+    if pile_noyau {
+        // On s'arrete au bord de sa page pour ne jamais lire au-dela.
+        let fin_page = (rsp | 0xFFF) + 1;
+        let mut adresse = rsp;
+        let mut lus = 0usize;
+        while n < NMI_MOTS_PILE && lus < NMI_BALAYAGE && adresse + 8 <= fin_page {
+            let mot = unsafe { core::ptr::read_volatile(adresse as *const u64) };
+            if (NMI_IMAGE_MIN..NMI_IMAGE_MAX).contains(&mot) && mot != rip {
+                NMI_PILE[cpu][n].store(mot, Ordering::Relaxed);
+                n += 1;
+            }
+            adresse += 8;
+            lus += 1;
+        }
+    }
+    for i in n..NMI_MOTS_PILE {
+        NMI_PILE[cpu][i].store(0, Ordering::Relaxed);
+    }
+    NMI_SEQ[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Demande une NMI aux autres coeurs et attend leurs releves (2 ms au plus).
+/// Rend le masque des coeurs qui ont repondu.
+fn releve_nmi_des_autres() -> u64 {
+    let moi = local_cpu();
+    let en_ligne = crate::arch::x86_64::smp::schedulable_cpus().min(4);
+    let mut avant = [0u64; 4];
+    for c in 0..en_ligne {
+        avant[c] = NMI_SEQ[c].load(Ordering::Acquire);
+    }
+    crate::arch::x86_64::smp::nmi_aux_autres_cpu();
+    let debut = crate::kernel::timer::monotonic_ns();
+    let mut repondu = 0u64;
+    loop {
+        for c in 0..en_ligne {
+            if c != moi && NMI_SEQ[c].load(Ordering::Acquire) != avant[c] {
+                repondu |= 1 << c;
+            }
+        }
+        let attendus = ((1u64 << en_ligne) - 1) & !(1u64 << moi);
+        if repondu & attendus == attendus
+            || crate::kernel::timer::monotonic_ns().saturating_sub(debut) > 2_000_000
+        {
+            return repondu;
+        }
+        core::hint::spin_loop();
     }
 }
 

@@ -33,6 +33,10 @@ pub fn init() {
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         IDT.page_fault.set_handler_fn(page_fault_handler);
+        // BOUCHAUD_RELEVE_NMI_V1 : releve du cadre interrompu, rien d'autre.
+        IDT.non_maskable_interrupt
+            .set_handler_fn(nmi_handler)
+            .set_stack_index(gdt::NMI_IST_INDEX);
         IDT.general_protection_fault.set_handler_fn(general_protection_handler);
         IDT.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         IDT.divide_error.set_handler_fn(divide_error_handler);

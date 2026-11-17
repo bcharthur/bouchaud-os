@@ -94,13 +94,18 @@ pub struct SignalState {
     pub actions: [SigAction; NSIG],
     /// Signaux en attente de livraison (bit n-1 pour le signal n).
     pub pending: u64,
+    /// BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : instant (horloge monotone de
+    /// l'invite) de la derniere levee. Borne le temps pendant lequel un
+    /// signal reste reserve a un fil principal qui calcule en mode
+    /// utilisateur.
+    pub leve_ns: u64,
     // Le masque n'est PAS ici : il appartient au fil (`Task::masque_signaux`,
     // BOUCHAUD_SIGMASQUE_PAR_FIL_V1).
 }
 
 impl Default for SignalState {
     fn default() -> Self {
-        SignalState { actions: [SigAction::default(); NSIG], pending: 0 }
+        SignalState { actions: [SigAction::default(); NSIG], pending: 0, leve_ns: 0 }
     }
 }
 
@@ -118,11 +123,17 @@ impl SignalState {
             }
         }
         self.pending = 0;
+        self.leve_ns = 0;
     }
 
     /// Marque un signal en attente.
     pub fn raise(&mut self, signal: u32) {
         if signal >= 1 && (signal as usize) <= NSIG {
+            // L'age du PLUS ANCIEN signal en attente : une levee repetee ne
+            // repousse pas la reservation (revue de #319).
+            if self.pending == 0 {
+                self.leve_ns = crate::kernel::timer::monotonic_ns();
+            }
             self.pending |= 1 << (signal - 1);
         }
     }
@@ -151,6 +162,9 @@ impl SignalState {
     /// Retire un signal de la file d'attente.
     pub fn clear(&mut self, signal: u32) {
         self.pending &= !(1 << (signal - 1));
+        if self.pending == 0 {
+            self.leve_ns = 0;
+        }
     }
 }
 

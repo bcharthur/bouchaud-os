@@ -333,6 +333,8 @@ unsafe extern "C" fn syscall_entry() {
 #[inline]
 unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     crate::kernel::task::account_kernel_enter();
+    // BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : ce fil passera par `deliver_pending`.
+    crate::kernel::task::entre_appel_systeme();
     // BOUCHAUD_C68 : voir `impute_syscall`. Un appel qui ne rend pas la main
     // (`execve` reussi, `exit`) n'atteint jamais la borne de sortie et reste
     // donc absent de la table -- volontairement.
@@ -376,6 +378,7 @@ unsafe fn execute_syscall(frame: *mut TrapFrame, native: bool) {
     if let Some(courante) = crate::kernel::task::try_current() {
         courante.process.appels.note(syscall_nr);
     }
+    crate::kernel::task::sort_appel_systeme();
     crate::kernel::task::account_kernel_exit();
     crate::kernel::task::retire_current_if_zombie();
 }

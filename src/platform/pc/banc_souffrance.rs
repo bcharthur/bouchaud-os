@@ -32,9 +32,10 @@ fn detenteur() -> ! {
     *garde += 1;
     TENU.store(true, Ordering::Release);
     crate::serial_println!(
-        "BOUCHAUD_BANC_SOUFFRANCE detenteur cpu={} verrou={:#x}",
+        "BOUCHAUD_BANC_SOUFFRANCE detenteur cpu={} verrou={:#x} fonction={:#x}",
         crate::arch::x86_64::smp::cpu_index(),
         &VERROU as *const _ as usize,
+        detenteur as fn() -> ! as usize,
     );
     // Le verrou n'est JAMAIS rendu.
     loop {

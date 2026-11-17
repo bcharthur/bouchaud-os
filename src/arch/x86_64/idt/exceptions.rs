@@ -166,6 +166,19 @@ pub fn releve_contexte_courant(cpu: usize, rsp_connu: Option<u64>) {
     );
 }
 
+/// BOUCHAUD_RELEVE_NMI_V1 (#283) : note ou ce coeur s'executait.
+///
+/// Servie meme interruptions masquees. Lectures et ecritures atomiques
+/// seulement : le code interrompu peut tenir n'importe quel verrou.
+extern "x86-interrupt" fn nmi_handler(stack: InterruptStackFrame) {
+    crate::kernel::task::note_nmi(
+        stack.instruction_pointer.as_u64(),
+        stack.code_segment as u64,
+        stack.stack_pointer.as_u64(),
+        stack.cpu_flags as u64,
+    );
+}
+
 extern "x86-interrupt" fn panic_stop_handler(_stack: InterruptStackFrame) {
     arret_definitif();
 }

@@ -60,7 +60,7 @@ ech = collections.Counter(c for c, _, v in cas if v == "ECHEC")
 ok_runs = len(re.findall(r"^.*SIGCHLD_MULTIFIL_OK\s*$", t, re.M))
 ko_runs = len(re.findall(r"SIGCHLD_MULTIFIL_ECHEC n=\d+", t))
 fatal = bool(re.search(r"KERNEL PANIC|panicked at|DOUBLE FAULT", t))
-for c in ["mono", "principal", "secondaire", "attente", "boucle", "abi_glibc", "exit_group_sommeil", "sortie_normale"]:
+for c in ["mono", "principal", "secondaire", "attente", "boucle", "abi_glibc", "exit_group_sommeil", "sortie_normale", "sommeil"]:
     print(f"SIGCHLD_REPETITION_CAS cas={c} executions={par[c]} echecs={ech[c]}")
 for c, d, v in cas:
     if v == "ECHEC":

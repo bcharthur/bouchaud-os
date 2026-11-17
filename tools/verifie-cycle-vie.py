@@ -128,6 +128,10 @@ def verifie(racine: Path) -> list[str]:
     if not avant(pp, "task.attente_interruptible.range(interruptible)", "task.state.endort()") \
             or not avant(pp, "task.state.endort()", "est_condamnee()"):
         fautes.append(f"{BLOCAGE} : le parking ne relit plus la condamnation apres sa publication")
+    # BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : `sleep_jusqua_signalable` dort jusqu'a
+    # `reveil`, l'echeance de l'appel BORNEE par une eventuelle reservation
+    # laissee au fil principal (jamais au-dela de `deadline`) ; il reste
+    # interruptible et la boucle juge toujours l'echeance de l'appel.
     # BOUCHAUD_SOMMEIL_SIGNAL_V1 : le corps du sommeil vit dans `dort_jusqua`
     # (une echeance fixe, pour que `nanosleep` se rendorme jusqu'a la MEME
     # echeance apres un reveil sans effet) ; `dort` et
@@ -135,7 +139,9 @@ def verifie(racine: Path) -> list[str]:
     # BOUCHAUD_SOMMEIL_NS_V1, a `sleep_ns_signalable`) y passent, interruptibles.
     if "dort(ticks, true)" not in corps(src[SOMMEIL], "sleep_ticks") \
             or "dort_jusqua(" not in corps(src[SOMMEIL], "dort") \
-            or "dort_jusqua(deadline, ticks, true)" not in corps(src[SOMMEIL], "sleep_jusqua_signalable") \
+            or "dort_jusqua(reveil, ticks, true)" not in corps(src[SOMMEIL], "sleep_jusqua_signalable") \
+            or "let reveil = borne_par_reservation(Some(deadline)).unwrap_or(deadline);" \
+                not in corps(src[SOMMEIL], "sleep_jusqua_signalable") \
             or "sleep_jusqua_signalable(" not in corps(src[SOMMEIL], "sleep_ticks_signalable") \
             or "sleep_jusqua_signalable(" not in corps(src[SOMMEIL], "sleep_ns_signalable") \
             or "publie_parking(interruptible)" not in corps(src[SOMMEIL], "dort_jusqua"):

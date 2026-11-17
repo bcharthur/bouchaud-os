@@ -558,6 +558,18 @@ pub const PANIC_STOP_VECTOR: u8 = 0xF3;
 /// Un seul envoi, en diffusion. Pas de boucle d'attente, pas d'accuse : un CPU
 /// qui ne repond pas est deja perdu, et l'attendre empecherait la sortie de
 /// panique de partir.
+/// BOUCHAUD_RELEVE_NMI_V1 (#283) : une NMI a tous les autres coeurs.
+///
+/// Mode de livraison NMI (bits 8-10 = 100b) : le vecteur est ignore, et la
+/// NMI est servie MEME interruptions masquees. C'est la seule facon de savoir
+/// ou s'execute un coeur fige en mode noyau, IF=0, qui ne recoit plus aucun
+/// IPI (gel de main@eb6f115 : coeurs 1 a 3 sans IPI depuis 820 s). Le
+/// gestionnaire ne fait que noter son cadre (`note_nmi`) : aucun verrou, aucune
+/// allocation, aucune impression.
+pub fn nmi_aux_autres_cpu() {
+    unsafe { send_all_excluding_self(4 << 8) };
+}
+
 pub fn arrete_les_autres_cpu() {
     unsafe { send_all_excluding_self(PANIC_STOP_VECTOR as u32) };
 }
