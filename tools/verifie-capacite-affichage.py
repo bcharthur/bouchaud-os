@@ -7,7 +7,7 @@ origine, et `bo_display_present` juge avant de lire.
   2. la capacite donnee au compositeur ne porte ni DUP ni TRANSFER ;
   3. `present` exige DISPLAY_PRESENT sur un objet Display, puis READ sur la
      region, puis `contrat::valide`, et ce dans cet ordre, AVANT la premiere
-     lecture de la region (`region.read`) ;
+     lecture de la region (`region.avec_octets`, la pose sous le verrou) ;
   4. le bureau noyau DEMANDE l'ecran (`bureau_noyau_demarre`) avant de lancer
      son fil, et NE LE LANCE PAS si la demande est refusee ; la demande publie
      sa prise puis lit celle du compositeur ring 3 (bureau configure ou ecran
@@ -59,7 +59,7 @@ def verifie(racine: Path) -> list:
         fautes.append(f"{AFF} : la capacite du compositeur peut se dupliquer ou se transferer")
     corps = aff[aff.find("pub fn present("):]
     jalons = ["Rights::DISPLAY_PRESENT, ObjectKind::Display", "Rights::READ, ObjectKind::SharedRegion",
-              "contrat::valide(", "region.read("]
+              "contrat::valide(", "region.avec_octets("]
     pos = [corps.find(j) for j in jalons]
     if any(p < 0 for p in pos) or pos != sorted(pos):
         fautes.append(f"{AFF} : present ne verifie plus capacite, droit de lecture et bornes AVANT de lire")
@@ -78,7 +78,7 @@ def verifie(racine: Path) -> list:
     pres = aff[aff.find("pub fn present("):]
     prise = pres.find("ECRAN_AU_COMPOSITEUR.store(true, Ordering::SeqCst)")
     relit = pres.find("BUREAU_NOYAU.load(Ordering::SeqCst)", max(prise, 0))
-    pose = pres.find("region.read(")
+    pose = pres.find("region.avec_octets(")
     if prise < 0 or relit < 0 or not (prise < relit < pose):
         fautes.append(f"{AFF} : present ne relit plus la prise du bureau noyau apres avoir publie la sienne")
     lance = aff[aff.find("pub fn lance_compositeur("):]

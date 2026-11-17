@@ -98,3 +98,16 @@ fn empreinte_c(px: &[u32]) -> u64 {
     }
     h & 0x3fffffffffffffff
 }
+
+#[test]
+fn empreinte_par_lignes_egale_empreinte_globale() {
+    // `present` relit l'ecran ligne a ligne (`empreinte_pixel`) : la valeur
+    // rendue au client doit rester celle de `empreinte` et du service C.
+    let px: Vec<u32> = (0..644u32 * 7).map(|i| i.wrapping_mul(2654435761) | 0xff00_0000).collect();
+    let mut h = EMPREINTE_DEPART;
+    for ligne in px.chunks(644) {
+        h = ligne.iter().fold(h, |h, &p| empreinte_pixel(h, p));
+    }
+    assert_eq!(empreinte_fin(h), empreinte(px.iter().copied()));
+    assert_eq!(empreinte_fin(h), empreinte_c(&px));
+}

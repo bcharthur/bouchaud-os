@@ -364,36 +364,52 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
         return Err(refuse(Error::WouldBlock, "bureau-noyau"));
     }
     // 5. Pose, ligne a ligne, puis presentation du seul rectangle.
-    for r in 0..d.h {
-        let ligne = region.read(d.decalage_ligne(r), d.l as usize * 4)?;
-        let dst = crate::drivers::gfx::ligne_mut(d.dest_x as usize, (d.dest_y + r) as usize, d.l as usize);
-        for (i, px) in dst.iter_mut().enumerate() {
-            let o = 4 * i;
-            *px = u32::from_le_bytes([ligne[o], ligne[o + 1], ligne[o + 2], ligne[o + 3]]) & 0x00ff_ffff;
+    let t_pose = crate::kernel::timer::monotonic_ns();
+    // Le verrou de la region est pris UNE fois, sans allocation par ligne
+    // (avant : un `read` -> Vec par ligne). `contrat::valide` a deja borne
+    // chaque ligne dans la region ; le `get` garde un refus plutot qu'une
+    // panique si la region changeait de taille (elle ne le fait pas).
+    let ligne_octets = d.l as usize * 4;
+    region.avec_octets(|octets| -> Result<()> {
+        for r in 0..d.h {
+            let o = d.decalage_ligne(r);
+            let ligne = octets.get(o..o + ligne_octets).ok_or(Error::InvalidArgument)?;
+            let dst = crate::drivers::gfx::ligne_mut(d.dest_x as usize, (d.dest_y + r) as usize, d.l as usize);
+            for (px, src) in dst.iter_mut().zip(ligne.chunks_exact(4)) {
+                *px = u32::from_le_bytes([src[0], src[1], src[2], src[3]]) & 0x00ff_ffff;
+            }
         }
-    }
+        Ok(())
+    })?;
+    let t_flush = crate::kernel::timer::monotonic_ns();
     // Presentation JUGEE : un refus du peripherique (transfert ou flush virtio,
     // LFB absent...) est rendu au client, jamais une empreinte du tampon arriere.
     if let Err(raison) = crate::drivers::gfx::present_rect_verifie(
         d.dest_x as usize, d.dest_y as usize, d.l as usize, d.h as usize) {
         return Err(refuse(Error::DeviceError, raison));
     }
+    let t_relecture = crate::kernel::timer::monotonic_ns();
     // 6. Relecture du tampon AFFICHE (pas du tampon arriere) : l'empreinte
     // rendue au client est celle de ce que l'ecran montre.
-    let mut illisible = false;
-    let e = contrat::empreinte((0..d.h).flat_map(|r| (0..d.l).map(move |c| (c, r))).map(|(c, r)| {
-        crate::drivers::gfx::pixel_affiche((d.dest_x + c) as usize, (d.dest_y + r) as usize).unwrap_or_else(|| {
-            illisible = true;
-            0
-        })
-    }));
-    if illisible {
-        return Err(refuse(Error::DeviceError, "relecture"));
+    // Ligne par ligne (`ligne_affichee`), dans le meme ordre de pixels que
+    // l'empreinte l'a toujours ete : la valeur rendue ne change pas.
+    let mut ligne = alloc::vec![0u32; d.l as usize];
+    let mut h = contrat::EMPREINTE_DEPART;
+    for r in 0..d.h {
+        if !crate::drivers::gfx::ligne_affichee(d.dest_x as usize, (d.dest_y + r) as usize, &mut ligne) {
+            return Err(refuse(Error::DeviceError, "relecture"));
+        }
+        h = ligne.iter().fold(h, |h, &p| contrat::empreinte_pixel(h, p));
     }
+    let e = contrat::empreinte_fin(h);
+    let t_fin = crate::kernel::timer::monotonic_ns();
     let n = PRESENTATIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    // Les trois phases, chronometrees : pose (region -> tampon arriere),
+    // transfert (tampon arriere -> ecran), relecture (empreinte).
     crate::serial_println!(
-        "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={}",
-        n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed)
+        "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={} pose_us={} transfert_us={} relecture_us={}",
+        n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed),
+        (t_flush - t_pose) / 1000, (t_relecture - t_flush) / 1000, (t_fin - t_relecture) / 1000
     );
     Ok(e)
 }
