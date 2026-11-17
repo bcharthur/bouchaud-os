@@ -99,9 +99,23 @@ serveur ne manipulerait que des **identifiants de surface** et des
    i32, Unicode 0x110000, appui 2, molette nulle, capacités croisées, tampon
    noyau). Non-régression : bras B0–B4 au pixel inchangés (curseur et cases de
    fermeture n'apparaissent qu'après la première entrée réelle).
-   Mesure TCG : un pas de glisser coûte 90–135 ms (`deplacement_us`), dû aux
-   écritures ligne à ligne dans la région partagée (≈ 4 appels système par
-   ligne) — c'est le chantier suivant (écriture rectangulaire).
+   **Coût d'un pas de glisser (`BOUCHAUD_SHM_RECT_V1`, ABI 1.6), même banc,
+   même machine, TCG, 6 pas de (25,15)** :
+
+   | | moyen | pire | appels région / pas | présentation / pas |
+   |---|---|---|---|---|
+   | avant | 90,6 ms | 111,8 ms | 3 326 | ≈ 64 ms |
+   | `bo_shm_fill_rect` seul | 76,8 ms | 108,8 ms | 60 | 64,2 ms |
+   | + `present` sans allocation, relecture par ligne | 29,7 ms | 35,8 ms | 60 | 17,7 ms |
+   | + enveloppe ancien∪nouveau cadre | **13,6 ms** | **22,0 ms** | 32 | 8,1 ms |
+
+   Les trois leviers : fond, bordures et barres en rectangles pleins remplis
+   par le noyau (au lieu d'un `bo_shm_write` par segment et par ligne) ; la
+   pose de `present` sous un seul verrou, sans `Vec` par ligne, et la
+   relecture d'empreinte par ligne (même valeur, test hôte) ; une seule
+   recomposition de l'enveloppe des deux cadres. Les captures B0–B4 restent
+   identiques au pixel. Effet de bord mesuré au bras A/B (animation) :
+   présentation par trame 908 → 497 µs.
    Pas encore : routage selon `windowd`, curseur matériel, USB HID sous ce
    chemin, DOOM et Ladybird sous `composited`.
 4. **Applications natives** (Fichiers, Notes, Terminal, Calculatrice) en

@@ -269,9 +269,9 @@ class Banc:
             m = self.attend(r"\[COMPOSITED\] deplacement_us=(\d+)", 5, avant)
             self.deplacement_us = int(m.group(1)) if m else None
             g = self.attend(r"COMPOSITED_GLISSER_MESURE pas=(\d+) moyen_us=(\d+) max_us=(\d+) "
-                            r"appels_region_par_pas=(\d+)", 5, avant)
+                            r"appels_region_par_pas=(\d+) copie_us=(\d+) presentation_us=(\d+)", 5, avant)
             if g:
-                self.glisser = dict(zip(("pas", "moyen_us", "max_us", "appels_par_pas"),
+                self.glisser = dict(zip(("pas", "moyen_us", "max_us", "appels_par_pas", "copie_us", "presentation_us"),
                                         (int(v) for v in g.groups())))
 
         # 3. Clavier : seule l'application active recoit la frappe.
@@ -327,7 +327,8 @@ class Banc:
             # Mesure, pas un seuil : le banc juge les comportements, le chiffre
             # sert l'A/B (avant/apres) sur la meme machine.
             print(f"BANC_BUREAU_ENTREES_GLISSER pas={g['pas']} moyen_us={g['moyen_us']} "
-                  f"max_us={g['max_us']} appels_region_par_pas={g['appels_par_pas']}")
+                  f"max_us={g['max_us']} appels_region_par_pas={g['appels_par_pas']} "
+                  f"copie_us={g['copie_us']} presentation_us={g['presentation_us']}")
         if self.echecs:
             print("BANC_BUREAU_ENTREES_ECHEC " + " | ".join(self.echecs))
             return 1
