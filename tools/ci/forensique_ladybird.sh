@@ -38,6 +38,16 @@ sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$JOURNAL" |
 # main@eb6f115 : la ligne coupee a fait perdre l'etat des coeurs 2 et 3).
 echo "-- noyau fige : dernieres lignes [DIAG-EN-SOUFFRANCE], entieres --"
 sed -E 's/\x1b\[[0-9;]*m//g' "$JOURNAL" | tr -d '\r' | grep -aF '[DIAG-EN-SOUFFRANCE]' | tail -n 3 || true
+# BOUCHAUD_RAPPORT_GEL_V1 : qui attend quoi, qui le tient, ou chaque coeur
+# s'execute (RIP de la NMI), symbolise avec le noyau du job s'il est la.
+echo "-- rapport de gel (tools/ci/reliability/rapport_gel.py) --"
+RACINE_DEPOT=$(cd "$(dirname "$0")/../.." && pwd)
+ELF_NOYAU=${ELF_NOYAU:-$RACINE_DEPOT/target/x86_64-bouchaud_os/debug/bouchaud-os}
+if [ -f "$ELF_NOYAU" ]; then
+  python3 "$RACINE_DEPOT/tools/ci/reliability/rapport_gel.py" "$JOURNAL" "$ELF_NOYAU" | cut -c1-1200 || true
+else
+  python3 "$RACINE_DEPOT/tools/ci/reliability/rapport_gel.py" "$JOURNAL" | cut -c1-1200 || true
+fi
 echo "-- 60 dernieres lignes du journal, hors releves memoire periodiques et releve des fils --"
 sed -E 's/\x1b\[[0-9;]*m//g' "$JOURNAL" | tr -d '\r' | grep -avE 'MM-NG6|\[FIL-FORENSIQUE\]|\[SCHED-TACHE\]' | tail -n 60 | cut -c1-260 || true
 echo "== FORENSIQUE FIN =="

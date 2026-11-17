@@ -20,6 +20,11 @@ use crate::arch::x86_64::smp::MAX_CPUS;
 use crate::kernel::dmesg;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
+/// BOUCHAUD_RELEVE_NMI_V1 : une NMI peut tomber dans la fenetre de
+/// `syscall_entry` ou CS est deja ring 0 mais RSP encore la pile UTILISATEUR
+/// (avant `mov rsp, gs:[0]`, apres `pop rsp`). Sans IST, le processeur et le
+/// gestionnaire y empileraient leur cadre. Une pile dediee par coeur.
+pub const NMI_IST_INDEX: u16 = 1;
 const STACK_SIZE: usize = 4096 * 5;
 
 #[derive(Clone, Copy)]
@@ -61,6 +66,7 @@ fn access() -> AccessGuard {
 
 fn build_cpu() -> CpuGdt {
     let df_stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
+    let nmi_stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
     let ring0_stack = Box::leak(vec![0u8; STACK_SIZE].into_boxed_slice());
     let tss_mut = Box::leak(Box::new(TaskStateSegment::new()));
     let tss_ptr = tss_mut as *mut TaskStateSegment;
@@ -68,6 +74,8 @@ fn build_cpu() -> CpuGdt {
     let df_start = VirtAddr::from_ptr(df_stack.as_ptr());
     tss_mut.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] =
         df_start + STACK_SIZE as u64;
+    tss_mut.interrupt_stack_table[NMI_IST_INDEX as usize] =
+        VirtAddr::from_ptr(nmi_stack.as_ptr()) + STACK_SIZE as u64;
     let ring0 = VirtAddr::from_ptr(ring0_stack.as_ptr());
     tss_mut.privilege_stack_table[0] = ring0 + STACK_SIZE as u64;
 

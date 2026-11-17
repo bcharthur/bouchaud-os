@@ -14,7 +14,11 @@
 #      proprietaire est L'AUTRE coeur, et dont le site est
 #      `banc_souffrance.rs:<ligne de l'appel lock()>`, et le site de prise
 #      du detenteur `<banc_souffrance.rs:<ligne>` ;
-#   3. le champ `ipi=[...]` present pour les quatre emplacements.
+#   3. le champ `ipi=[...]` present pour les quatre emplacements ;
+#   4. le champ `nmi=[...]` : le coeur detenteur a repondu a la NMI, en mode
+#      noyau, avec un RIP dans la fonction `detenteur` (BOUCHAUD_RELEVE_NMI_V1) ;
+#   5. vu de QEMU (releve_cpus_qemu.py), un coeur a un RIP noyau IMMOBILE dans
+#      `detenteur` a une seconde d'intervalle (BOUCHAUD_RELEVE_CPUS_QEMU_V1).
 # BOOTIMAGE_NORMAL (temoin negatif) : le meme demarrage sans le drapeau
 # n'emet AUCUNE ligne de souffrance en 60 s.
 set -uo pipefail
@@ -23,6 +27,16 @@ TEMOIN=${1:?usage: run_souffrance_verrou.sh BOOTIMAGE_TEMOIN BOOTIMAGE_NORMAL}
 NORMAL=${2:?usage: run_souffrance_verrou.sh BOOTIMAGE_TEMOIN BOOTIMAGE_NORMAL}
 OUT=${OUT:-souffrance-verrou}
 mkdir -p "$OUT"
+
+# Les deux images doivent etre ce qu'on croit qu'elles sont. Le 14/11, une
+# image « normale » construite par `cargo bootimage` juste apres le temoin
+# contenait encore le temoin : son « blocage au demarrage » a ete pris, a tort,
+# pour une regression. On le verifie donc sur le binaire lui-meme.
+grep -aqF 'BOUCHAUD_BANC_SOUFFRANCE armement' "$TEMOIN" \
+  || { echo "SOUFFRANCE_VERROU_ECHEC raison=image_temoin_sans_temoin"; exit 1; }
+if grep -aqF 'BOUCHAUD_BANC_SOUFFRANCE armement' "$NORMAL"; then
+  echo "SOUFFRANCE_VERROU_ECHEC raison=image_normale_contient_le_temoin"; exit 1
+fi
 
 LIGNE=$(grep -n 'let (_ligne_attente, garde) = (line!(), VERROU.lock());' src/platform/pc/banc_souffrance.rs | cut -d: -f1)
 LIGNE_DETENTEUR=$(grep -n 'let (_ligne_detenteur, mut garde) = (line!(), VERROU.lock());' src/platform/pc/banc_souffrance.rs | cut -d: -f1)
@@ -37,18 +51,62 @@ joue() {  # joue IMAGE JOURNAL SECONDES
 }
 
 echecs=0
+echecs_qemu=0
 echec() { echo "  ECHEC   $1"; echecs=$((echecs + 1)); }
 ok() { echo "  ok      $1"; }
 
-joue "$TEMOIN" "$OUT/temoin.log" 150
+# Le temoin tourne avec un moniteur : une fois la ligne de souffrance sortie,
+# releve_cpus_qemu.py lit ce que QEMU voit de chaque vCPU
+# (BOUCHAUD_RELEVE_CPUS_QEMU_V1), comme le font les bancs Ladybird sur gel.
+MONITEUR="$OUT/moniteur.sock"
+rm -f "$MONITEUR"
+qemu-system-x86_64 \
+  -drive format=raw,file="$TEMOIN",snapshot=on \
+  -m 2048 -smp 2 -display none -no-reboot \
+  -monitor "unix:$MONITEUR,server,nowait" \
+  -serial file:"$OUT/temoin.log" >/dev/null 2>&1 &
+QPID=$!
+for _ in $(seq 1 150); do
+  kill -0 "$QPID" 2>/dev/null || break
+  if grep -aqF '[DIAG-EN-SOUFFRANCE]' "$OUT/temoin.log" 2>/dev/null; then break; fi
+  sleep 1
+done
+python3 tools/ci/releve_cpus_qemu.py "$MONITEUR" "$OUT/temoin.log.cpus" >/dev/null || true
+kill -TERM "$QPID" 2>/dev/null || true
+sleep 1
+kill -KILL "$QPID" 2>/dev/null || true
+wait "$QPID" 2>/dev/null || true
 sed -E 's/\x1b\[[0-9;]*m//g' "$OUT/temoin.log" > "$OUT/temoin.txt"
+# rapport_gel.py lit les registres a cote du journal qu'on lui donne.
+cp "$OUT/temoin.log.cpus" "$OUT/temoin.txt.cpus" 2>/dev/null || true
+# Vu de QEMU, le detenteur fige doit avoir un RIP noyau IMMOBILE dans
+# `detenteur` a une seconde d'intervalle.
+python3 - "$OUT/temoin.log.cpus" "$(sed -nE 's/.*BOUCHAUD_BANC_SOUFFRANCE detenteur cpu=[0-9]+ verrou=0x[0-9a-f]+ fonction=(0x[0-9a-f]+).*/\1/p' "$OUT/temoin.txt" | sed -n 1p)" <<'PY' || echecs_qemu=1
+import re, sys
+try:
+    lignes = open(sys.argv[1]).read()
+except OSError:
+    print("  ECHEC   aucun registre QEMU releve"); sys.exit(1)
+fonction = int(sys.argv[2] or "0", 16)
+par = {}
+for m in re.finditer(r"ech=(\d) cpu=(\d+) rip=(0x[0-9a-f]+) cpl=(\d)", lignes):
+    par.setdefault(int(m.group(2)), {})[int(m.group(1))] = (int(m.group(3), 16), int(m.group(4)))
+for cpu, e in sorted(par.items()):
+    if 1 in e and 2 in e and e[1] == e[2] and e[1][1] == 0 and fonction <= e[1][0] < fonction + 0x400:
+        print(f"  ok      QEMU : le coeur {cpu} est immobile en {e[1][0]:#x}, dans detenteur, mode noyau")
+        sys.exit(0)
+print(f"  ECHEC   QEMU : aucun coeur immobile dans detenteur ({fonction:#x}) : {par}")
+sys.exit(1)
+PY
 grep -aF "BOUCHAUD_BANC_SOUFFRANCE armement" "$OUT/temoin.txt" >/dev/null \
   && ok "temoin arme" || echec "le temoin n'a pas ete arme"
-python3 - "$OUT/temoin.txt" "$LIGNE" "$LIGNE_DETENTEUR" <<'PY' || echecs=$((echecs + 1))
+FONCTION=$(sed -nE 's/.*BOUCHAUD_BANC_SOUFFRANCE detenteur cpu=[0-9]+ verrou=0x[0-9a-f]+ fonction=(0x[0-9a-f]+).*/\1/p' "$OUT/temoin.txt" | sed -n 1p)
+python3 - "$OUT/temoin.txt" "$LIGNE" "$LIGNE_DETENTEUR" "${FONCTION:-0x0}" <<'PY' || echecs=$((echecs + 1))
 import re, sys
 texte = open(sys.argv[1], errors="replace").read()
 ligne = sys.argv[2]
 ligne_detenteur = sys.argv[3]
+fonction = int(sys.argv[4], 16)
 lignes = [l for l in texte.splitlines() if "[DIAG-EN-SOUFFRANCE]" in l]
 if not lignes:
     print("  ECHEC   aucune ligne [DIAG-EN-SOUFFRANCE]")
@@ -90,6 +148,24 @@ if fautes:
         print("  ECHEC   " + f)
     sys.exit(1)
 print(f"  ok      coeur {cpu} attend le verrou {v.group(1)} tenu par le coeur {proprio}, site {fichier}:{no}, pris en {v.group(6)}:{v.group(7)}")
+# BOUCHAUD_RELEVE_NMI_V1 : le detenteur fige doit avoir repondu a la NMI, en
+# mode noyau, avec un RIP DANS sa boucle (`detenteur`, quelques centaines
+# d'octets au plus) -- pas un RIP perime du dernier IPI.
+n = re.search(r"nmi=\[([^\]]*)\]", derniere)
+if not n:
+    print("  ECHEC   champ nmi= absent")
+    sys.exit(1)
+releves = dict(x.split(":", 1) for x in n.group(1).split())
+r = releves.get(f"c{proprio}", "-")
+m = re.match(r"(0x[0-9a-f]+)/([ku])/if([01])", r)
+if not m:
+    print(f"  ECHEC   le coeur detenteur {proprio} n'a pas repondu a la NMI ({r})")
+    sys.exit(1)
+rip = int(m.group(1), 16)
+if fonction == 0 or not (fonction <= rip < fonction + 0x400) or m.group(2) != "k":
+    print(f"  ECHEC   NMI du detenteur : rip={rip:#x} mode={m.group(2)}, attendu dans detenteur@{fonction:#x} en mode noyau")
+    sys.exit(1)
+print(f"  ok      NMI : le coeur {proprio} s'execute en {rip:#x}, dans detenteur ({fonction:#x}), mode noyau, if{m.group(3)}")
 PY
 
 joue "$NORMAL" "$OUT/normal.log" 60
@@ -101,6 +177,7 @@ fi
 grep -aq "SCHED-RESUME" "$OUT/normal.log" && ok "noyau normal vivant (resume periodique)" \
   || echec "noyau normal : aucun resume periodique en 60 s"
 
+echecs=$((echecs + echecs_qemu))
 if (( echecs > 0 )); then
   echo "SOUFFRANCE_VERROU_ECHEC echecs=$echecs"
   exit 1
