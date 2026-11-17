@@ -86,6 +86,18 @@ class PolitiqueNiveaux(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("P10 construit APRES", sortie)
 
+    def test_branche_classee_sur_le_seul_dernier_push(self):
+        self.modifie("ci.yml", "--base 0000000000000000000000000000000000000000 --head", "--base \"$BASE_SHA\" --head")
+        code, sortie = self.politique()
+        self.assertNotEqual(code, 0)
+        self.assertIn("delta cumule", sortie)
+
+    def test_tests_hote_sans_noyau_exige(self):
+        self.modifie("ci.yml", "          BOUCHAUD_EXIGE_NOYAU: '1'\n", "          BOUCHAUD_EXIGE_NOYAU: '0'\n")
+        code, sortie = self.politique()
+        self.assertNotEqual(code, 0)
+        self.assertIn("BOUCHAUD_EXIGE_NOYAU", sortie)
+
     def test_temoins_des_declencheurs(self):
         r = subprocess.run([sys.executable, str(RACINE / "tools" / "ci" / "declencheurs.py")],
                            capture_output=True, text=True, timeout=30)

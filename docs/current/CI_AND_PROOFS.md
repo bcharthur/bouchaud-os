@@ -49,6 +49,10 @@ Les quatre checks requis sont `fast-gate`, `integration-gate`, `reliability-gate
 
 > **`main` n'est pas protégé sur GitHub** : `tools/verifie-protection-main.py` le constate. Ces quatre checks ne sont exigés que par la procédure. Pour les rendre exécutoires, un administrateur lance `tools/ci/configure-protection.sh`, qui pose aussi `strict: true` (branche à jour avec `main`).
 
+Une **PR ouverte depuis un fork** ne reçoit pas `fast-gate`, puisque le push a lieu dans le fork. Elle reste donc bloquée : c'est un refus, pas un faux vert. Le dépôt n'a qu'un contributeur. Pour qu'une telle PR soit testée, sa branche est poussée dans ce dépôt, comme le fait déjà la production Ladybird, qui refuse les forks.
+
+CI Fast classe **le delta cumulé de la branche** depuis sa bifurcation de `main`, jamais le seul dernier push (`BOUCHAUD_CI_DELTA_CUMULE_V1`). Sinon, un push documentaire après un push noyau rouge sauterait les contrôles du noyau sur la tête de la PR.
+
 ### Fusionner
 
 1. La branche contient le dernier `main`. Sinon : fusionner `main` et pousser. A retourne alors sur l'arbre fusionné, et B sur la PR.
@@ -66,7 +70,7 @@ Jobs parallèles, chacun décidé par `classify-changes` :
 |---|---|
 | `kernel / compile + invariants` | P10 avec et sans VIRGL ; noyau par défaut **en dernier**, car le garde de profondeur de pile lit ce binaire ; noyau UEFI, sonde ; 216 garde-fous d'architecture ; budgets ; frontend UI |
 | `kernel / clippy + variantes` | clippy (lints `deny`), jeton BRDP armé et désarmé, compositeur ring 3 freestanding, SDK natif et contrat d'ABI |
-| `host / tests + preuves de mise a jour` | `run_host_tests.sh` (tests Rust `test_*.rs`, unittest de `tools/ci/reliability`), preuves A/B, anti-retour et OTA, Ed25519 contre OpenSSL/libsodium, agent OTA et TLS strict |
+| `host / tests + preuves de mise a jour` | noyau construit, puis `run_host_tests.sh` avec `BOUCHAUD_EXIGE_NOYAU=1` : la symbolisation échoue au lieu de se sauter (tests Rust `test_*.rs`, unittest de `tools/ci/reliability`), preuves A/B, anti-retour et OTA, Ed25519 contre OpenSSL/libsodium, agent OTA et TLS strict |
 | `browser / engine tests` | QuickJS, tests du moteur, jalons sans régression |
 | `windows / scripts` | exécution des scripts PowerShell de sélection et Trigkey |
 | `ci / policy` | `check_pipeline_policy.py` |

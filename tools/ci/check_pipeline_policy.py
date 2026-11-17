@@ -280,6 +280,20 @@ for chemin in sorted(root.glob("*.yml")):
         errors.append(f"{chemin.name}: pull_request ET push de branches de travail {travail} "
                       "(le meme arbre teste deux fois)")
 
+# E. CI Fast classe le delta CUMULE d'une branche (base 0...0 -> merge-base),
+#    jamais le seul dernier push : sinon un push documentaire saute les
+#    controles noyau sur la tete de la PR (BOUCHAUD_CI_DELTA_CUMULE_V1).
+_classe = "\n".join(e.get("run", "") for e in yaml.safe_load(fast)["jobs"]["changes"]["steps"])
+if "refs/heads/main" not in _classe or "--base 0000000000000000000000000000000000000000" not in _classe:
+    errors.append("ci.yml: une branche de travail doit etre classee sur son delta cumule (base 0...0)")
+# F. Les tests hote de CI Fast ont un noyau construit et l'exigent.
+_hote = yaml.safe_load(fast)["jobs"]["host-tests"]["steps"]
+_noms_h = [e.get("name", "") for e in _hote]
+_suite = next((e for e in _hote if e.get("name") == "Suites de tests hote"), {})
+if "cargo build" not in "\n".join(e.get("run", "") for e in _hote[:_noms_h.index("Suites de tests hote")] if _suite) \
+        or (_suite.get("env") or {}).get("BOUCHAUD_EXIGE_NOYAU") != "1":
+    errors.append("ci.yml: tests hote sans noyau construit ou sans BOUCHAUD_EXIGE_NOYAU=1 (symbolisation sautee)")
+
 if "ci:integration" in integration:
     errors.append("integration.yml: libelle ci:integration -- une PR doit executer les suites sans libelle")
 if "INTEGRATION_GATE_DOCS_ONLY" not in integration:

@@ -42,11 +42,21 @@ jobs:
       - name: Classer les changements
         id: classify
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
         run: |
+          # BOUCHAUD_CI_DELTA_CUMULE_V1 : sur une branche de travail, le verdict
+          # de CI Fast est celui de la TETE de la PR. Il classe donc TOUT le
+          # delta de la branche depuis sa bifurcation de main (base 0...0 ->
+          # merge-base, tools/ci/classify_changes.py), jamais le seul dernier
+          # push : un push documentaire apres un push noyau rouge sautait les
+          # controles noyau et rendait fast-gate vert sur la tete (revue #334).
+          # Sur main, chaque SHA fusionne est classe contre le precedent.
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then
             python3 tools/ci/classify_changes.py --head "$HEAD_SHA" --all
+          elif [ "$REF" != refs/heads/main ]; then
+            python3 tools/ci/classify_changes.py --base 0000000000000000000000000000000000000000 --head "$HEAD_SHA"
           else
             python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$HEAD_SHA"
           fi
@@ -228,7 +238,14 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version
+      # Les tests de symbolisation lisent l'ELF du noyau : sans lui ils se
+      # SAUTAIENT (revue #334). Le noyau est construit ici, et
+      # BOUCHAUD_EXIGE_NOYAU transforme son absence en echec.
+      - name: Noyau pour les tests de symbolisation
+        run: cargo build
       - name: Suites de tests hote
+        env:
+          BOUCHAUD_EXIGE_NOYAU: '1'
         run: tools/ci/run_host_tests.sh
       # BOUCHAUD_OTA_ANNEAU3_V1 : l'agent OTA de l'anneau 3 (Rust std, musl),
       # ses tests, puis son TLS STRICT -- la pile du noyau sur un socket Linux --
