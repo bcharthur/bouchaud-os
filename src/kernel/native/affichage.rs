@@ -312,6 +312,14 @@ pub fn info(args: [u64; 6]) -> Result<u64> {
     Ok((l << 32) | h)
 }
 
+const JOURNAL_COMPLET: u64 = 64;
+const JOURNAL_PAS: u64 = 256;
+static JOURNALISEES: AtomicU64 = AtomicU64::new(0);
+static CUMUL_POSE_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_TRANSFERT_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_RELECTURE_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_JOURNAL_NS: AtomicU64 = AtomicU64::new(0);
+
 pub fn present(args: [u64; 6]) -> Result<u64> {
     let table = handle::current_table();
     // 1. La capacite : bon type ET bon droit, sinon rien n'est lu.
@@ -406,10 +414,29 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
     let n = PRESENTATIONS.fetch_add(1, Ordering::Relaxed) + 1;
     // Les trois phases, chronometrees : pose (region -> tampon arriere),
     // transfert (tampon arriere -> ecran), relecture (empreinte).
-    crate::serial_println!(
-        "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={} pose_us={} transfert_us={} relecture_us={}",
-        n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed),
-        (t_flush - t_pose) / 1000, (t_relecture - t_flush) / 1000, (t_fin - t_relecture) / 1000
-    );
+    let (pose, transfert, relecture) = (t_flush - t_pose, t_relecture - t_flush, t_fin - t_relecture);
+    CUMUL_POSE_NS.fetch_add(pose, Ordering::Relaxed);
+    CUMUL_TRANSFERT_NS.fetch_add(transfert, Ordering::Relaxed);
+    CUMUL_RELECTURE_NS.fetch_add(relecture, Ordering::Relaxed);
+    // BOUCHAUD_JOURNAL_PRESENT_ECHANTILLONNE_V1. Mesure (banc des entrees,
+    // TCG, 3192 presentations) : la ligne serie coutait ~105 us, plus que tout
+    // le travail d'une petite presentation (85 us : pose + transfert +
+    // relecture) -- 98 % des presentations du bureau. Les JOURNAL_COMPLET
+    // premieres restent toutes journalisees (sondes courtes, demarrage), puis
+    // une sur JOURNAL_PAS, qui porte les CUMULS de toutes : rien ne disparait
+    // du bilan. Les refus gardent leur ligne propre (`refuse`).
+    if n <= JOURNAL_COMPLET || n % JOURNAL_PAS == 0 {
+        crate::serial_println!(
+            "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={} pose_us={} transfert_us={} relecture_us={} \
+             cumul_pose_us={} cumul_transfert_us={} cumul_relecture_us={} cumul_journal_us={} journalisees={}",
+            n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed),
+            pose / 1000, transfert / 1000, relecture / 1000,
+            CUMUL_POSE_NS.load(Ordering::Relaxed) / 1000, CUMUL_TRANSFERT_NS.load(Ordering::Relaxed) / 1000,
+            CUMUL_RELECTURE_NS.load(Ordering::Relaxed) / 1000, CUMUL_JOURNAL_NS.load(Ordering::Relaxed) / 1000,
+            JOURNALISEES.load(Ordering::Relaxed) + 1
+        );
+        JOURNALISEES.fetch_add(1, Ordering::Relaxed);
+        CUMUL_JOURNAL_NS.fetch_add(crate::kernel::timer::monotonic_ns() - t_fin, Ordering::Relaxed);
+    }
     Ok(e)
 }
