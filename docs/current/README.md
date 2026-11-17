@@ -16,7 +16,8 @@
 
 1. **Réactivité de l'Atelier sous WHPX.**
    - Insights ré-énumérait le bus PCI à chaque trame, soit environ 30 000 E/S, chacune une sortie de VM.
-   - Le correctif et le banc A/B sont dans `tools/ci/banc_atelier.py`, avec le job `qemu / reactivite Atelier (KVM, TCG)` (PR #333).
+   - Le correctif et le banc A/B sont fusionnés (#333) : `tools/ci/banc_atelier.py`, le job `qemu / reactivite Atelier (KVM, TCG)` et le document [BANC_ATELIER.md](BANC_ATELIER.md).
+   - Sous KVM, en CI : 0 accès PCI par trame, pire trame 7,6 ms.
    - Reste à faire : la mesure sur Windows et WHPX (SMP1/2/4).
 2. **#283 — Ladybird figé au démarrage à froid.**
    - Les correctifs sont fusionnés (#330, #331, #328).
