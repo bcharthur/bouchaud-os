@@ -352,6 +352,11 @@ class Banc:
                 "p50_us": q(50), "p95_us": q(95), "p99_us": q(99), "max_us": us[-1] if n else None,
                 "moy_us": moy(1), "fenetres_moy_us": moy(2), "presentation_moy_us": moy(3),
                 "pci_acces_par_trame": moy(4), "cmos_lectures_par_trame": moy(5),
+                # Totaux ENTIERS : c'est sur eux que porte --exige-sans-es. Une
+                # moyenne arrondie a une decimale rendrait 0.0 pour un acces
+                # sur cent trames (revue de #333).
+                "pci_acces_total": sum(f[4] for f in c["trames"]),
+                "cmos_lectures_total": sum(f[5] for f in c["trames"]),
                 "desktop_cpu_pct_max": max(c["cpu"]) if c["cpu"] else None,
                 "hid_latence_pics": len(c["hid"]), "hid_latence_max_us": max(c["hid"]) if c["hid"] else None,
             }
@@ -405,9 +410,9 @@ def main(argv) -> int:
         # BOUCHAUD_PERF_ES_PAR_TRAME_V1 : un dessin ne fait aucune E/S PCI. Les
         # lectures CMOS sont publiees sans etre exigees : le prefixe des lignes
         # serie relit l'horloge tant que l'heure murale n'est pas ancree.
-        elif o.exige_sans_es and r["pci_acces_par_trame"]:
+        elif o.exige_sans_es and r["pci_acces_total"] > 0:
             print(f"BANC_ATELIER_ECHEC raison=es_pci_pendant_les_trames phase={nom} "
-                  f"pci_acces_par_trame={r['pci_acces_par_trame']}")
+                  f"pci_acces_total={r['pci_acces_total']} pci_acces_par_trame={r['pci_acces_par_trame']}")
             code = 1
     print(f"BANC_ATELIER latences_ouverture_ms={resultat['latences_ouverture_ms']}")
     print("BANC_ATELIER_OK" if code == 0 else "BANC_ATELIER_ECHEC")
