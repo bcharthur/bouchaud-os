@@ -22,7 +22,16 @@ pub struct DateTime {
     pub second: u8,
 }
 
+// BOUCHAUD_PERF_ES_PAR_TRAME_V1 : une lecture CMOS = deux E/S (0x70, 0x71).
+static LECTURES_CMOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Lectures de registres CMOS depuis le demarrage.
+pub fn lectures_cmos() -> u64 {
+    LECTURES_CMOS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 fn cmos_read(reg: u8) -> u8 {
+    LECTURES_CMOS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     unsafe {
         outb(0x70, reg);
         inb(0x71)

@@ -1510,6 +1510,7 @@ fn boucle() {
                 // Le plan est construit UNE fois par trame, pas une fois par
                 // rectangle : ses bornes ne dependent pas du rectangle.
                 let t_trame = crate::kernel::timer::monotonic_ns();
+                profil_trames::debut_trame();
                 crate::gui::atelier::effets::debut_trame(maintenant);
                 plan_de_scene(&wins, menu_open, centre_ouvert, (mxu, myu), &mut calques);
                 // BOUCHAUD_GPU_COMPOSITION_V2 : quelles fenetres le GPU pose.
@@ -3064,6 +3065,19 @@ mod profil_trames {
     static TRAMES: AtomicU64 = AtomicU64::new(0);
     static TOTAL: AtomicU64 = AtomicU64::new(0);
     static PIRE: AtomicU64 = AtomicU64::new(0);
+    // BOUCHAUD_PERF_ES_PAR_TRAME_V1 : E/S faites PENDANT les trames (acces de
+    // configuration PCI, lectures CMOS). Le dessin n'en a aucun besoin ; sous
+    // WHPX chacune est une sortie de la VM.
+    static PCI_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static FEN_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static PRES_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static CMOS_DEBUT: AtomicU64 = AtomicU64::new(0);
+    static PCI: AtomicU64 = AtomicU64::new(0);
+    static CMOS: AtomicU64 = AtomicU64::new(0);
+    // BOUCHAUD_PERF_TRAMES_QUANTILES_V1 : les 64 durees de la fenetre de
+    // publication, pour p50/p95/p99 (une moyenne cache les trames lentes).
+    // Ecrit par le seul fil du bureau.
+    static DUREES: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
     const NOMS: [&str; 10] = ["fond", "filigrane", "icones", "barre", "fenetres", "menu", "centre",
         "dock", "curseur", "presentation"];
     fn rang(e: Element) -> usize {
@@ -3087,16 +3101,42 @@ mod profil_trames {
         NS[9].fetch_add(ns, Relaxed);
         PIXELS.fetch_add(pixels, Relaxed);
     }
+    pub fn debut_trame() {
+        FEN_DEBUT.store(NS[4].load(Relaxed), Relaxed);
+        PRES_DEBUT.store(NS[9].load(Relaxed), Relaxed);
+        PCI_DEBUT.store(crate::arch::x86_64::pci::acces_config(), Relaxed);
+        CMOS_DEBUT.store(crate::arch::x86_64::rtc::lectures_cmos(), Relaxed);
+    }
     pub fn fin_trame(ns: u64) {
         TOTAL.fetch_add(ns, Relaxed);
         PIRE.fetch_max(ns, Relaxed);
+        let pci = crate::arch::x86_64::pci::acces_config().saturating_sub(PCI_DEBUT.load(Relaxed));
+        let cmos = crate::arch::x86_64::rtc::lectures_cmos().saturating_sub(CMOS_DEBUT.load(Relaxed));
+        PCI.fetch_add(pci, Relaxed);
+        CMOS.fetch_add(cmos, Relaxed);
+        if crate::gui::atelier::reglages::perf_trame() {
+            // Horodatee en ms monotones : le banc decoupe ses phases avec.
+            crate::serial_println!("BOUCHAUD_PERF_TRAME t_ms={} us={} fenetres_us={} presentation_us={} pci_acces={} cmos_lectures={}",
+                crate::kernel::timer::monotonic_ns() / 1_000_000, ns / 1000,
+                NS[4].load(Relaxed).saturating_sub(FEN_DEBUT.load(Relaxed)) / 1000,
+                NS[9].load(Relaxed).saturating_sub(PRES_DEBUT.load(Relaxed)) / 1000, pci, cmos);
+        }
         let n = TRAMES.fetch_add(1, Relaxed) + 1;
+        DUREES[((n - 1) % 64) as usize].store(ns, Relaxed);
         if n % 64 != 0 {
             return;
         }
+        let mut durees = [0u64; 64];
+        for (d, s) in durees.iter_mut().zip(DUREES.iter()) {
+            *d = s.load(Relaxed);
+        }
+        durees.sort_unstable();
+        // Rang le plus proche (nearest-rank) sur 64 echantillons.
+        let quantile = |q: usize| durees[(q * 64).div_ceil(100).clamp(1, 64) - 1] / 1000;
         let total = TOTAL.swap(0, Relaxed);
-        let mut ligne = alloc::format!("BOUCHAUD_PERF_TRAMES n=64 moy_us={} pire_us={} kpix_presentes={}",
-            total / 64 / 1000, PIRE.swap(0, Relaxed) / 1000, PIXELS.swap(0, Relaxed) / 1000);
+        let mut ligne = alloc::format!("BOUCHAUD_PERF_TRAMES n=64 moy_us={} pire_us={} p50_us={} p95_us={} p99_us={} pci_acces={} cmos_lectures={} kpix_presentes={}",
+            total / 64 / 1000, PIRE.swap(0, Relaxed) / 1000, quantile(50), quantile(95), quantile(99),
+            PCI.swap(0, Relaxed), CMOS.swap(0, Relaxed), PIXELS.swap(0, Relaxed) / 1000);
         for (i, nom) in NOMS.iter().enumerate() {
             ligne.push_str(&alloc::format!(" {}_us={}", nom, NS[i].swap(0, Relaxed) / 64 / 1000));
             if i < 9 {
