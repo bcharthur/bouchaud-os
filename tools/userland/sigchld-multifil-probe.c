@@ -52,6 +52,16 @@
  *              ceux qui sortent d'eux-memes (code 0) -- le noyau les voyait
  *              sortir. Doit etre recolte, statut sortie:0, en moins de 3 s.
  *
+ *   sommeil  BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2 : le pere est la boucle LibCore
+ *              (cas boucle), un fil actif a cote, et son fil PRINCIPAL dort
+ *              (nanosleep 10 s). Un fils sort au bout de 200 ms. Linux livre
+ *              SIGCHLD au principal : nanosleep rend EINTR, le gestionnaire
+ *              ecrit dans le tube. Avant BOUCHAUD_SIGNAL_FIL_PRINCIPAL_V2, un
+ *              principal endormi hors de `poll` ne retenait pas le signal :
+ *              la fenetre (entre la levee et le reveil) est etroite, ce cas
+ *              n'est donc PAS un temoin deterministe -- c'est un controle de
+ *              non-regression de la semantique Linux (verifie sous Linux).
+ *
  * Pour chacun : delai de la fin de prise (EOF), delai du SIGCHLD, et ce que
  * waitpid rend. Sortie : une ligne `SIGCHLD_CAS cas=...`, puis
  * `SIGCHLD_MULTIFIL_OK` ou `SIGCHLD_MULTIFIL_ECHEC n=...`.
@@ -423,6 +433,36 @@ int main(void)
             kill(p, SIGKILL);
             waitpid(p, NULL, 0);
         }
+    }
+    {
+        // Le pere : boucle LibCore, fil actif a cote, fil principal ENDORMI.
+        imiter_libcore = 1;
+        fil_actif_continue = 1;
+        pthread_create(&actif, NULL, pere_actif, NULL);
+        usleep(50 * 1000);
+        char c;
+        while (read(tube_signal[0], &c, 1) == 1) {
+        }
+        long t0 = maintenant_ms();
+        pid_t p = fork();
+        if (p == 0) {
+            usleep(200 * 1000);
+            _exit(7);
+        }
+        struct timespec d = { .tv_sec = 10 }, reste;
+        int n = nanosleep(&d, &reste);
+        int erreur = n < 0 ? errno : 0;
+        long reveil = maintenant_ms() - t0;
+        int recu = read(tube_signal[0], &c, 1) == 1;
+        fil_actif_continue = 0;
+        pthread_join(actif, NULL);
+        int statut = 0;
+        pid_t r = waitpid(p, &statut, 0);
+        int ok = n < 0 && erreur == EINTR && recu && reveil < 3000 && r == p && WIFEXITED(statut) && WEXITSTATUS(statut) == 7;
+        printf("SIGCHLD_CAS cas=sommeil reveil_ms=%ld nanosleep=%d errno=%d gestionnaire_principal=%d statut=%s%d %s\n", reveil, n,
+            erreur, recu, WIFEXITED(statut) ? "sortie:" : "autre:", WIFEXITED(statut) ? WEXITSTATUS(statut) : statut, ok ? "ok" : "ECHEC");
+        if (!ok)
+            echecs++;
     }
     if (echecs == 0)
         printf("SIGCHLD_MULTIFIL_OK\n");

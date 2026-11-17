@@ -3081,6 +3081,7 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
     };
 
     task::poll_phase_set(task::POLL_ENTREE, count as u64);
+    let _signalable = task::AttenteSignalable::entre();
     loop {
         // Armer AVANT le scan ferme la course producteur entre « pas pret » et
         // parking: la generation aura change et wait_readiness ne dormira pas.
@@ -3167,6 +3168,7 @@ pub fn sys_select(
         Some(crate::kernel::timer::monotonic_ns().saturating_add(ms.saturating_mul(1_000_000)))
     };
 
+    let _signalable = task::AttenteSignalable::entre();
     loop {
         let ticket = crate::kernel::fd::readiness_ticket();
         let mut attente_ns = deadline_ns;
@@ -3266,6 +3268,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
             .saturating_add((timeout_ms as u64).saturating_mul(1_000_000)))
     };
 
+    let _signalable = task::AttenteSignalable::entre();
     loop {
         let ticket = crate::kernel::fd::readiness_ticket();
         let mut attente_ns = deadline_ns;
