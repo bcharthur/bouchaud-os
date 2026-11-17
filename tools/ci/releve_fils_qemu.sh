@@ -22,7 +22,7 @@ ATTENTE=${3:-20}
 
 # BOUCHAUD_RELEVE_CPUS_QEMU_V1 : d'abord ce que QEMU voit de chaque vCPU --
 # la seule source quand le coeur 0 est fige IF=0 et que le noyau se tait.
-python3 "$(dirname "$0")/releve_cpus_qemu.py" "$MONITEUR" "$JOURNAL.cpus" || true
+python3 "$(dirname "$0")/releve_cpus_qemu.py" "$MONITEUR" "$JOURNAL.cpus" >&2 || true
 
 avant=$(grep -ac '\[FIL-RELEVE\] fin' "$JOURNAL" 2>/dev/null || true)
 avant=${avant:-0}
