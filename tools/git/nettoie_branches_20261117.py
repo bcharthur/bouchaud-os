@@ -4,13 +4,12 @@
 Inventaire etabli le 17/11 sur 57 branches distantes (main compris) :
 
   ancetre  14  la tete est un ancetre de `main` : tout y est deja ;
-  squash   33  PR fusionnee par squash ; CHAQUE fichier touche par la branche a
+  squash   34  PR fusionnee par squash (dont #333, fusionnee pendant le nettoyage) ; CHAQUE fichier touche par la branche a
                le MEME blob dans le commit de squash nomme ;
   archive   7  travail jamais fusionne (WIP, sauvegardes, PR fermees) : une
                etiquette annotee `archive/prune-20261117/<branche>` le garde,
                poussee et RELUE sur le depot distant avant toute suppression ;
-  gardees   3  main, la branche de travail de la session, celle de #333 tant
-               qu'elle est ouverte (elle n'est pas dans cette liste).
+  gardees   2  main et la branche de travail de la session.
 
 Rien n'est cru sur parole : chaque condition est re-verifiee au moment de
 l'execution, sur le depot distant tel qu'il est. Une branche qui a bouge
@@ -93,6 +92,7 @@ INVENTAIRE = [
     ("claude/fuite-processus", "13a83b3ddbeffc6a96d26f63bd048f1cd7f62875", "squash", "#330 1f97b4b3e7780386609994ed00ef771fb96e493e"),
     ("claude/gel-283-nmi", "4dda0748a5bc522645f8a8cbe164e8bd2dc17d3d", "squash", "#328 504fdf1257967abd53b6e4362d6c52b896a7a580"),
     ("claude/fenetre-migration-283", "619da3c0c2c93462eeabd2f2bce9704e1af16214", "squash", "#331 427fa157f6bbf8feba1d5cb034eb6e5e7f726625"),
+    ("claude/atelier-rendu-fenetres", "7b30a24a9b510d6b595b54e53368a78753b9f1a3", "squash", "#333 8211dbc818ade958de36e74a38e554b025b7cafb"),
 ]
 
 
