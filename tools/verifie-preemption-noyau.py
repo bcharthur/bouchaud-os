@@ -26,14 +26,18 @@ Ce garde verifie son CABLAGE et l'invariant structurel dont elle depend :
      par `if from_user(...)` (faute venue du ring 3 : trappe synchrone sur la
      pile noyau de la tache, comme un appel systeme), et aucun vecteur qui
      peut rouvrir IF n'a de pile IST (une IST est partagee par le coeur : y
-     dormir la ferait ecraser par la faute suivante) ;
+     dormir la ferait ecraser par la faute suivante). Deux exceptions, chacune
+     sur SA pile : la double faute, et la NMI (BOUCHAUD_RELEVE_NMI_V1), dont
+     le gestionnaire est reduit a `note_nmi` -- ni IF, ni verrou, ni sommeil --
+     et qui ne doit jamais tourner sur une pile utilisateur (fenetre d'entree
+     de `syscall`) ;
   6. les compteurs publies par `smpstat`.
 
 BOUCHAUD_P19_FATAL_USER_IRQ_EXIT_V1 : la V1 de ce garde ne lisait que la
 PREMIERE reouverture du fichier d'exceptions. Une seconde, ajoutee plus bas
 et sans condition, passait. Toutes sont lues desormais (test negatif 9).
 
-Fail-closed ; onze tests negatifs.
+Fail-closed ; douze tests negatifs.
 """
 import re
 import sys
@@ -201,8 +205,12 @@ def verifie(racine: Path) -> list[str]:
     idt = src[IDT]
     for m in re.finditer(r"\.set_stack_index\(", idt):
         instruction = idt[idt.rfind(";", 0, m.start()) + 1:m.start()]
-        if "IDT.double_fault" not in instruction:
-            fautes.append(f"{IDT} : pile IST hors de la double faute ({instruction.strip()[:60]})")
+        index = idt[m.end():idt.find(")", m.end())]
+        if "IDT.double_fault" in instruction and index == "gdt::DOUBLE_FAULT_IST_INDEX":
+            continue
+        if "IDT.non_maskable_interrupt" in instruction and index == "gdt::NMI_IST_INDEX":
+            continue
+        fautes.append(f"{IDT} : pile IST hors de la double faute et de la NMI ({instruction.strip()[:60]} -> {index})")
     for v in VECTEURS_IF:
         if not re.search(r"IDT\." + v + r"\.set_handler_fn\(\w+\);", idt):
             fautes.append(f"{IDT} : {v} n'est plus installe sans IST (forme attendue introuvable)")
@@ -279,6 +287,9 @@ def main() -> int:
         (IDT, "IDT.general_protection_fault.set_handler_fn(general_protection_handler);",
          "IDT.general_protection_fault.set_handler_fn(general_protection_handler)"
          ".set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);"),
+        # 12. La NMI sur la pile IST de la double faute (partagee : une double
+        #     faute pendant la NMI ecraserait son cadre).
+        (IDT, ".set_stack_index(gdt::NMI_IST_INDEX);", ".set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);"),
     ]
     for n, (f, a, b) in enumerate(negatifs, 1):
         if not mutation(f, a, b):

@@ -1276,9 +1276,17 @@ pub fn note_nmi(rip: u64, cs: u64, rsp: u64, rflags: u64) {
     NMI_CS[cpu].store(cs, Ordering::Relaxed);
     NMI_FLAGS[cpu].store(rflags, Ordering::Relaxed);
     let mut n = 0usize;
-    if cs & 3 == 0 && rsp != 0 && rsp & 7 == 0 {
-        // Mode noyau : la pile interrompue est une pile noyau projetee. On
-        // s'arrete au bord de sa page pour ne jamais lire au-dela.
+    // CS ring 0 ne suffit pas : dans la fenetre d'entree de `syscall`, RSP
+    // est encore la pile UTILISATEUR. On ne lit que si la page de RSP est de
+    // la RAM connue, dans la projection directe ou vivent les piles noyau
+    // (allouees sur le tas) : jamais une adresse utilisateur, jamais un trou.
+    let decalage = crate::kernel::memory::phys_offset();
+    let pile_noyau = cs & 3 == 0
+        && rsp & 7 == 0
+        && rsp >= decalage
+        && crate::kernel::memory::est_ram_connue((rsp - decalage) & !0xFFF, 0x1000);
+    if pile_noyau {
+        // On s'arrete au bord de sa page pour ne jamais lire au-dela.
         let fin_page = (rsp | 0xFFF) + 1;
         let mut adresse = rsp;
         let mut lus = 0usize;

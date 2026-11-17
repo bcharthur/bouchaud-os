@@ -12,15 +12,16 @@ noyau ELF du MEME SHA est fourni, symbolise par `addr2line` :
   * le RIP du dernier IPI recu (perime si l'IPI est ancien : c'est dit).
 
 Il repond aux questions d'un gel, une ligne `RAPPORT_GEL` chacune :
-  verdict      noyau_fige | pas_de_gel_noyau
+  verdict      noyau_fige | pas_de_ligne_noyau | indetermine
   coeur        pour chaque coeur : tache courante, attente de verrou, NMI
   verrou       verrou attendu, coeur detenteur, site d'attente, site de prise
   fautif       le detenteur du verrou attendu depuis le plus longtemps
   progression  l'IRQ du minuteur progresse-t-elle (lignes successives) ?
 
 Sans ligne de souffrance, le rapport ne conclut RIEN sur le noyau : il le dit
-(`pas_de_gel_noyau`), ce qui oriente vers le navigateur ou l'environnement --
-sauf si les registres vus par QEMU (`[QEMU-CPU]`, releve_cpus_qemu.py, lus
+(`indetermine`). L'absence de ligne n'est PAS une preuve d'ordonnancement :
+un coeur 0 fige interruptions masquees n'en emet aucune (gel total du 17/11,
+tempete fork+exec) -- sauf si les registres vus par QEMU (`[QEMU-CPU]`, releve_cpus_qemu.py, lus
 aussi dans `JOURNAL.cpus`) sont la : `qemu_verdict=boucle_noyau` (meme RIP
 noyau a 1 s d'intervalle hors HLT), `vm_au_repos` (tous en HLT) ou
 `vm_active`.
@@ -216,8 +217,9 @@ def rapport(texte: str, elf: str | None = None) -> list:
             return (["RAPPORT_GEL verdict=pas_de_ligne_noyau raison=aucune_ligne_DIAG-EN-SOUFFRANCE "
                      "(noyau qui ordonnance encore, OU coeur 0 fige IF=0 : lire les registres QEMU)"]
                     + lecture_qemu(qemu, sq))
-        return ["RAPPORT_GEL verdict=pas_de_gel_noyau raison=aucune_ligne_DIAG-EN-SOUFFRANCE "
-                "(le noyau a continue d'ordonnancer : chercher cote navigateur ou environnement)"]
+        return ["RAPPORT_GEL verdict=indetermine raison=aucune_ligne_DIAG-EN-SOUFFRANCE_ni_registres_QEMU "
+                "(preuves insuffisantes : un coeur 0 fige IF=0 n'emet aucune ligne ; "
+                "relever les vCPU par le moniteur QEMU)"]
     r = tous[-1]
     noms = noms_des_taches(texte)
     a_symboliser = []

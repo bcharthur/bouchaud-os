@@ -51,7 +51,9 @@ class Rapport(unittest.TestCase):
     def test_sans_ligne_ne_conclut_rien_sur_le_noyau(self):
         out = rg.rapport("LADYBIRD_FUNCTIONAL_SMOKE fail raison=jalons manquants=7\n")
         self.assertEqual(len(out), 1)
-        self.assertIn("verdict=pas_de_gel_noyau", out[0])
+        self.assertIn("verdict=indetermine", out[0])
+        # Une absence de ligne ne disculpe pas le noyau.
+        self.assertNotIn("continue d'ordonnancer", out[0])
 
     def test_fautif_et_taches(self):
         texte = (
