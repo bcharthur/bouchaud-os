@@ -17,8 +17,12 @@
 #   3. le champ `ipi=[...]` present pour les quatre emplacements ;
 #   4. le champ `nmi=[...]` : le coeur detenteur a repondu a la NMI, en mode
 #      noyau, avec un RIP dans la fonction `detenteur` (BOUCHAUD_RELEVE_NMI_V1) ;
-#   5. vu de QEMU (releve_cpus_qemu.py), un coeur a un RIP noyau IMMOBILE dans
-#      `detenteur` a une seconde d'intervalle (BOUCHAUD_RELEVE_CPUS_QEMU_V1).
+#   5. vu de QEMU (releve_cpus_qemu.py, six echantillons a une seconde
+#      d'intervalle), un coeur est en mode noyau dans `detenteur` sur au moins
+#      trois d'entre eux (BOUCHAUD_RELEVE_CPUS_QEMU_V1). Le detenteur boucle
+#      IF=1 et sert ses IRQ : deux echantillons seulement, tous deux exiges
+#      dans la boucle, rendaient le banc rouge au hasard (integration
+#      44089209830 : coeur 1 en `detenteur`, puis dans une IRQ).
 # BOOTIMAGE_NORMAL (temoin negatif) : le meme demarrage sans le drapeau
 # n'emet AUCUNE ligne de souffrance en 60 s.
 set -uo pipefail
@@ -59,7 +63,12 @@ ok() { echo "  ok      $1"; }
 # releve_cpus_qemu.py lit ce que QEMU voit de chaque vCPU
 # (BOUCHAUD_RELEVE_CPUS_QEMU_V1), comme le font les bancs Ladybird sur gel.
 MONITEUR="$OUT/moniteur.sock"
-rm -f "$MONITEUR"
+# Rien d'un run precedent : releve_cpus_qemu.py AJOUTE a son fichier, et la
+# boucle d'attente ci-dessous lirait la ligne de souffrance de l'ancien
+# journal avant que QEMU ne le recree (releve pris dans le BIOS, temoin
+# « non arme »).
+rm -f "$MONITEUR" "$OUT/temoin.log.cpus" "$OUT/temoin.txt.cpus"
+: > "$OUT/temoin.log"
 qemu-system-x86_64 \
   -drive format=raw,file="$TEMOIN",snapshot=on \
   -m 2048 -smp 2 -display none -no-reboot \
@@ -71,7 +80,7 @@ for _ in $(seq 1 150); do
   if grep -aqF '[DIAG-EN-SOUFFRANCE]' "$OUT/temoin.log" 2>/dev/null; then break; fi
   sleep 1
 done
-python3 tools/ci/releve_cpus_qemu.py "$MONITEUR" "$OUT/temoin.log.cpus" >/dev/null || true
+RELEVE_ECHANTILLONS=6 python3 tools/ci/releve_cpus_qemu.py "$MONITEUR" "$OUT/temoin.log.cpus" >/dev/null || true
 kill -TERM "$QPID" 2>/dev/null || true
 sleep 1
 kill -KILL "$QPID" 2>/dev/null || true
@@ -79,8 +88,9 @@ wait "$QPID" 2>/dev/null || true
 sed -E 's/\x1b\[[0-9;]*m//g' "$OUT/temoin.log" > "$OUT/temoin.txt"
 # rapport_gel.py lit les registres a cote du journal qu'on lui donne.
 cp "$OUT/temoin.log.cpus" "$OUT/temoin.txt.cpus" 2>/dev/null || true
-# Vu de QEMU, le detenteur fige doit avoir un RIP noyau IMMOBILE dans
-# `detenteur` a une seconde d'intervalle.
+# Vu de QEMU, le detenteur fige doit etre vu en mode noyau dans `detenteur`
+# sur au moins trois des six echantillons (les autres peuvent tomber dans une
+# IRQ qu'il sert, IF=1).
 python3 - "$OUT/temoin.log.cpus" "$(sed -nE 's/.*BOUCHAUD_BANC_SOUFFRANCE detenteur cpu=[0-9]+ verrou=0x[0-9a-f]+ fonction=(0x[0-9a-f]+).*/\1/p' "$OUT/temoin.txt" | sed -n 1p)" <<'PY' || echecs_qemu=1
 import re, sys
 try:
@@ -92,10 +102,13 @@ par = {}
 for m in re.finditer(r"ech=(\d) cpu=(\d+) rip=(0x[0-9a-f]+) cpl=(\d)", lignes):
     par.setdefault(int(m.group(2)), {})[int(m.group(1))] = (int(m.group(3), 16), int(m.group(4)))
 for cpu, e in sorted(par.items()):
-    if 1 in e and 2 in e and e[1] == e[2] and e[1][1] == 0 and fonction <= e[1][0] < fonction + 0x400:
-        print(f"  ok      QEMU : le coeur {cpu} est immobile en {e[1][0]:#x}, dans detenteur, mode noyau")
+    dedans = sorted(n for n, (rip, cpl) in e.items() if cpl == 0 and fonction <= rip < fonction + 0x400)
+    if len(dedans) >= 3:
+        rips = sorted({e[n][0] for n in dedans})
+        print(f"  ok      QEMU : le coeur {cpu} est dans detenteur en mode noyau sur {len(dedans)}/{len(e)} "
+              f"echantillons (rip {', '.join(hex(r) for r in rips)})")
         sys.exit(0)
-print(f"  ECHEC   QEMU : aucun coeur immobile dans detenteur ({fonction:#x}) : {par}")
+print(f"  ECHEC   QEMU : aucun coeur dans detenteur ({fonction:#x}) sur au moins 3 echantillons : {par}")
 sys.exit(1)
 PY
 grep -aF "BOUCHAUD_BANC_SOUFFRANCE armement" "$OUT/temoin.txt" >/dev/null \
