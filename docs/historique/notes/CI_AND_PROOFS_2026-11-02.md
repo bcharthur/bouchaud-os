@@ -1,6 +1,6 @@
 # CI et preuves — relevé historique du 2026-11-02 (remplacé par docs/current/CI_AND_PROOFS.md le 17/11)
 
-Les familles de workflows, et ce que chacune établit : [README principal](../../README.md#tests-et-ci). Les runs d'un SHA donné : [status.json](status.json) → `ci`. Le tableau de runs ci-dessous est un **relevé historique du 2026-11-02** ; il ne décrit pas `main` aujourd'hui.
+Les familles de workflows, et ce que chacune établit : [README principal](../../README.md#tests-et-ci). Les runs d'un SHA donné : [status.json](../../current/status.json) → `ci`. Le tableau de runs ci-dessous est un **relevé historique du 2026-11-02** ; il ne décrit pas `main` aujourd'hui.
 
 ## Contrat de preuve
 
