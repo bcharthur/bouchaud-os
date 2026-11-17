@@ -555,9 +555,17 @@ fn sortie_du_groupe(code: i32, par_signal: bool) -> ! {
     if !reclame_groupe() {
         retire_perdant_du_groupe();
     }
-    let (pid, tid, process) = {
+    // BOUCHAUD_SORTIE_SANS_REFERENCE_V1 : AUCUN `Arc` ne doit vivre dans ce
+    // cadre au moment d'appeler `sortie_du_fil`. Elle ne revient jamais : la
+    // pile de la tache est abandonnee sans executer un seul destructeur, et
+    // une reference tenue ici n'etait JAMAIS rendue. C'etait le cas : un clone
+    // de `Arc<Process>` par processus sorti par `exit_group` (exit, _exit),
+    // donc ni `Process::drop` ni `AddressSpace::drop` -- toute la memoire du
+    // processus perdue. Mesure (tempete-exec-probe, mode fork, TCG SMP4) :
+    // 2 453 sorties, 0 destruction ; +46 % de RAM en 4 151 fork+_exit.
+    let (pid, tid) = {
         let task = current();
-        (task.process.pid, task.tid, task.process.clone())
+        (task.process.pid, task.tid)
     };
     for task in tasks().iter() {
         if task.tid != tid && task.process.pid == pid {
@@ -571,7 +579,7 @@ fn sortie_du_groupe(code: i32, par_signal: bool) -> ! {
     // `exit_group` termine tous les autres threads du processus. Le thread
     // courant est donc le seul encore vivant; `exit_current` le decrementera
     // de 1 a 0 et rendra le processus zombie/recoltable par `wait4`.
-    process.lifecycle.lock().threads = 1;
+    current().process.lifecycle.lock().threads = 1;
 
     sortie_du_fil(code, par_signal)
 }

@@ -619,6 +619,9 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // VOLONTAIREMENT tous les coeurs. Jamais livre.
     #[cfg(feature = "banc-souffrance-verrou")]
     crate::platform::pc::banc_souffrance::demarre();
+    // BOUCHAUD_FENETRE_MIGRATION_V1 (#283) : temoin, jamais livre.
+    #[cfg(feature = "banc-fenetre-migration")]
+    crate::platform::pc::banc_fenetre::demarre();
 
     // Le navigateur est lance sur demande. Le prechauffage automatique reste
     // desactive pour preserver les ressources du bureau et du diagnostic LAB.

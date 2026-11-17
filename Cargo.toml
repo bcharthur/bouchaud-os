@@ -49,6 +49,13 @@ banc-io = []
 # proprietaire et la ligne d'attente. Voir `platform/pc/banc_souffrance.rs` et
 # `tools/ci/run_souffrance_verrou.sh`. Jamais dans une image livree.
 banc-souffrance-verrou = []
+# BOUCHAUD_FENETRE_MIGRATION_V1 (#283) -- TEMOIN DE LA FENETRE DE MIGRATION.
+# Des fils noyau exercent `preempt::disable` et `SpinLock::lock` sous demandes
+# de preemption ciblees ; la fenetre entre lecture du coeur et pose de la
+# marque est elargie pour eux seuls. Exige zero marque posee sur un autre
+# coeur. Voir `platform/pc/banc_fenetre.rs` et
+# `tools/ci/run_fenetre_migration.sh`. Jamais dans une image livree.
+banc-fenetre-migration = []
 # BOUCHAUD_CLE_USB_TEST_V1 -- IMAGE D'ESSAI SUR CLE USB.
 #
 # Aucune commande d'ecriture, de vidange, de formatage, d'effacement ni de

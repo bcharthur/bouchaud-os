@@ -127,6 +127,57 @@ static LONGUEUR: AtomicUsize = AtomicUsize::new(0);
 static LECTEURS: AtomicUsize = AtomicUsize::new(0);
 static ECRIVAIN: AtomicBool = AtomicBool::new(false);
 
+/// BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 (#283) -- l'ecrivain ECRIT.
+///
+/// `ECRIVAIN` dit qu'un ecrivain ATTEND (priorite ecrivain : les lecteurs
+/// ordinaires s'effacent). `ACTIF` dit qu'il a obtenu la quiescence et
+/// remplace un emplacement : PERSONNE ne lit alors.
+///
+/// # Le gel que la distinction ferme
+///
+/// Releve QEMU d'un gel total (tempete fork+exec, SMP4, 17/11, main et
+/// #330, aucune ligne de souffrance) :
+///
+///   coeur 1  IF=0  `registre_ajoute_sous_ecriture` : ecrivain, attend que
+///                  les lecteurs s'en aillent ;
+///   coeur 2  IF=1  `services-metrics` : TIENT une lecture
+///                  (`mesure_processus`) et tourne sur le `Mm` d'un processus ;
+///   coeurs 0, 3  IF=0  IRQ (minuteur `sonde_gel_tic`, reprogrammation
+///                  `choose_runq_cpu`) : attendent une lecture, refusee parce
+///                  qu'un ecrivain attend.
+///
+/// Le detenteur du `Mm` est un contexte interrompu par l'une de ces IRQ :
+/// il ne rendra le verrou qu'au retour de l'IRQ, qui attend l'ecrivain, qui
+/// attend le lecteur, qui attend le `Mm`. Un cycle, et plus aucun coeur ne
+/// prend d'interruption.
+///
+/// La regle : un contexte qui TIENT un verrou (IRQ, verrou tournant simple,
+/// verrou range) n'attend jamais un ecrivain qui ne fait qu'ATTENDRE. Il lit
+/// tant que l'ecrivain n'est pas `ACTIF`. L'exclusion reste totale : lecteur
+/// et ecrivain se croisent par un echange de Dekker en `SeqCst` (le lecteur
+/// compte PUIS lit `ACTIF`, l'ecrivain pose `ACTIF` PUIS relit le compte) --
+/// l'un des deux voit toujours l'autre et recule.
+static ACTIF: AtomicBool = AtomicBool::new(false);
+
+/// Lectures accordees pendant qu'un ecrivain attendait, a un contexte qui
+/// tenait un verrou. Chacune est un gel #283 evite.
+static LECTURES_PORTEUSES: AtomicU64 = AtomicU64::new(0);
+
+pub fn lectures_porteuses() -> u64 {
+    LECTURES_PORTEUSES.load(Ordering::Relaxed)
+}
+
+/// Le contexte courant tient-il un verrou (ou est-il une IRQ, qui peut avoir
+/// interrompu un detenteur) ? Lu interruptions masquees.
+#[inline]
+fn contexte_porteur() -> bool {
+    let Some(id) = crate::arch::x86_64::cpu_local::CpuId::from_index(local_cpu()) else {
+        return true;
+    };
+    let local = crate::arch::x86_64::cpu_local::local(id);
+    local.irq_depth() != 0 || local.verrous_simples() != 0 || local.preempt_count() != 0
+}
+
 /// PROFONDEUR DE LECTURE PAR COEUR.
 ///
 /// # L'interblocage que ce compteur ferme
@@ -253,11 +304,25 @@ impl RegistreLecture {
             let pris = if profondeur > 0 {
                 PROFONDEUR_LECTURE[cpu].store(profondeur + 1, Ordering::Relaxed);
                 true
+            } else if contexte_porteur() {
+                // BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 : un porteur de
+                // verrou ne s'efface que devant un ecrivain ACTIF.
+                LECTEURS.fetch_add(1, Ordering::SeqCst);
+                if ACTIF.load(Ordering::SeqCst) {
+                    LECTEURS.fetch_sub(1, Ordering::Release);
+                    false
+                } else {
+                    if ECRIVAIN.load(Ordering::Relaxed) {
+                        LECTURES_PORTEUSES.fetch_add(1, Ordering::Relaxed);
+                    }
+                    PROFONDEUR_LECTURE[cpu].store(1, Ordering::Relaxed);
+                    true
+                }
             } else if ECRIVAIN.load(Ordering::Acquire) {
                 false
             } else {
-                LECTEURS.fetch_add(1, Ordering::AcqRel);
-                if ECRIVAIN.load(Ordering::Acquire) {
+                LECTEURS.fetch_add(1, Ordering::SeqCst);
+                if ECRIVAIN.load(Ordering::SeqCst) {
                     LECTEURS.fetch_sub(1, Ordering::Release);
                     false
                 } else {
@@ -331,9 +396,20 @@ impl RegistreEcriture {
         // (un compte qui a deborde par le bas se voit ici).
         let debut = crate::kernel::timer::monotonic_ns();
         let mut vu = 0usize;
-        while LECTEURS.load(Ordering::Acquire) != 0 {
-            vu = vu.max(LECTEURS.load(Ordering::Relaxed));
-            core::hint::spin_loop();
+        // BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 : quiescence, puis `ACTIF`,
+        // puis relecture du compte. Un lecteur porteur entre la premiere
+        // lecture et `ACTIF` est vu par la relecture : on recule et on
+        // reattend.
+        loop {
+            while LECTEURS.load(Ordering::SeqCst) != 0 {
+                vu = vu.max(LECTEURS.load(Ordering::Relaxed));
+                core::hint::spin_loop();
+            }
+            ACTIF.store(true, Ordering::SeqCst);
+            if LECTEURS.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            ACTIF.store(false, Ordering::SeqCst);
         }
         ATTENTE_LECTEURS_PIRE_NS.fetch_max(
             crate::kernel::timer::monotonic_ns().saturating_sub(debut),
@@ -346,6 +422,7 @@ impl RegistreEcriture {
 
 impl Drop for RegistreEcriture {
     fn drop(&mut self) {
+        ACTIF.store(false, Ordering::Release);
         ECRIVAIN.store(false, Ordering::Release);
         if self.restaure_irq {
             interrupts::enable();

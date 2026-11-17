@@ -441,6 +441,12 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
     let mut current_tasks: Vec<(u32, u64)> = Vec::new();
     let mut cumuls: Vec<CumulProcessus> = Vec::new();
     let mut mesures: Vec<Mesure> = Vec::new();
+    // BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 (#283) : AUCUN verrou de
+    // processus sous la lecture du registre. Le `Mm` et les metadonnees sont
+    // lus apres, sur des `Arc` pris pendant le parcours. Tourner sur le `Mm`
+    // d'un WebWorker en tenant la lecture etait l'arete lecteur -> `Mm` du
+    // gel releve le 17/11 (voir `registre.rs`, `ACTIF`).
+    let mut a_mesurer: Vec<Arc<Process>> = Vec::new();
 
     for task in tasks().iter() {
         if task.state == TaskState::Zombie {
@@ -495,19 +501,18 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
                 // threads. WebContent avait 18 threads dans le run de preuve :
                 // le releve lui faisait donc payer 18 fois le meme RSS.
                 let process = &task.process;
-                let usage = crate::kernel::resource::memory_usage(process);
-                let nom = process.metadata.lock().name.clone();
+                a_mesurer.push(Arc::clone(process));
                 cumuls.push((pid, runtime, cpu_map_snapshot, task.migrations.charge(), task.context_switches.charge()));
                 mesures.push(Mesure {
                     pid,
                     ppid: process.parent,
-                    nom,
+                    nom: String::new(),
                     resource_group_id: process.resource_group_id,
                     resource_group_name: process.resource_group_name.clone(),
                     ticks: 0,
-                    octets: usage.rss,
-                    rss_octets: usage.rss,
-                    vss_octets: usage.vss,
+                    octets: 0,
+                    rss_octets: 0,
+                    vss_octets: 0,
                     taches: 0,
                     cpu_map_ns: [0; MAX_CPUS],
                     migrations: 0,
@@ -524,6 +529,18 @@ pub fn mesure_processus() -> (Vec<Mesure>, u64) {
             if task.state == TaskState::Ready {
                 mesure.runnable_threads += 1;
             }
+        }
+    }
+
+    // Lecture du registre rendue : les verrous de chaque processus, un a un.
+    for process in a_mesurer {
+        let usage = crate::kernel::resource::memory_usage(&process);
+        let nom = process.metadata.lock().name.clone();
+        if let Some(mesure) = mesures.iter_mut().find(|m| m.pid == process.pid) {
+            mesure.nom = nom;
+            mesure.octets = usage.rss;
+            mesure.rss_octets = usage.rss;
+            mesure.vss_octets = usage.vss;
         }
     }
 
