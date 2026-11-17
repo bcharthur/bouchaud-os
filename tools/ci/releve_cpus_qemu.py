@@ -19,6 +19,7 @@ Une ligne par vCPU et par echantillon, sur la sortie et dans SORTIE :
 Outil de DIAGNOSTIC : rend toujours 0 ; `QEMU_CPUS_ABSENT raison=...` si le
 moniteur ne repond pas. La symbolisation est faite par rapport_gel.py.
 """
+import os
 import re
 import socket
 import sys
@@ -94,9 +95,20 @@ def main(argv):
         return 0
     try:
         mon = Moniteur(argv[1])
-        lignes = releve(mon, 1)
-        time.sleep(1.0)
-        lignes += releve(mon, 2)
+        # RELEVE_ECHANTILLONS (2 par defaut, 9 au plus : `ech=` tient sur un
+        # chiffre) : un coeur qui sert ses IRQ (IF=1) a un RIP hors de sa
+        # boucle dans une partie des echantillons ; un banc qui doit l'y voir
+        # en prend davantage.
+        try:
+            n = int(os.environ.get("RELEVE_ECHANTILLONS", "2"))
+        except ValueError:
+            n = 2
+        n = max(1, min(9, n))
+        lignes = []
+        for ech in range(1, n + 1):
+            if ech > 1:
+                time.sleep(1.0)
+            lignes += releve(mon, ech)
     except OSError as exc:
         print(f"QEMU_CPUS_ABSENT raison=moniteur_injoignable ({exc})")
         return 0
