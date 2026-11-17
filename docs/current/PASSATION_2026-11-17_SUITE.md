@@ -1,4 +1,4 @@
-# Passation du 17/11/2026 (suite) — #329, #330, #331 fusionnées ; #328 et #319 en qualification
+# Passation du 17/11/2026 (suite) — #329, #330, #331, #328, #319 fusionnées ; #332 ouverte
 
 Suite de `PASSATION_2026-11-17.md`. Écriture GitHub rétablie dans cette
 session (fusion, création de PR, push).
@@ -9,7 +9,9 @@ session (fusion, création de PR, push).
 |---|---|---|---|
 | #329 Nightly provenance Ladybird | `6d94bcf` | `dbbe3bc` : 167 contrôles verts/sautés | tout vert (Ladybird annulé par le push suivant, voulu) ; **Nightly Full planifié vert sur `427fa15`** |
 | #330 processus jamais détruits | `1f97b4b` | `13a83b3` : 147 contrôles verts/sautés (SMP8 relancé une fois : action `download-artifact` injoignable, aucun code exécuté) | tout vert (Ladybird annulé par le push suivant) |
-| #331 gel #283 (registre + fenêtre de migration) | `427fa15` | `619da3c` : 17 runs push + PR verts au premier essai | 9/10 verts, Ladybird en file au moment d'écrire |
+| #331 gel #283 (registre + fenêtre de migration) | `427fa15` | `619da3c` : 17 runs push + PR verts au premier essai | tout vert, Ladybird compris ; Nightly Full et ladybird-sync planifiés verts |
+| #328 relevé NMI + rapport de gel | `504fdf1` | `4dda074` : 12 runs verts au premier essai | tout vert |
+| #319 signaux, fil principal | `0243643` | `e9e0ce5` (main `504fdf1` fusionné) : 15 runs verts, dont une relance (voir §4) | en cours au moment d'écrire |
 
 `integration.yml` garde les DEUX jobs `tempete-exec` et `fenetre-migration`
 et les deux entrées du gate.
@@ -52,17 +54,21 @@ et les deux entrées du gate.
 
 ## 4. #328 et #319
 
-* Les deux branches ont reçu main (`427fa15`) sans conflit ; gardes 183/183,
-  compilation OK.
-* **#328** : défaut réel trouvé et corrigé (`4dda074`). `releve_fils_qemu.sh`
-  doit rendre une ligne de verdict sur stdout ; le relevé QEMU des vCPU
-  ajouté devant y imprimait `[QEMU-CPU]`, et `run_releve_fils_e2e.sh`
-  concluait « Alt+SysRq n'a publié aucun relevé ». Lignes passées sur
-  stderr ; local avant ÉCHEC, après `RELEVE_FILS_E2E_OK fils=11`. Retours
-  Codex P1 (IST NMI) et P2 (`indetermine`) vérifiés dans le code et résolus.
-* **#319** : CI en cours à `fe2e645`, aucun échec à ce SHA au moment d'écrire.
-* Les runs de #328/#319 aux anciens SHA ont été annulés pour libérer les
-  runners (ils testaient une base périmée).
+* **#328** : défaut réel trouvé et corrigé avant fusion (`4dda074`).
+  `releve_fils_qemu.sh` doit rendre une ligne de verdict sur stdout ; le
+  relevé QEMU des vCPU imprimait `[QEMU-CPU]` devant, et
+  `run_releve_fils_e2e.sh` concluait « Alt+SysRq n'a publié aucun relevé ».
+  Lignes passées sur stderr (local : ÉCHEC avant, OK après). Retours Codex
+  P1 (IST NMI) et P2 (`indetermine`) vérifiés dans le code et résolus.
+* **#319** : qualifiée sur l'arbre exact fusionné (main avec #328). Un
+  échec, relancé une fois et vert : `qemu / noyau fige, proprietaire du
+  verrou`, oracle QEMU de #328 tiré au sort (voir #332).
+* **#332 (ouverte)** : l'oracle QEMU du banc souffrance prenait deux
+  échantillons et exigeait le détenteur au même RIP dans `detenteur` ; le
+  détenteur sert ses IRQ (IF=1). Six échantillons, trois exigés ; le banc
+  efface aussi le journal et le relevé d'un run précédent (en local, la
+  boucle d'attente lisait l'ancien journal : témoin « non armé »). Local :
+  4/4 OK enchaînés.
 
 ## 5. #283 : NE PAS FERMER
 
