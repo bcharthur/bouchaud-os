@@ -17,6 +17,13 @@ pilote PS/2 du noyau -- rien n'est simule dans l'OS :
   6. aucune panique, le compositeur survit.
 
 Sortie : BANC_BUREAU_ENTREES_OK, ou BANC_BUREAU_ENTREES_ECHEC (code 1).
+
+Sous Windows (WHPX), ou sans chaine musl : construire le disque une fois
+sous Linux/WSL (`--construit-seulement`), puis le rejouer avec `--disque`
+(monte en `snapshot=on`, jamais modifie), `--accel whpx --qemu CHEMIN` ; le
+moniteur passe en TCP (`--moniteur tcp`, defaut sous Windows). Le disque et
+le noyau d'un meme bras vont ensemble : un composited 1.6 appelle
+`bo_shm_fill_rect`, qu'un noyau 1.5 ne connait pas.
 """
 from __future__ import annotations
 
@@ -37,12 +44,16 @@ PAS = 100
 
 
 class Moniteur:
-    def __init__(self, chemin: str):
+    def __init__(self, adresse):
+        """`adresse` : un chemin (socket UNIX) ou un port TCP local (int)."""
         fin = time.time() + 30
         while True:
             try:
-                self.s = socket.socket(socket.AF_UNIX)
-                self.s.connect(chemin)
+                if isinstance(adresse, int):
+                    self.s = socket.create_connection(("127.0.0.1", adresse), timeout=5)
+                else:
+                    self.s = socket.socket(socket.AF_UNIX)
+                    self.s.connect(adresse)
                 break
             except OSError:
                 if time.time() > fin:
@@ -92,6 +103,12 @@ class Banc:
 
     # --- construction --------------------------------------------------------
     def construit(self):
+        if self.o.disque:
+            # Disque deja construit (Windows, ou meme disque pour tous les bras).
+            self.disque = Path(self.o.disque).resolve()
+            if not self.disque.is_file():
+                raise FileNotFoundError(f"disque absent : {self.disque}")
+            return
         env = dict(os.environ, OUT=str(self.sortie / "bin"))
         subprocess.run(["bash", "./build.sh"], cwd=RACINE / "userland/services/composited", env=env,
                        check=True, stdout=subprocess.DEVNULL)
@@ -117,14 +134,31 @@ class Banc:
 
     # --- QEMU ----------------------------------------------------------------
     def demarre(self):
-        self.socket = tempfile.mktemp(prefix="bo-entrees-", suffix=".sock")
-        accel = ["-enable-kvm", "-cpu", "host"] if self.o.accel == "kvm" else ["-cpu", "max"]
+        if self.o.accel == "kvm":
+            accel = ["-enable-kvm", "-cpu", "host"]
+        elif self.o.accel == "whpx":
+            # BOUCHAUD_WHPX_CPU_V1 (tools/windows/BouchaudQemu.psm1) : jamais
+            # `-cpu max` sous WHPX ; qemu64 + SSE4, comme le reste des bancs.
+            accel = ["-accel", f"whpx,kernel-irqchip={self.o.whpx_irqchip}",
+                     "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt"]
+        else:
+            accel = ["-cpu", "max"]
+        moniteur = self.o.moniteur or ("tcp" if os.name == "nt" else "unix")
+        if moniteur == "tcp":
+            with socket.socket() as libre:
+                libre.bind(("127.0.0.1", 0))
+                port = libre.getsockname()[1]
+            arg_moniteur, adresse = f"tcp:127.0.0.1:{port},server=on,wait=off", port
+        else:
+            self.socket = tempfile.mktemp(prefix="bo-entrees-", suffix=".sock")
+            arg_moniteur, adresse = f"unix:{self.socket},server,nowait", self.socket
+        disque = f"format=raw,file={self.disque}" + (",snapshot=on" if self.o.disque else "")
         self.qemu = subprocess.Popen(
-            ["qemu-system-x86_64", *accel, "-drive", f"format=raw,file={self.o.boot}",
-             "-drive", f"format=raw,file={self.disque}", "-m", "2048", "-smp", str(self.o.smp),
-             "-display", "none", "-no-reboot", "-monitor", f"unix:{self.socket},server,nowait",
+            [self.o.qemu, *accel, "-drive", f"format=raw,file={self.o.boot}",
+             "-drive", disque, "-m", str(self.o.memoire), "-smp", str(self.o.smp),
+             "-display", "none", "-no-reboot", "-monitor", arg_moniteur,
              "-serial", f"file:{self.log}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.mon = Moniteur(self.socket)
+        self.mon = Moniteur(adresse)
 
     def arrete(self):
         if getattr(self, "qemu", None) and self.qemu.poll() is None:
@@ -320,7 +354,8 @@ class Banc:
         self.exige("BOUCHAUD_ENTREES_RING3_ACTIVES" in t, "entrees confiees au compositeur")
 
     def bilan(self) -> int:
-        print(f"BANC_BUREAU_ENTREES latence_clic_hote_ms={getattr(self, 'latence_clic_s', 0) * 1000:.0f} "
+        print(f"BANC_BUREAU_ENTREES etiquette={self.o.etiquette or '-'} accel={self.o.accel} smp={self.o.smp} "
+              f"latence_clic_hote_ms={getattr(self, 'latence_clic_s', 0) * 1000:.0f} "
               f"deplacement_us={getattr(self, 'deplacement_us', None)}")
         g = getattr(self, "glisser", None)
         if g:
@@ -340,12 +375,25 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--boot", required=True)
     ap.add_argument("--sortie", default="target/bureau-ring3-entrees")
-    ap.add_argument("--accel", choices=("tcg", "kvm"), default="tcg")
+    ap.add_argument("--accel", choices=("tcg", "kvm", "whpx"), default="tcg")
+    ap.add_argument("--whpx-irqchip", default="off")
+    ap.add_argument("--qemu", default="qemu-system-x86_64")
+    ap.add_argument("--memoire", type=int, default=2048)
+    ap.add_argument("--moniteur", choices=("unix", "tcp"), default=None,
+                    help="defaut : tcp sous Windows, unix ailleurs")
+    ap.add_argument("--disque", help="disque deja construit (monte en snapshot=on)")
+    ap.add_argument("--construit-seulement", action="store_true",
+                    help="construit SORTIE/disque.img et s'arrete (pour --disque ailleurs)")
+    ap.add_argument("--etiquette", default="", help="nom du bras, repris dans le bilan")
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--faute-apres", type=int, default=900, help="trames avant la faute de la 3e application")
     ap.add_argument("--attente-faute", type=float, default=180)
     o = ap.parse_args(argv)
     banc = Banc(o)
+    if o.construit_seulement:
+        banc.construit()
+        print(f"BANC_BUREAU_ENTREES_DISQUE {banc.disque}")
+        return 0
     try:
         banc.construit()
         banc.demarre()

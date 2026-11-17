@@ -116,6 +116,27 @@ serveur ne manipulerait que des **identifiants de surface** et des
    recomposition de l'enveloppe des deux cadres. Les captures B0–B4 restent
    identiques au pixel. Effet de bord mesuré au bras A/B (animation) :
    présentation par trame 908 → 497 µs.
+
+   **Sous WHPX (non mesuré à ce jour, aucune machine Windows dans la
+   session).** Le banc se rejoue sous Windows avec un disque construit une
+   fois sous Linux/WSL, monté en `snapshot=on`, et le moniteur en TCP :
+
+   ```bash
+   # Linux/WSL, sur l'arbre d'AVANT puis sur celui d'APRES (chacun son noyau)
+   python3 tools/ci/banc_bureau_ring3_entrees.py --boot A.bin --sortie disque-A --construit-seulement
+   python3 tools/ci/banc_bureau_ring3_entrees.py --boot B.bin --sortie disque-B --construit-seulement
+   ```
+
+   ```powershell
+   # Windows PowerShell 5.1, bras alternés A B A B …, aucun seuil
+   .\tools\windows\Banc-Bureau-Entrees.ps1 -BootA A.bin -DisqueA disque-A\disque.img `
+       -BootB B.bin -DisqueB disque-B\disque.img -Repetitions 3 -Smp 2
+   ```
+
+   Sortie : `BANC_BUREAU_ENTREES_AB` (médiane du pas moyen, pire pas,
+   présentation, appels par pas, passages en échec comptés), CSV et
+   `serie.log` de chaque passage ; l'accélérateur réel est relu sur la liaison
+   série (`BOUCHAUD_CPU_ISA`), jamais déduit de l'option.
    Pas encore : routage selon `windowd`, curseur matériel, USB HID sous ce
    chemin, DOOM et Ladybird sous `composited`.
 4. **Applications natives** (Fichiers, Notes, Terminal, Calculatrice) en
