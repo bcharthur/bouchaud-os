@@ -374,6 +374,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // VOLONTAIREMENT tous les coeurs. Jamais livre.
     #[cfg(feature = "banc-souffrance-verrou")]
     platform::pc::banc_souffrance::demarre();
+    // BOUCHAUD_FENETRE_MIGRATION_V1 (#283) : temoin, jamais livre.
+    #[cfg(feature = "banc-fenetre-migration")]
+    platform::pc::banc_fenetre::demarre();
 
     // PRECHAUFFER LE NAVIGATEUR, SANS LE LANCER.
     //

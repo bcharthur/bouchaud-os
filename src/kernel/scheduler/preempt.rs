@@ -127,7 +127,49 @@ fn note_refus(index: usize) {
 fn local_id() -> Option<CpuId> { CpuId::from_index(smp::cpu_index()) }
 
 pub fn disable() {
-    if let Some(id) = local_id() { cpu_local::local(id).preempt_disable(); }
+    // BOUCHAUD_FENETRE_MIGRATION_V1 : lire l'indice du coeur et poser la
+    // marque forment UNE operation, faite interruptions coupees. Seule une
+    // IRQ peut commuter un fil noyau (preemption ciblee) ; entre la lecture
+    // et l'increment, le compteur est encore nul et la tache preemptible.
+    // Commutee la, elle reprenait ailleurs et incrementait le coeur QUITTE :
+    // celui-ci restait non preemptible pour toujours, et `enable()`, sur le
+    // nouveau coeur, passait sous zero (`preempt_count underflow`, Ladybird
+    // perf avant-simple du 15/11, coeur 3). Une fois la marque posee, la
+    // tache ne peut plus etre commutee : `note_fenetre` le verifie.
+    let marque = x86_64::instructions::interrupts::without_interrupts(|| {
+        let id = local_id()?;
+        #[cfg(feature = "banc-fenetre-migration")]
+        crate::platform::pc::banc_fenetre::pause();
+        cpu_local::local(id).preempt_disable();
+        Some(id.as_usize())
+    });
+    if let Some(marque) = marque {
+        note_fenetre(marque, &FENETRE_PREEMPT);
+    }
+}
+
+/// BOUCHAUD_FENETRE_MIGRATION_V1 -- marques posees sur un AUTRE coeur.
+///
+/// `preempt_count` et `verrous_simples` sont des compteurs PAR COEUR. Une
+/// marque se pose en deux temps : lire l'indice du coeur, puis incrementer
+/// son compteur. Tant que le compteur n'est pas incremente, la tache est
+/// preemptible ; si elle est commutee entre les deux temps et reprend
+/// ailleurs, la marque tombe sur le coeur QU'ELLE A QUITTE.
+///
+/// Ces compteurs disent combien de fois une marque a ete posee sur un autre
+/// coeur que celui qui execute la tache juste apres. Ils doivent rester nuls.
+pub static FENETRE_PREEMPT: AtomicU64 = AtomicU64::new(0);
+pub static FENETRE_VERROU: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub fn note_fenetre(marque: usize, compteur: &AtomicU64) {
+    if smp::cpu_index() != marque {
+        compteur.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn fenetres_migrees() -> (u64, u64) {
+    (FENETRE_PREEMPT.load(Ordering::Relaxed), FENETRE_VERROU.load(Ordering::Relaxed))
 }
 
 pub fn enable() {

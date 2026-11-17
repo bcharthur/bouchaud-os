@@ -140,12 +140,38 @@ def main() -> int:
     else:
         masque = ecriture.find("interrupts::disable()")
         publie = ecriture.find("compare_exchange(false, true")
-        attend = ecriture.find("LECTEURS.load(Ordering::Acquire) != 0")
+        attend = ecriture.find("LECTEURS.load(Ordering::SeqCst) != 0")
         if not (0 <= masque < publie < attend):
             fautes.append(
                 "  RegistreEcriture  ordre invalide : masquer IRQ -> publier "
                 "ecrivain -> attendre lecteurs est obligatoire"
             )
+        # BOUCHAUD_REGISTRE_ECRIVAIN_DEUX_TEMPS_V1 : quiescence, PUIS `ACTIF`,
+        # PUIS relecture du compte (Dekker avec les lecteurs porteurs).
+        actif = ecriture.find("ACTIF.store(true, Ordering::SeqCst)")
+        relu = ecriture.find("LECTEURS.load(Ordering::SeqCst) == 0", actif)
+        if not (0 <= attend < actif < relu):
+            fautes.append(
+                "  RegistreEcriture  `ACTIF` doit etre pose apres la quiescence "
+                "et suivi d'une relecture du compte (SeqCst)"
+            )
+    # Le lecteur porteur de verrou : compte PUIS lit `ACTIF`, jamais
+    # `ECRIVAIN` (il ne s'efface que devant un ecrivain qui ecrit).
+    debut_lecteur = code.find("impl RegistreLecture")
+    lecteur = corps(code[debut_lecteur:], "fn acquire() -> Self {") if debut_lecteur >= 0 else ""
+    porteur = lecteur.find("contexte_porteur()")
+    compte = lecteur.find("LECTEURS.fetch_add(1, Ordering::SeqCst)", porteur)
+    lit_actif = lecteur.find("ACTIF.load(Ordering::SeqCst)", compte)
+    if not (0 <= porteur < compte < lit_actif):
+        fautes.append(
+            "  RegistreLecture  un contexte porteur de verrou doit compter PUIS "
+            "lire `ACTIF` : sinon il attend un ecrivain qui attend (gel #283)"
+        )
+    if "local.irq_depth() != 0" not in code or "local.verrous_simples() != 0" not in code:
+        fautes.append(
+            "  registre.rs  `contexte_porteur` ne reconnait plus les IRQ ou les "
+            "verrous tournants tenus"
+        )
 
     # --- 4. le recyclage : ecriture, puis generation, puis remplacement -----
     try:
