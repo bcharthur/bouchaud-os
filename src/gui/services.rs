@@ -875,9 +875,10 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
     );
     let (fenetre_preempt, fenetre_verrou) = crate::kernel::scheduler::preempt::fenetres_migrees();
     crate::serial_println!(
-        "[PROC-STAT] fenetre_migree preempt={} verrou={}",
+        "[PROC-STAT] fenetre_migree preempt={} verrou={} lectures_porteuses={}",
         fenetre_preempt,
         fenetre_verrou,
+        crate::kernel::task::lectures_porteuses(),
     );
     // BOUCHAUD_CR3_MEME_ESPACE_V1 : commutations et chargements de CR3
     // (utilisateur ecrits, evites ; noyau), cumules depuis le demarrage.
