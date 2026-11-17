@@ -868,10 +868,12 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         residu / 1_000_000,
     );
     crate::serial_println!(
-        "[PROC-STAT] zombies={} vivantes={} releves_fautes_manques={}",
+        "[PROC-STAT] zombies={} vivantes={} releves_fautes_manques={} processus_crees={} processus_detruits={}",
         zombies,
         vivantes,
         RELEVES_FAUTES_MANQUES.load(Ordering::Relaxed),
+        crate::kernel::task::processus_crees_detruits().0,
+        crate::kernel::task::processus_crees_detruits().1,
     );
     // BOUCHAUD_CR3_MEME_ESPACE_V1 : commutations et chargements de CR3
     // (utilisateur ecrits, evites ; noyau), cumules depuis le demarrage.

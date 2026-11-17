@@ -47,6 +47,9 @@ tools/userland/test-out/
 # os-primitives et ce qu'on refait a la main pour reproduire un defaut. Meme
 # nature que `out/` juste au-dessus : des binaires regenerables.
 tools/userland/out-sondes/
+# Sonde de tools/ci/run_tempete_exec.sh (BOUCHAUD_TEMPETE_EXEC_V1).
+tools/userland/out-tempete-exec/
+tempete-exec/
 # Chantiers et resultats de build-python.sh / build-qt.sh (sources telechargees,
 # arbres de compilation, binaires produits)
 tools/userland/build-python-musl/

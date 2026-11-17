@@ -190,11 +190,9 @@ fn read_string_array(addr: u64) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// `execve` : remplace l'image du processus courant.
-///
-/// Ne revient jamais en cas de succes — le processus repart au point d'entree
-/// du nouveau programme.
-pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
+/// Tout le travail d'`execve`, jusqu'a la trame de la nouvelle image comprise.
+/// REVIENT toujours : voir `sys_execve`.
+fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<TrapFrame, i64> {
     // BOUCHAUD_C55_LES_QUARANTE_TROIS_SECONDES
     //
     // Le segment `fork_exit -> exec_enter` vaut 43,4 s pour le premier
@@ -221,15 +219,15 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
             crate::kernel::security::filesystem::AT_FDCWD,
             path.as_str(),
         ).unwrap_or(path),
-        None => return -errno::EFAULT,
+        None => return Err(-errno::EFAULT),
     };
     let argv = match read_string_array(argv_addr) {
         Some(list) => list,
-        None => return -errno::EFAULT,
+        None => return Err(-errno::EFAULT),
     };
     let envp = match read_string_array(envp_addr) {
         Some(list) => list,
-        None => return -errno::EFAULT,
+        None => return Err(-errno::EFAULT),
     };
 
     let process = task::current_process();
@@ -251,25 +249,25 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
         let fs = crate::fs::ramfs::fs();
         match fs.resolve(&path, cwd) {
             Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => node,
-            Some(_) => return -errno::EISDIR,
-            None => return -errno::ENOENT,
+            Some(_) => return Err(-errno::EISDIR),
+            None => return Err(-errno::ENOENT),
         }
     };
     let apres_ouverture_ns = crate::kernel::timer::monotonic_ns();
     if elf::parse_node(node).is_err() {
-        return -errno::ENOEXEC;
+        return Err(-errno::ENOEXEC);
     }
     let apres_entetes_ns = crate::kernel::timer::monotonic_ns();
 
     let mut space = match vmm::AddressSpace::new() {
         Some(space) => space,
-        None => return -errno::ENOMEM,
+        None => return Err(-errno::ENOMEM),
     };
 
     let mut new_promises = Vec::new();
     let image = match elf::load_node_lazy(node, vmm::user_load_base(), &mut new_promises) {
         Ok(image) => image,
-        Err(_) => return -errno::ENOEXEC,
+        Err(_) => return Err(-errno::ENOEXEC),
     };
     let (entry, interp_base) = match image.interp.as_deref() {
         None => (image.entry, 0),
@@ -277,11 +275,11 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
             let fs = crate::fs::ramfs::fs();
             let interp_node = match fs.resolve(interp_path, cwd) {
                 Some(node) => node,
-                None => return -errno::ENOENT,
+                None => return Err(-errno::ENOENT),
             };
             match elf::load_node_lazy(interp_node, vmm::user_interp_base(), &mut new_promises) {
                 Ok(interp) => (interp.entry, interp.base),
-                Err(_) => return -errno::ENOEXEC,
+                Err(_) => return Err(-errno::ENOEXEC),
             }
         }
     };
@@ -306,7 +304,7 @@ pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     let apres_projections_ns = crate::kernel::timer::monotonic_ns();
     let stack = match elf::build_stack(&mut space, &mut new_promises, &layout) {
         Ok(stack) => stack,
-        Err(_) => return -errno::ENOMEM,
+        Err(_) => return Err(-errno::ENOMEM),
     };
     let apres_pile_ns = crate::kernel::timer::monotonic_ns();
 
@@ -462,11 +460,32 @@ duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}"
     usermode::set_kernel_stack(task.kstack_top);
     let frame = TrapFrame::new_user(entry, stack);
     task.frame = frame;
-    // Le garde est rendu ICI : la reprise en ring 3 ne revient jamais, et le
-    // conserver laisserait l'emplacement marque exclusif pour toujours --
-    // aucun recyclage ne pourrait plus le reprendre.
     drop(task);
+    Ok(frame)
+}
 
+/// `execve` : remplace l'image du processus courant.
+///
+/// Ne revient jamais en cas de succes -- le processus repart au point d'entree
+/// du nouveau programme.
+///
+/// BOUCHAUD_SORTIE_SANS_REFERENCE_V1 : `resume_usermode` ne revient JAMAIS. La
+/// pile de cet appel est abandonnee sans executer un seul destructeur : tout ce
+/// qui y vivait encore etait perdu a chaque `execve` reussi -- l'`Arc<Process>`
+/// du processus (donc, a sa mort, TOUT son espace d'adressage), l'identite de
+/// l'ancien espace, le chemin, `argv` et `envp`. Mesure (tempete-exec-probe,
+/// TCG SMP4) : 7 700 processus crees, 3 544 detruits -- exactement ceux qui
+/// n'avaient pas fait `execve` ; la RAM pleine en 2 000 cycles fork+exec.
+/// Tout le travail se fait donc dans `prepare_execve`, qui REVIENT et rend
+/// tout ; ici ne vit plus qu'une trame `Copy` au moment de sauter.
+pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
+    let frame = match prepare_execve(path_addr, argv_addr, envp_addr) {
+        Ok(frame) => frame,
+        Err(erreur) => return erreur,
+    };
+    // Le garde de tache est deja rendu (`prepare_execve`) : le conserver
+    // laisserait l'emplacement marque exclusif pour toujours.
+    //
     // Cette pile ne reprendra jamais : la sonde syscall est fermee ici, avant
     // l'iretq. Le chemin no-return abandonnait aussi le gros verrou et une
     // portee de domaine ; ni l'un ni l'autre n'existent plus
@@ -768,6 +787,9 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
                         "[signal] {} non intercepte : processus termine",
                         signal::name(signal)
                     );
+                    // BOUCHAUD_SORTIE_SANS_REFERENCE_V1 : `exit_group_par_signal`
+                    // ne revient pas ; `process` ne serait jamais rendu.
+                    drop(process);
                     task::exit_group_par_signal(signal as i32);
                 }
             }
@@ -776,11 +798,13 @@ pub fn deliver_pending(frame: &mut TrapFrame) {
         // gestionnaire installe (rt_sigaction le refuse deja, ceinture et
         // bretelles).
         if signal == signal::SIGKILL || signal == signal::SIGSTOP {
+            drop(process);
             task::exit_group_par_signal(signal as i32);
         }
 
         if !signal::deliver(frame, signal, &action, blocked) {
             crate::serial_println!("[signal] pile utilisateur inaccessible : processus termine");
+            drop(process);
             task::exit_group_par_signal(signal::SIGSEGV as i32);
         }
 
