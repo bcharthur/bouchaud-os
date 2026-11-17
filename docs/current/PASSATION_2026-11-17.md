@@ -91,7 +91,7 @@ ne doit pas être fermée avant la CI au SHA et une campagne Ladybird.
 | `claude/fuite-processus` (#330) | `c148fec` (+1) | fuite de processus + tempête : silence déclaré, vCPU relevés, journal dans la sortie du job | push en attente |
 | `claude/gel-283-nmi` (#328) | `19a7bc8` (+2) | relevé QEMU des vCPU (ex-`gel-283-qemu-cpus`) ; NMI sur pile IST dédiée ; pile lue seulement en RAM noyau ; verdict `indetermine` sans preuve (retours Codex P1/P2) | push en attente ; témoin local `SOUFFRANCE_VERROU_OK` |
 | `claude/fenetre-migration-283` (nouvelle) | voir `git log` | §1.1 + §1.2, témoin, job CI, gardes | push + PR |
-| `claude/endurance-smp8-sonde` (nouvelle) | `812f988` | sonde d'ordonnancement : 2 calculs par cœur | push + PR |
+| `claude/endurance-smp8-sonde` (locale) | `766e5f3` | hypothèse RÉFUTÉE (voir §3) | **ne pas pousser** |
 | `claude/sigchld-boucle` (#319) | `6a9a183` | fusion de main | push après les correctifs |
 
 Branches `essai/*` : locales, de test uniquement, **à ne pas pousser**.
@@ -108,10 +108,16 @@ source `failure`).
 ## 3. Endurance hebdomadaire du 15/11 (run 43706702060)
 
 * **SMP8** : 82/82 cycles `NON_QUALIFIANT`, `ENDURANCE_ORDONNANCEUR_OK`
-  absent, statut 2, aucune panique. Cause : 8 calculs sur 8 cœurs ne
-  surchargent rien, la porte « la charge dégrade la latence » n'est jamais
-  franchie. Corrigé dans `claude/endurance-smp8-sonde` (≥ 2 calculs par cœur,
-  SMP1–4 inchangés). Non revalidé localement (à faire en CI).
+  absent, statut 2, aucune panique, aucune ligne de souffrance : **ce n'est
+  pas un défaut du noyau**. Première hypothèse (8 calculs sur 8 cœurs, pas
+  de surcharge) **réfutée en local** : SMP8 sous TCG, 8 et 16 calculs donnent
+  tous deux `NON_QUALIFIANT`, raison « 120 à 169 réveils retardés sans
+  explication sur 300, aucune preuve de l'hôte ». 8 vCPU sur un hôte de 4
+  cœurs (le runner GitHub aussi) : l'hôte retarde les réveils et la sonde
+  refuse, à juste titre, de juger. Décision à prendre (coût) : tranche SMP8
+  sur un runner d'au moins 8 cœurs (comme `p13-dedicated-kvm`, préflight
+  `--min-cpus 8`), ou verdict « environnement » explicite. La branche locale
+  `claude/endurance-smp8-sonde` n'est PAS à pousser.
 * **SMP4** : 2/146 cycles non qualifiants (sonde), pas de gel.
 * **SMP1** : verdict soak OK (172/172), mais `ECHEC budgets` sur tous les
   cycles (8/10 grandeurs mesurées ; écart isolé p99 33,6 ms sous 250 ms) :
@@ -119,8 +125,16 @@ source `failure`).
 
 ## 4. #319 (SIGCHLD)
 
-Requalification locale sur main + #330 + correctifs #283 : voir le compte
-rendu de session (bancs `run_sigchld_repetition.sh` SMP4/2/1 et tempête).
+Requalification locale de `claude/sigchld-boucle` fusionnée sur main + #330
++ correctifs #283 (TCG) :
+
+* `run_sigchld_repetition.sh` 30 répétitions : SMP4, SMP2, SMP1 —
+  `SIGCHLD_REPETITION_OK` les trois ;
+* tempête fork+exec SMP4 : 4/4, aucun gel ;
+* gardes : toutes vertes.
+
+Aucun gel ni échec attribuable à #319. Fusion possible après #330 et la PR
+#283, CI au SHA verte.
 
 ## 5. Rien n'a été fait pour
 
