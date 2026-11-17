@@ -56,6 +56,7 @@ typedef long i64;
 #define BO_SHM_SIZE       (BO_BASE + 0x41)
 #define BO_SHM_READ       (BO_BASE + 0x42)
 #define BO_SHM_WRITE      (BO_BASE + 0x43)
+#define BO_SHM_FILL_RECT  (BO_BASE + 0x44)
 #define BO_DISPLAY_PRESENT (BO_BASE + 0x80)
 #define BO_DISPLAY_INFO    (BO_BASE + 0x81)
 #define BO_FENETRE_POMPE   (BO_BASE + 0x90)
@@ -63,6 +64,8 @@ typedef long i64;
 #define BO_FENETRE_CONFIGURE (BO_BASE + 0x92)
 #define BO_FENETRE_FERME   (BO_BASE + 0x93)
 #define BO_DISPLAY_RELANCE_CLIENT (BO_BASE + 0x82)
+#define BO_DISPLAY_ENTREES (BO_BASE + 0x83)
+#define BO_FENETRE_ENTREE  (BO_BASE + 0x94)
 #define BO_WAITSET_REMOVE  (BO_BASE + 0x32)
 #define BO_WAITSET_WAIT    (BO_BASE + 0x34)
 #define BO_TIME_NOW        (BO_BASE + 0x60)
@@ -576,7 +579,6 @@ int principal(void)
 #define FEN_MAX 4
 
 static u32 ecran_l, ecran_h;
-static u32 ligne_bureau[BUREAU_LIGNE_MAX];
 
 struct fen {
     i64 poignee;
@@ -592,6 +594,8 @@ static int nfen;
 static int ordre[FEN_MAX];   /* ordre[0] : fond ... ordre[nfen-1] : premier plan */
 static i64 affichage_g, region_g;
 static u64 lit_ns, lit_max, pres_ns, pres_max, trames_total, pixels_total, recompositions;
+/* Appels systeme d'ecriture dans la region (remplissages + lignes). */
+static u64 appels_region;
 
 struct rect { u32 x, y, l, h; };
 
@@ -612,19 +616,23 @@ static int intersecte(struct rect a, struct rect b, struct rect *out)
     return 1;
 }
 
-static i64 ecris_segment(u32 x, u32 y, u32 l, u32 couleur)
-{
-    for (u32 c = 0; c < l; c++) ligne_bureau[c] = couleur;
-    return sys6(BO_SHM_WRITE, (u64)region_g, ((u64)y * ecran_l + x) * 4u, (u64)ligne_bureau, (u64)l * 4u, 0, 0);
-}
-
+/* BOUCHAUD_SHM_RECT_V1 : un rectangle plein en UN appel. Le noyau le
+ * remplit sur place (`bo_shm_fill_rect`) : ni copie depuis ce processus, ni
+ * allocation noyau. Avant : un `bo_shm_write` par ligne et par segment. */
 static i64 remplit(struct rect r, u32 couleur)
 {
-    for (u32 y = r.y; y < r.y + r.h; y++) {
-        i64 e = ecris_segment(r.x, y, r.l, couleur);
-        if (e < 0) return e;
-    }
-    return 0;
+    if (!r.l || !r.h) return 0;
+    appels_region++;
+    i64 e = sys6(BO_SHM_FILL_RECT, (u64)region_g, ((u64)r.y * ecran_l + r.x) * 4u, couleur,
+                 r.l, r.h, (u64)ecran_l * 4u);
+    return e < 0 ? e : 0;
+}
+
+/* Un rectangle de couleur, borne a `zone`. */
+static void remplit_dans(struct rect a, struct rect zone, u32 couleur)
+{
+    struct rect i;
+    if (intersecte(a, zone, &i)) remplit(i, couleur);
 }
 
 struct lecture_fenetre { u32 x, y, l, h, decalage, pas; };
@@ -667,6 +675,9 @@ static int active(void)
     return -1;
 }
 
+static void superpose_curseur(struct rect r);
+static void dessine_fermer(const struct fen *f, struct rect r);
+
 /* L'algorithme du peintre sur `r`, puis UNE presentation. */
 static i64 recompose(struct rect r)
 {
@@ -681,30 +692,26 @@ static i64 recompose(struct rect r)
         struct rect c = cadre_de(f), i;
         if (!intersecte(r, c, &i)) continue;
         int premier_plan = (ordre[k] == active());
-        /* Cadre : bordure, barre (active au premier plan), en bandes. */
-        struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
+        /* Cadre : cinq rectangles pleins bornes a `i` -- bordure haute,
+         * basse, gauche et droite, puis la barre (active au premier plan).
+         * Memes pixels que l'ancien trace ligne a ligne ; le contenu est
+         * recopie ensuite, par-dessus rien d'autre que ce cadre. */
         struct rect contenu = { f->x, f->y, f->l, f->h };
+        struct rect haut = { c.x, c.y, c.l, BUREAU_BORD_L };
+        struct rect bas = { c.x, f->y + f->h, c.l, BUREAU_BORD_L };
+        struct rect gauche = { c.x, f->y - BUREAU_BARRE_H, BUREAU_BORD_L, BUREAU_BARRE_H + f->h };
+        struct rect droite = { f->x + f->l, f->y - BUREAU_BARRE_H, BUREAU_BORD_L, BUREAU_BARRE_H + f->h };
+        struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
+        remplit_dans(haut, i, BUREAU_BORD);
+        remplit_dans(bas, i, BUREAU_BORD);
+        remplit_dans(gauche, i, BUREAU_BORD);
+        remplit_dans(droite, i, BUREAU_BORD);
+        remplit_dans(barre, i, premier_plan ? BUREAU_BARRE : BUREAU_BARRE_INACTIVE);
         struct rect morceau;
-        if (intersecte(i, c, &morceau)) {
-            for (u32 y = morceau.y; y < morceau.y + morceau.h; y++) {
-                struct rect ligne = { morceau.x, y, morceau.l, 1 }, sous;
-                if (intersecte(ligne, barre, &sous)) {
-                    /* bordure gauche/droite autour de la barre */
-                    if (sous.x > ligne.x) ecris_segment(ligne.x, y, sous.x - ligne.x, BUREAU_BORD);
-                    ecris_segment(sous.x, y, sous.l, premier_plan ? BUREAU_BARRE : BUREAU_BARRE_INACTIVE);
-                    if (sous.x + sous.l < ligne.x + ligne.l)
-                        ecris_segment(sous.x + sous.l, y, ligne.x + ligne.l - sous.x - sous.l, BUREAU_BORD);
-                } else if (intersecte(ligne, contenu, &sous)) {
-                    if (sous.x > ligne.x) ecris_segment(ligne.x, y, sous.x - ligne.x, BUREAU_BORD);
-                    if (sous.x + sous.l < ligne.x + ligne.l)
-                        ecris_segment(sous.x + sous.l, y, ligne.x + ligne.l - sous.x - sous.l, BUREAU_BORD);
-                } else {
-                    ecris_segment(ligne.x, y, ligne.l, BUREAU_BORD);
-                }
-            }
-        }
         if (intersecte(i, contenu, &morceau)) recopie_contenu(f, morceau);
+        dessine_fermer(f, r);
     }
+    superpose_curseur(r);
     return presente_rect(r);
 }
 
@@ -744,8 +751,24 @@ static void deplace(int indice, u32 nx, u32 ny)
     struct fen *f = &fens[indice];
     struct rect avant = cadre_de(f);
     f->x = nx; f->y = ny;
-    recompose(avant);
-    recompose(cadre_de(f));
+    struct rect apres = cadre_de(f);
+    /* Un pas de glisser est court : l'ancien et le nouveau cadre se
+     * recouvrent presque entierement. Leur ENVELOPPE se recompose et se
+     * presente en une fois (le peintre donne les memes pixels sur n'importe
+     * quel rectangle) au lieu de composer et presenter deux fois la partie
+     * commune. Deux rectangles seulement si l'enveloppe coute plus. */
+    u32 x0 = avant.x < apres.x ? avant.x : apres.x, y0 = avant.y < apres.y ? avant.y : apres.y;
+    u32 x1 = avant.x + avant.l > apres.x + apres.l ? avant.x + avant.l : apres.x + apres.l;
+    u32 y1 = avant.y + avant.h > apres.y + apres.h ? avant.y + avant.h : apres.y + apres.h;
+    u64 enveloppe = (u64)(x1 - x0) * (y1 - y0);
+    u64 deux = (u64)avant.l * avant.h + (u64)apres.l * apres.h;
+    if (enveloppe <= deux) {
+        struct rect e = { x0, y0, x1 - x0, y1 - y0 };
+        recompose(e);
+    } else {
+        recompose(avant);
+        recompose(apres);
+    }
 }
 
 /* Les refus que le noyau doit opposer, une fois une trame connue. */
@@ -776,6 +799,43 @@ static void eprouve_refus(i64 fenetre, u32 peint_l, u32 peint_h, u32 fx, u32 fy)
     struct lecture_fenetre *invalide = (struct lecture_fenetre *)0x10;
     r = sys6(BO_FENETRE_LIT, (u64)fenetre, (u64)region, (u64)invalide, 0, 0, 0);
     exige(r == -BO_E_FAULT, "bureau : demande a une adresse invalide refusee");
+    /* BOUCHAUD_ENTREES_RING3_V1 : les bornes du routage d'entrees. Aucun de
+     * ces appels ne livre quoi que ce soit au client. */
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 9, 0, 0, 0, 0);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : genre inconnu refuse");
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 1, 0, 0, 8, 0);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : boutons hors des trois bits refuses");
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 1, 0x80000000UL, 0, 0, 0);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : coordonnee hors i32 refusee");
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 3, 0, 0x110000, 0, 1);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : point de code hors Unicode refuse");
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 3, 0, 97, 0, 2);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : appui hors {0,1} refuse");
+    r = sys6(BO_FENETRE_ENTREE, (u64)fenetre, 2, 0, 0, 0, 0);
+    exige(r == -BO_E_INVALID_ARGUMENT, "entrees : molette sans cran refusee");
+    r = sys6(BO_FENETRE_ENTREE, (u64)affichage, 1, 0, 0, 0, 0);
+    exige(r == -BO_E_ACCESS_DENIED, "entrees : la capacite d'affichage ne sert pas de fenetre");
+    r = sys6(BO_DISPLAY_ENTREES, (u64)fenetre, 0, 1, 0, 0, 0);
+    exige(r == -BO_E_ACCESS_DENIED, "entrees : une fenetre ne lit pas les entrees");
+    r = sys6(BO_DISPLAY_ENTREES, (u64)affichage, 0xffff800000000000UL, 1, 0, 0, 0);
+    exige(r == -BO_E_FAULT, "entrees : tampon a une adresse noyau refuse");
+    /* BOUCHAUD_SHM_RECT_V1 : les bornes du remplissage rectangulaire. */
+    r = sys6(BO_SHM_FILL_RECT, (u64)region, 0, 0, 0, 1, 4);
+    exige(r == -BO_E_INVALID_ARGUMENT, "region : remplissage vide refuse");
+    r = sys6(BO_SHM_FILL_RECT, (u64)region, 0, 1UL << 32, 1, 1, 4);
+    exige(r == -BO_E_INVALID_ARGUMENT, "region : couleur hors 32 bits refusee");
+    r = sys6(BO_SHM_FILL_RECT, (u64)region, 0, 0, 8, 2, 4);
+    exige(r == -BO_E_INVALID_ARGUMENT, "region : pas plus court qu'une ligne refuse");
+    r = sys6(BO_SHM_FILL_RECT, (u64)region, (u64)ecran_l * ecran_h * 4u - 3u, 0, 1, 1, 4);
+    exige(r == -BO_E_INVALID_ARGUMENT, "region : remplissage au-dela de la region refuse");
+    r = sys6(BO_SHM_FILL_RECT, (u64)region, 0, 0, 1, 0x4000000000000001UL, 4);
+    exige(r == -BO_E_INVALID_ARGUMENT, "region : debordement de (lignes - 1) * pas refuse");
+    lecture_seule = sys6(BO_HANDLE_DUP, (u64)region, BO_RIGHT_READ, 0, 0, 0, 0);
+    r = sys6(BO_SHM_FILL_RECT, (u64)lecture_seule, 0, 0, 1, 1, 4);
+    exige(r == -BO_E_ACCESS_DENIED, "region : remplissage sans droit WRITE refuse");
+    sys6(BO_HANDLE_CLOSE, (u64)lecture_seule, 0, 0, 0, 0, 0);
+    r = sys6(BO_SHM_FILL_RECT, (u64)affichage, 0, 0, 1, 1, 4);
+    exige(r == -BO_E_ACCESS_DENIED, "region : la capacite d'affichage n'est pas une region");
     if (echecs == 0) ecris("COMPOSITED_BUREAU_REFUS_OK\n");
 }
 
@@ -898,6 +958,327 @@ static void restaure(int i)
     publie_fenetre(i, "COMPOSITED_BUREAU_RESTAURE fenetre=");
 }
 
+/* ===========================================================================
+ * BOUCHAUD_ENTREES_RING3_V1 -- tranche 3 : la souris et le clavier.
+ *
+ * Le noyau garde le pilote ; il rend au compositeur, sur la capacite
+ * d'affichage, l'etat souris et les transitions de touche
+ * (`bo_display_entrees`). Le compositeur fait ce qu'un bureau fait :
+ *   - un curseur, dessine dans SA surface (aucun curseur noyau) ;
+ *   - un clic remonte la fenetre et lui donne le foyer ;
+ *   - la barre de titre se tire (deplacement) ; la case rouge ferme ;
+ *   - le contenu recoit pointeur et molette, en coordonnees du contenu ;
+ *   - le clavier va a la fenetre active, et a elle seule.
+ * Chaque entree routee passe par `bo_fenetre_entree` : le noyau ecrit le
+ * message du protocole GUI au client. Un client mort ne recoit rien et ne
+ * fige rien : ses entrees sont refusees (PeerClosed), le bureau continue.
+ *
+ * Le curseur et la case de fermeture n'apparaissent qu'a la PREMIERE entree
+ * reelle : un banc qui ne touche ni souris ni clavier voit exactement l'ecran
+ * d'avant (captures jugees au pixel inchangees).
+ * ========================================================================= */
+
+#define ENTREE_TOUCHES_MAX 32
+#define ENTREE_POINTEUR 1
+#define ENTREE_MOLETTE  2
+#define ENTREE_TOUCHE   3
+#define FERMER_L 22u
+#define FERMER_COULEUR 0xc0392bu
+#define CUR_L 12u
+#define CUR_H 19u
+
+static const char *const curseur_forme[CUR_H] = {
+    "X...........", "XX..........", "XOX.........", "XOOX........",
+    "XOOOX.......", "XOOOOX......", "XOOOOOX.....", "XOOOOOOX....",
+    "XOOOOOOOX...", "XOOOOOOOOX..", "XOOOOOOOOOX.", "XOOOOOOXXXXX",
+    "XOOOXOOX....", "XOOXXOOX....", "XOX..XOOX...", "XX...XOOX...",
+    "X.....XOOX..", "......XOOX..", ".......XX...",
+};
+
+static int interactif;            /* une entree reelle a ete vue */
+static int cur_visible;
+static u32 cur_x, cur_y;
+static u32 boutons_prec;
+static int glisse = -1;           /* fenetre tiree par sa barre */
+static i64 prise_dx, prise_dy;   /* signe : la prise est AU-DESSUS du contenu */
+static int capture = -1;          /* fenetre qui a recu l'appui dans son contenu */
+static u32 changements_vus;
+static int changements_init;
+static u64 entrees_routees, entrees_refusees, touches_routees;
+static u64 dernier_deplacement_ns;
+/* Tous les pas du glisser en cours : nombre, somme, pire, appels a la region. */
+static u64 depl_pas, depl_somme_ns, depl_max_ns, depl_appels, depl_lit_ns, depl_pres_ns;
+
+static struct rect rect_curseur(void)
+{
+    struct rect r = { cur_x, cur_y, CUR_L, CUR_H };
+    return r;
+}
+
+/* Le curseur, par-dessus ce qui vient d'etre compose dans `r`. */
+static void superpose_curseur(struct rect r)
+{
+    if (!cur_visible) return;
+    struct rect c = rect_curseur(), i, ecran = { 0, 0, ecran_l, ecran_h };
+    if (!intersecte(c, ecran, &c) || !intersecte(r, c, &i)) return;
+    u32 ligne[CUR_L];
+    for (u32 y = i.y; y < i.y + i.h; y++) {
+        u64 decalage = ((u64)y * ecran_l + i.x) * 4u;
+        if (sys6(BO_SHM_READ, (u64)region_g, decalage, (u64)ligne, (u64)i.l * 4u, 0, 0) < 0) return;
+        const char *forme = curseur_forme[y - cur_y];
+        for (u32 x = i.x; x < i.x + i.l; x++) {
+            char p = forme[x - cur_x];
+            if (p == 'X') ligne[x - i.x] = 0x000000u;
+            else if (p == 'O') ligne[x - i.x] = 0xffffffu;
+        }
+        appels_region++;
+        sys6(BO_SHM_WRITE, (u64)region_g, decalage, (u64)ligne, (u64)i.l * 4u, 0, 0);
+    }
+}
+
+/* La case de fermeture, dans la barre (seulement une fois interactif). */
+static struct rect case_fermer(const struct fen *f)
+{
+    struct rect r = { f->x + f->l - FERMER_L + 4, f->y - BUREAU_BARRE_H + 4, FERMER_L - 8, BUREAU_BARRE_H - 8 };
+    if (f->l < FERMER_L + 8) r.l = 0;
+    return r;
+}
+
+static void dessine_fermer(const struct fen *f, struct rect r)
+{
+    if (!interactif) return;
+    struct rect c = case_fermer(f), i;
+    if (!c.l || !intersecte(c, r, &i)) return;
+    remplit(i, FERMER_COULEUR);
+}
+
+enum { ZONE_AUCUNE, ZONE_CONTENU, ZONE_BARRE, ZONE_FERMER, ZONE_BORD };
+
+static int contient(struct rect r, u32 x, u32 y)
+{
+    return x >= r.x && y >= r.y && x < r.x + r.l && y < r.y + r.h;
+}
+
+/* La fenetre visible la plus haute sous (x, y), et la zone touchee. */
+static int sous_pointeur(u32 x, u32 y, int *zone)
+{
+    for (int k = nfen - 1; k >= 0; k--) {
+        struct fen *f = &fens[ordre[k]];
+        if (!f->visible || !contient(cadre_de(f), x, y)) continue;
+        struct rect contenu = { f->x, f->y, f->l, f->h };
+        struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
+        if (contient(contenu, x, y)) *zone = ZONE_CONTENU;
+        else if (contient(barre, x, y)) *zone = x + FERMER_L >= f->x + f->l ? ZONE_FERMER : ZONE_BARRE;
+        else *zone = ZONE_BORD;
+        return ordre[k];
+    }
+    *zone = ZONE_AUCUNE;
+    return -1;
+}
+
+/* Coordonnee d'ecran relative a une origine, SIGNEE puis etendue sur 64
+ * bits : un pointeur a gauche ou au-dessus du contenu donne un negatif que
+ * le noyau accepte (i32), jamais un u32 replie qu'il refuse (revue #335). */
+static u64 relatif(u32 a, u32 origine)
+{
+    return (u64)(i64)((i64)a - (i64)origine);
+}
+
+static void route(int i, u64 genre, u64 a, u64 b, u64 c, u64 d)
+{
+    if (i < 0 || !fens[i].vivante) return;
+    i64 r = sys6(BO_FENETRE_ENTREE, (u64)fens[i].poignee, genre, a, b, c, d);
+    if (r < 0) entrees_refusees++; else entrees_routees++;
+}
+
+/* Le foyer passe de `avant` a `apres` : chacun l'apprend par Configure. */
+static void foyer(int avant, int apres)
+{
+    if (avant == apres) return;
+    if (avant >= 0 && fens[avant].vivante && fens[avant].l && fens[avant].h)
+        sys6(BO_FENETRE_CONFIGURE, (u64)fens[avant].poignee, fens[avant].l, fens[avant].h, 0, 0, 0);
+    if (apres >= 0 && fens[apres].vivante && fens[apres].l && fens[apres].h)
+        sys6(BO_FENETRE_CONFIGURE, (u64)fens[apres].poignee, fens[apres].l, fens[apres].h, 1, 0, 0);
+    ecris_nombre("COMPOSITED_ENTREE_FOYER fenetre=", apres);
+}
+
+static void devient_interactif(int souris, i64 touches, u32 changements, int molette)
+{
+    if (interactif) return;
+    interactif = 1;
+    /* Les cases de fermeture apparaissent : chaque barre est recomposee. */
+    for (int k = 0; k < nfen; k++)
+        if (fens[k].visible) {
+            struct rect b = { fens[k].x, fens[k].y - BUREAU_BARRE_H, fens[k].l, BUREAU_BARRE_H };
+            recompose(b);
+        }
+    /* La cause, pour qu'un passage sans geste reel se diagnostique. */
+    char t[160]; unsigned long n = 0;
+    ajoute_texte(t, &n, "COMPOSITED_ENTREES_INTERACTIF souris=");
+    ajoute_nombre(t, &n, (u64)souris);
+    ajoute_texte(t, &n, " touches=");
+    ajoute_nombre(t, &n, (u64)touches);
+    ajoute_texte(t, &n, " changements=");
+    ajoute_nombre(t, &n, changements);
+    ajoute_texte(t, &n, " molette=");
+    ajoute_nombre(t, &n, (u64)(molette < 0 ? -molette : molette));
+    ajoute_texte(t, &n, "\n");
+    t[n] = 0;
+    ecris(t);
+}
+
+static void bouge_curseur(u32 x, u32 y)
+{
+    if (cur_visible && x == cur_x && y == cur_y) return;
+    struct rect avant = rect_curseur();
+    int etait = cur_visible;
+    cur_x = x; cur_y = y; cur_visible = 1;
+    if (etait) recompose(avant);
+    recompose(rect_curseur());
+}
+
+static void publie_entree(const char *etiquette, int i, u32 x, u32 y)
+{
+    char t[192]; unsigned long n = 0;
+    ajoute_texte(t, &n, etiquette);
+    ajoute_nombre(t, &n, (u64)(i < 0 ? 999 : i));
+    ajoute_texte(t, &n, " x=");
+    ajoute_nombre(t, &n, x);
+    ajoute_texte(t, &n, " y=");
+    ajoute_nombre(t, &n, y);
+    ajoute_texte(t, &n, "\n");
+    t[n] = 0;
+    ecris(t);
+}
+
+/* Une lecture des entrees, et leur routage. Rend le nombre d'evenements. */
+static int traite_entrees(void)
+{
+    static unsigned char tampon[24 + ENTREE_TOUCHES_MAX * 16];
+    i64 n = sys6(BO_DISPLAY_ENTREES, (u64)affichage_g, (u64)tampon, ENTREE_TOUCHES_MAX, 0, 0, 0);
+    if (n < 0) return 0;
+    u32 x = co_lit_u32(tampon, 0), y = co_lit_u32(tampon, 4), boutons = co_lit_u32(tampon, 8);
+    int molette = (int)co_lit_u32(tampon, 12);
+    u32 changements = co_lit_u32(tampon, 20);
+    if (!changements_init) { changements_init = 1; changements_vus = changements; }
+    int souris = changements != changements_vus || molette != 0;
+    changements_vus = changements;
+    if (!souris && n == 0) return 0;
+    devient_interactif(souris, n, changements, molette);
+    if (x >= ecran_l) x = ecran_l - 1;
+    if (y >= ecran_h) y = ecran_h - 1;
+
+    int evenements = 0;
+    if (souris) {
+        int zone, i = sous_pointeur(x, y, &zone);
+        u32 gauche = boutons & 1u, gauche_prec = boutons_prec & 1u;
+        if (gauche && !gauche_prec) {
+            /* Appui : remonter, donner le foyer, puis agir selon la zone. */
+            if (i >= 0) {
+                int avant = active();
+                if (i != avant) { remonte(i); foyer(avant, i); }
+                if (zone == ZONE_FERMER) {
+                    sys6(BO_FENETRE_FERME, (u64)fens[i].poignee, 0, 0, 0, 0, 0);
+                    publie_entree("COMPOSITED_ENTREE_FERME fenetre=", i, x, y);
+                } else if (zone == ZONE_BARRE) {
+                    glisse = i; prise_dx = (i64)x - (i64)fens[i].x; prise_dy = (i64)y - (i64)fens[i].y;
+                    publie_entree("COMPOSITED_ENTREE_PRISE fenetre=", i, x, y);
+                } else if (zone == ZONE_CONTENU) {
+                    capture = i;
+                    route(i, ENTREE_POINTEUR, x - fens[i].x, y - fens[i].y, boutons, 0);
+                    publie_entree("COMPOSITED_ENTREE_CLIC fenetre=", i, x - fens[i].x, y - fens[i].y);
+                }
+            }
+        } else if (glisse >= 0 && gauche) {
+            /* Tirer : la barre suit le pointeur, sans quitter l'ecran. */
+            struct fen *f = &fens[glisse];
+            i64 nx = (i64)x - prise_dx, ny = (i64)y - prise_dy;
+            i64 min_y = BUREAU_BARRE_H + BUREAU_BORD_L;
+            if (nx < (i64)BUREAU_BORD_L) nx = BUREAU_BORD_L;
+            if (ny < min_y) ny = min_y;
+            if (nx > (i64)ecran_l - 40) nx = (i64)ecran_l - 40;
+            if (ny > (i64)ecran_h - 20) ny = (i64)ecran_h - 20;
+            if ((u32)nx != f->x || (u32)ny != f->y) {
+                u64 t0 = maintenant_ns(), a0 = appels_region, l0 = lit_ns, p0 = pres_ns;
+                deplace(glisse, (u32)nx, (u32)ny);
+                dernier_deplacement_ns = maintenant_ns() - t0;
+                depl_pas++;
+                depl_somme_ns += dernier_deplacement_ns;
+                if (dernier_deplacement_ns > depl_max_ns) depl_max_ns = dernier_deplacement_ns;
+                depl_appels += appels_region - a0;
+                depl_lit_ns += lit_ns - l0;
+                depl_pres_ns += pres_ns - p0;
+            }
+        } else if (!gauche && gauche_prec) {
+            /* Relachement : fin du glisser, ou du clic dans un contenu. */
+            if (glisse >= 0) {
+                publie_entree("COMPOSITED_ENTREE_DEPOSE fenetre=", glisse, fens[glisse].x, fens[glisse].y);
+                ecris_nombre("[COMPOSITED] deplacement_us=", (i64)(dernier_deplacement_ns / 1000));
+                {
+                    char t[192]; unsigned long n = 0;
+                    ajoute_texte(t, &n, "COMPOSITED_GLISSER_MESURE pas=");
+                    ajoute_nombre(t, &n, depl_pas);
+                    ajoute_texte(t, &n, " moyen_us=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_somme_ns / depl_pas / 1000 : 0);
+                    ajoute_texte(t, &n, " max_us=");
+                    ajoute_nombre(t, &n, depl_max_ns / 1000);
+                    ajoute_texte(t, &n, " appels_region_par_pas=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_appels / depl_pas : 0);
+                    /* Ventilation : copie du contenu des clients, presentation. */
+                    ajoute_texte(t, &n, " copie_us=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_lit_ns / depl_pas / 1000 : 0);
+                    ajoute_texte(t, &n, " presentation_us=");
+                    ajoute_nombre(t, &n, depl_pas ? depl_pres_ns / depl_pas / 1000 : 0);
+                    ajoute_texte(t, &n, "\n");
+                    t[n] = 0;
+                    ecris(t);
+                }
+                depl_pas = depl_somme_ns = depl_max_ns = depl_appels = depl_lit_ns = depl_pres_ns = 0;
+                publie_fenetre(glisse, "COMPOSITED_BUREAU_FENETRE indice=");
+                glisse = -1;
+            }
+            if (capture >= 0 && fens[capture].visible) {
+                route(capture, ENTREE_POINTEUR, relatif(x, fens[capture].x), relatif(y, fens[capture].y), boutons, 0);
+            }
+            capture = -1;
+        } else {
+            /* Survol (ou appui maintenu dans un contenu) : au contenu concerne. */
+            int cible = capture >= 0 ? capture : (zone == ZONE_CONTENU ? i : -1);
+            if (cible >= 0 && fens[cible].visible)
+                route(cible, ENTREE_POINTEUR, relatif(x, fens[cible].x), relatif(y, fens[cible].y), boutons, 0);
+        }
+        if (molette != 0 && zone == ZONE_CONTENU && i >= 0)
+            route(i, ENTREE_MOLETTE, (u64)(i64)molette, relatif(x, fens[i].x), relatif(y, fens[i].y), 0);
+        boutons_prec = boutons;
+        bouge_curseur(x, y);
+        evenements++;
+    }
+    /* Le clavier : a la fenetre active, et a elle seule. */
+    int cible = active();
+    for (i64 k = 0; k < n; k++) {
+        const unsigned char *t = tampon + 24 + k * 16;
+        u32 code = co_lit_u32(t, 0), unicode = co_lit_u32(t, 4), mods = co_lit_u32(t, 8), appui = co_lit_u32(t, 12);
+        if (cible >= 0) {
+            route(cible, ENTREE_TOUCHE, code, unicode, mods, appui);
+            touches_routees++;
+            if (appui) {
+                char ligne[96]; unsigned long m = 0;
+                ajoute_texte(ligne, &m, "COMPOSITED_ENTREE_TOUCHE fenetre=");
+                ajoute_nombre(ligne, &m, (u64)cible);
+                ajoute_texte(ligne, &m, " code=");
+                ajoute_nombre(ligne, &m, code);
+                ajoute_texte(ligne, &m, " unicode=");
+                ajoute_nombre(ligne, &m, unicode);
+                ajoute_texte(ligne, &m, "\n");
+                ligne[m] = 0;
+                ecris(ligne);
+            }
+        }
+        evenements++;
+    }
+    return evenements;
+}
+
 static int bureau(i64 affichage, u64 *pile)
 {
     affichage_g = affichage;
@@ -925,17 +1306,24 @@ static int bureau(i64 affichage, u64 *pile)
         if (attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)fens[i].poignee, (u64)i + 1, 0, 0, 0) == 0) ajoutees++;
     }
     exige(ajoutees == nfen, "bureau : chaque fenetre attendue dans un waitset");
+    /* BOUCHAUD_ENTREES_RING3_V1 : la capacite d'affichage est lisible quand
+     * une entree attend ; le bureau dort entre deux gestes. */
+    if (attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)affichage, 100, 0, 0, 0) == 0)
+        ecris("COMPOSITED_ENTREES_ATTENDUES\n");
+    else
+        ecris("COMPOSITED_ENTREES_SANS_REVEIL\n");
     ecris_nombre("COMPOSITED_BUREAU_PRET fenetres=", nfen);
     ecris_nombre("[COMPOSITED] ecran_l=", ecran_l);
     ecris_nombre("[COMPOSITED] ecran_h=", ecran_h);
 
-    struct bo_wait_event evenements[FEN_MAX];
+    struct bo_wait_event evenements[FEN_MAX + 1];
     u64 premiere = 0, debut_ns = 0;
     int refus_eprouves = 0, etape = 0, vivantes = nfen;
     u32 etat[10];
     while (vivantes > 0) {
-        i64 n = sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX, 1000000000UL, 0, 0);
+        i64 n = sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX + 1, 1000000000UL, 0, 0);
         if (n < 0 && n != -BO_E_TIMED_OUT) { ecris_nombre("COMPOSITED_BUREAU_FAIL attente=", n); return 1; }
+        traite_entrees();
         for (int i = 0; i < nfen; i++) {
             struct fen *f = &fens[i];
             if (!f->vivante) continue;
@@ -997,6 +1385,7 @@ static int bureau(i64 affichage, u64 *pile)
                     recompose(d);
                 } else {
                     if (recopie_contenu(f, d) < 0) continue;
+                    superpose_curseur(d);
                     if (presente_rect(d) < 0) continue;
                 }
             }
@@ -1089,6 +1478,10 @@ static int bureau(i64 affichage, u64 *pile)
     }
 
     ecris_nombre("COMPOSITED_BUREAU_BILAN trames=", (i64)trames_total);
+    ecris_nombre("[COMPOSITED] entrees_routees=", (i64)entrees_routees);
+    ecris_nombre("[COMPOSITED] appels_region=", (i64)appels_region);
+    ecris_nombre("[COMPOSITED] entrees_refusees=", (i64)entrees_refusees);
+    ecris_nombre("[COMPOSITED] touches_routees=", (i64)touches_routees);
     for (int k = 0; k < nfen; k++) publie_trames(k);
     if (trames_total) {
         ecris_nombre("[COMPOSITED] lit_us_moy=", (i64)(lit_ns / trames_total / 1000));
@@ -1096,7 +1489,10 @@ static int bureau(i64 affichage, u64 *pile)
     }
     ecris(echecs == 0 && trames_total > 0 ? "COMPOSITED_BUREAU_OK\n" : "COMPOSITED_BUREAU_FAIL\n");
     /* Le bureau reste affiche : le service vit, sans plus rien a composer. */
-    for (;;) sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX, 1000000000UL, 0, 0);
+    for (;;) {
+        sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX + 1, 1000000000UL, 0, 0);
+        traite_entrees();   /* le curseur vit encore sur le bureau vide */
+    }
     return 0;
 }
 

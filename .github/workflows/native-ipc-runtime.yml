@@ -59,6 +59,11 @@ on:
       - 'tools/userland/attends.c'
       - 'tools/ci/run_bureau_ring3.sh'
       - 'tools/ci/verifie_capture_bureau_ring3.py'
+      # BOUCHAUD_ENTREES_RING3_V1 : souris et clavier routes par composited.
+      - 'src/kernel/native/**'
+      - 'src/drivers/input/**'
+      - 'userland/services/composited/**'
+      - 'tools/ci/banc_bureau_ring3_entrees.py'
       - '.github/workflows/native-ipc-runtime.yml'
   # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
   # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
@@ -120,6 +125,11 @@ on:
       - 'tools/userland/attends.c'
       - 'tools/ci/run_bureau_ring3.sh'
       - 'tools/ci/verifie_capture_bureau_ring3.py'
+      # BOUCHAUD_ENTREES_RING3_V1 : souris et clavier routes par composited.
+      - 'src/kernel/native/**'
+      - 'src/drivers/input/**'
+      - 'userland/services/composited/**'
+      - 'tools/ci/banc_bureau_ring3_entrees.py'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
 
@@ -177,8 +187,9 @@ jobs:
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: native-ipc-runtime
     runs-on: ubuntu-latest
-    # 30 min, plus le bureau ring 3 (deux demarrages QEMU, ~3 min sous TCG).
-    timeout-minutes: 40
+    # 30 min, plus le bureau ring 3 (deux demarrages QEMU, ~3 min sous TCG)
+    # et ses entrees (un demarrage, ~4 min sous TCG).
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -221,6 +232,17 @@ jobs:
           bash tools/ci/run_bureau_ring3.sh \
             target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin target/bureau-ring3
 
+      # BOUCHAUD_ENTREES_RING3_V1 : de vrais gestes QEMU (moniteur) routes par
+      # composited ring 3 -- clic -> foyer -> l'application recoit appui et
+      # relachement ; glisser de la barre ; frappes a la fenetre active ; une
+      # application plante (faute de page) et les entrees continuent ; case de
+      # fermeture ; 9 refus de `bo_fenetre_entree`.
+      - name: Bureau ring 3 -- entrees souris/clavier routees par composited (TCG)
+        run: |
+          python3 tools/ci/banc_bureau_ring3_entrees.py \
+            --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --sortie target/bureau-ring3-entrees
+
       # BOUCHAUD_NATIVE_SERVICES_V1 : service ring 3 supervise (spawn natif,
       # crash injecte, hang, budget, arret, fuite de handles) et refus des
       # cycles d'objets natifs. SMP1 et SMP4 sur le MEME noyau.
@@ -248,6 +270,7 @@ jobs:
             target/coupure-persistance/boot-*.log
             target/bureau-ring3/*/serie.log
             target/bureau-ring3/*/*.ppm
+            target/bureau-ring3-entrees/serie.log
           if-no-files-found: error
           retention-days: 14
 

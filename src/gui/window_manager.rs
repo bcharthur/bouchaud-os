@@ -2619,6 +2619,14 @@ fn transmet_position(wins: &mut Vec<Win>, mx: i32, my: i32, boutons: u32) {
 /// Le message porte `appui` depuis le premier jour du protocole ; ce qui
 /// manquait, c'etait un pilote capable de le remplir.
 fn envoie_touche(client: &mut Client, evenement: KeyEvent) {
+    let (code, unicode, masque) = traduit_touche(&evenement);
+    client.envoie_touche(code, unicode, masque, evenement.appui);
+}
+
+/// (code, unicode, modificateurs) d'une transition, au format du protocole
+/// GUI. Partagee avec `native::entrees` (BOUCHAUD_ENTREES_RING3_V1) : une
+/// touche se traduit de la meme facon pour le bureau noyau et ring 3.
+pub(crate) fn traduit_touche(evenement: &KeyEvent) -> (u32, u32, u32) {
     let (code, unicode) = match evenement.logique {
         Key::Char(octet) => (touche::CARACTERE, octet as u32),
         Key::Enter => (touche::ENTREE, 0),
@@ -2642,7 +2650,7 @@ fn envoie_touche(client: &mut Client, evenement: KeyEvent) {
         | (if m.ctrl { modificateur::CTRL } else { 0 })
         | (if m.alt { modificateur::ALT } else { 0 })
         | (if m.altgr { modificateur::ALTGR } else { 0 });
-    client.envoie_touche(code, unicode, masque, evenement.appui);
+    (code, unicode, masque)
 }
 
 /// Route un cran de molette vers la fenetre sous le pointeur.

@@ -1444,6 +1444,26 @@ pub fn pixel_affiche(x: usize, y: usize) -> Option<u32> {
     Some(unsafe { core::ptr::read_volatile(lfb.add(y * width() + x)) } & 0x00ff_ffff)
 }
 
+/// La ligne `[x, x + dst.len())` de `y`, telle qu'elle est dans le tampon
+/// AFFICHE -- `pixel_affiche` par ligne : les memes lectures volatiles, mais
+/// les bornes, le backend et le LFB ne sont juges qu'une fois par ligne et non
+/// une fois par pixel. Faux si la ligne sort de l'ecran ou n'est pas relisible.
+pub fn ligne_affichee(x: usize, y: usize, dst: &mut [u32]) -> bool {
+    let (l, h) = (width(), height());
+    if y >= h || x >= l || dst.len() > l - x || firmware_backend_installed() {
+        return false;
+    }
+    let lfb = unsafe { LFB };
+    if lfb.is_null() {
+        return false;
+    }
+    let debut = y * l + x;
+    for (i, px) in dst.iter_mut().enumerate() {
+        *px = unsafe { core::ptr::read_volatile(lfb.add(debut + i)) } & 0x00ff_ffff;
+    }
+    true
+}
+
 fn presente_rect_juge(x: usize, y: usize, rect_width: usize, rect_height: usize, differable: bool)
     -> Result<(), &'static str> {
     PRESENTS_DEMANDES.fetch_add(1, Ordering::Relaxed);

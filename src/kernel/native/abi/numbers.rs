@@ -35,6 +35,10 @@ pub const SHM_CREATE: u64 = NATIVE_BASE + 0x40;
 pub const SHM_SIZE: u64 = NATIVE_BASE + 0x41;
 pub const SHM_READ: u64 = NATIVE_BASE + 0x42;
 pub const SHM_WRITE: u64 = NATIVE_BASE + 0x43;
+/// BOUCHAUD_SHM_RECT_V1 (ABI 1.6) : remplir un rectangle d'une region (WRITE)
+/// sans rien lire de l'appelant (region, decalage, couleur, pixels, lignes,
+/// pas) -> pixels ecrits. Bornes : `shm_rect_contrat::valide`.
+pub const SHM_FILL_RECT: u64 = NATIVE_BASE + 0x44;
 
 pub const PROCESS_SPAWN: u64 = NATIVE_BASE + 0x50;
 pub const PROCESS_INFO: u64 = NATIVE_BASE + 0x51;
@@ -77,6 +81,13 @@ pub const FENETRE_FERME: u64 = NATIVE_BASE + 0x93;
 /// Sur la capacite Display : relancer le client configure de ce rang ; rend
 /// une nouvelle capacite Fenetre (affichage, rang).
 pub const DISPLAY_RELANCE_CLIENT: u64 = NATIVE_BASE + 0x82;
+/// BOUCHAUD_ENTREES_RING3_V1 (ABI 1.5) : sur la capacite Display (droit
+/// DISPLAY_PRESENT), lire les entrees (affichage, tampon*, touches_max) ->
+/// nombre de transitions de touche ecrites apres l'en-tete.
+pub const DISPLAY_ENTREES: u64 = NATIVE_BASE + 0x83;
+/// Sur une capacite Fenetre (WRITE) : router une entree vers ce client
+/// (fenetre, genre, a, b, c, d).
+pub const FENETRE_ENTREE: u64 = NATIVE_BASE + 0x94;
 
 #[inline]
 pub const fn is_native(number: u64) -> bool {
@@ -107,6 +118,7 @@ pub const fn name(number: u64) -> &'static str {
         SHM_SIZE => "bo_shm_size",
         SHM_READ => "bo_shm_read",
         SHM_WRITE => "bo_shm_write",
+        SHM_FILL_RECT => "bo_shm_fill_rect",
         PROCESS_SPAWN => "bo_process_spawn",
         PROCESS_INFO => "bo_process_info",
         PROCESS_KILL => "bo_process_kill",
@@ -124,6 +136,8 @@ pub const fn name(number: u64) -> &'static str {
         FENETRE_CONFIGURE => "bo_fenetre_configure",
         FENETRE_FERME => "bo_fenetre_ferme",
         DISPLAY_RELANCE_CLIENT => "bo_display_relance_client",
+        DISPLAY_ENTREES => "bo_display_entrees",
+        FENETRE_ENTREE => "bo_fenetre_entree",
         _ => "bo_unknown",
     }
 }

@@ -44,7 +44,8 @@ impl Object {
             Self::SharedRegion(region) => region.signals(),
             Self::Process(process) => process.signals(),
             Self::Update => Signals::NONE,
-            Self::Display => Signals::NONE,
+            // BOUCHAUD_ENTREES_RING3_V1 : lisible quand une entree attend.
+            Self::Display => super::entrees::signaux(),
             Self::Fenetre(fenetre) => fenetre.signals(),
             Self::Legacy(_) => Signals::NONE,
         }

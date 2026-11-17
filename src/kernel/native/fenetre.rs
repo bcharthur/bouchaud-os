@@ -175,6 +175,68 @@ pub fn ferme(args: [u64; 6]) -> Result<u64> {
     Ok(0)
 }
 
+/// BOUCHAUD_ENTREES_RING3_V1 : `bo_fenetre_entree(fenetre, genre, a, b, c, d)`
+/// (WRITE) -- le compositeur route UNE entree vers cette fenetre ; le noyau
+/// ecrit le message du protocole GUI au client, comme le bureau noyau.
+///
+///   genre 1 pointeur : a = x, b = y (i32, dans le contenu), c = boutons (3 bits)
+///   genre 2 molette  : a = crans (i32), b = x, c = y
+///   genre 3 touche   : a = code, b = unicode, c = modificateurs, d = appui (0/1)
+///
+/// Les bornes sont celles du protocole : rien hors i32, boutons sur trois
+/// bits, point de code Unicode valide, modificateurs connus. Un client mort ne
+/// recoit rien (le message n'a plus de destinataire) : `PeerClosed`.
+pub mod genre_entree {
+    pub const POINTEUR: u64 = 1;
+    pub const MOLETTE: u64 = 2;
+    pub const TOUCHE: u64 = 3;
+}
+
+fn en_i32(v: u64) -> Result<i32> {
+    let s = v as i64;
+    i32::try_from(s).map_err(|_| Error::InvalidArgument)
+}
+
+pub fn entree(args: [u64; 6]) -> Result<u64> {
+    let objet = fenetre_de(args[0], Rights::WRITE)?;
+    let Object::Fenetre(fenetre) = objet.as_ref() else { return Err(Error::WrongType) };
+    let mut c = fenetre.client.lock();
+    if !c.vivant() {
+        return Err(Error::PeerClosed);
+    }
+    match args[1] {
+        genre_entree::POINTEUR => {
+            let (x, y) = (en_i32(args[2])?, en_i32(args[3])?);
+            if args[4] > 0b111 { return Err(Error::InvalidArgument); }
+            c.envoie_pointeur(x, y, args[4] as u32);
+        }
+        genre_entree::MOLETTE => {
+            let (crans, x, y) = (en_i32(args[2])?, en_i32(args[3])?, en_i32(args[4])?);
+            if crans == 0 { return Err(Error::InvalidArgument); }
+            c.envoie_molette(crans, x, y);
+        }
+        genre_entree::TOUCHE => {
+            let code = u32::try_from(args[2]).map_err(|_| Error::InvalidArgument)?;
+            let unicode = u32::try_from(args[3]).map_err(|_| Error::InvalidArgument)?;
+            if unicode > 0x10FFFF || args[4] > 0xFF || args[5] > 1 || code > 0xFFFF {
+                return Err(Error::InvalidArgument);
+            }
+            c.envoie_touche(code, unicode, args[4] as u32, args[5] == 1);
+        }
+        _ => return Err(Error::InvalidArgument),
+    }
+    drop(c);
+    ENTREES.fetch_add(1, Ordering::Relaxed);
+    Ok(0)
+}
+
+static ENTREES: AtomicU64 = AtomicU64::new(0);
+
+/// Entrees routees vers des fenetres par le compositeur.
+pub fn entrees_routees() -> u64 {
+    ENTREES.load(Ordering::Relaxed)
+}
+
 /// Les comptes du pont, pour le journal du banc.
 pub fn bilan() -> (u64, u64) {
     (LECTURES.load(Ordering::Relaxed), PIXELS_LUS.load(Ordering::Relaxed))

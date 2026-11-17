@@ -28,6 +28,25 @@ pub fn publie() {
     ACTIVITE.signal_all();
 }
 
+/// BOUCHAUD_ENTREES_RING3_V1 : publication depuis une IRQ (souris, clavier).
+/// Atomiques seulement ; la moitie basse du minuteur reveille ensuite les
+/// attentes natives (`flush_differe`).
+static DIFFERE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+pub fn publie_differe() {
+    ACTIVITE.publish_deferred();
+    DIFFERE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Moitie basse : reveille les attentes natives si une IRQ a publie.
+#[inline]
+pub fn flush_differe() {
+    if DIFFERE.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        ACTIVITE.flush_deferred();
+    }
+}
+
 #[inline]
 pub fn ticket() -> WaitSourceTicket {
     ACTIVITE.ticket()

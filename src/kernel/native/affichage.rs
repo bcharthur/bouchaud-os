@@ -42,6 +42,11 @@ pub fn ecran_reserve_au_compositeur() -> bool {
 }
 static ECRAN_AU_COMPOSITEUR: AtomicBool = AtomicBool::new(false);
 
+/// Le bureau NOYAU tient-il l'ecran (et donc les entrees) ?
+pub fn bureau_noyau_actif() -> bool {
+    BUREAU_NOYAU.load(Ordering::Acquire)
+}
+
 /// Le compositeur ring 3 a pris l'ecran (premiere presentation acceptee).
 pub fn ecran_au_compositeur() -> bool {
     ECRAN_AU_COMPOSITEUR.load(Ordering::Acquire)
@@ -70,9 +75,11 @@ pub fn bureau_noyau_demarre() -> bool {
 /// Seul chemin qui fait naitre une capacite d'affichage.
 pub const COMPOSITEUR: &str = "/bin/composited";
 
-/// Droits de la capacite donnee au compositeur : presenter, inspecter. Ni
-/// DUP ni TRANSFER : elle ne se multiplie pas et ne se passe pas.
-pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0);
+/// Droits de la capacite donnee au compositeur : presenter, inspecter, et
+/// l'ATTENDRE dans un waitset (BOUCHAUD_ENTREES_RING3_V1 : elle est lisible
+/// quand une entree attend). Ni DUP ni TRANSFER : elle ne se multiplie pas et
+/// ne se passe pas.
+pub const DROITS_COMPOSITEUR: Rights = Rights(Rights::DISPLAY_PRESENT.0 | Rights::INSPECT.0 | Rights::WAIT.0);
 
 /// BOUCHAUD_BUREAU_RING3_2A : configuration du bureau ring 3, posee dans
 /// l'image. Premiere ligne : `CHEMIN [VAR=VALEUR ...]` -- le client confie au
@@ -305,6 +312,14 @@ pub fn info(args: [u64; 6]) -> Result<u64> {
     Ok((l << 32) | h)
 }
 
+const JOURNAL_COMPLET: u64 = 64;
+const JOURNAL_PAS: u64 = 256;
+static JOURNALISEES: AtomicU64 = AtomicU64::new(0);
+static CUMUL_POSE_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_TRANSFERT_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_RELECTURE_NS: AtomicU64 = AtomicU64::new(0);
+static CUMUL_JOURNAL_NS: AtomicU64 = AtomicU64::new(0);
+
 pub fn present(args: [u64; 6]) -> Result<u64> {
     let table = handle::current_table();
     // 1. La capacite : bon type ET bon droit, sinon rien n'est lu.
@@ -357,36 +372,71 @@ pub fn present(args: [u64; 6]) -> Result<u64> {
         return Err(refuse(Error::WouldBlock, "bureau-noyau"));
     }
     // 5. Pose, ligne a ligne, puis presentation du seul rectangle.
-    for r in 0..d.h {
-        let ligne = region.read(d.decalage_ligne(r), d.l as usize * 4)?;
-        let dst = crate::drivers::gfx::ligne_mut(d.dest_x as usize, (d.dest_y + r) as usize, d.l as usize);
-        for (i, px) in dst.iter_mut().enumerate() {
-            let o = 4 * i;
-            *px = u32::from_le_bytes([ligne[o], ligne[o + 1], ligne[o + 2], ligne[o + 3]]) & 0x00ff_ffff;
+    let t_pose = crate::kernel::timer::monotonic_ns();
+    // Le verrou de la region est pris UNE fois, sans allocation par ligne
+    // (avant : un `read` -> Vec par ligne). `contrat::valide` a deja borne
+    // chaque ligne dans la region ; le `get` garde un refus plutot qu'une
+    // panique si la region changeait de taille (elle ne le fait pas).
+    let ligne_octets = d.l as usize * 4;
+    region.avec_octets(|octets| -> Result<()> {
+        for r in 0..d.h {
+            let o = d.decalage_ligne(r);
+            let ligne = octets.get(o..o + ligne_octets).ok_or(Error::InvalidArgument)?;
+            let dst = crate::drivers::gfx::ligne_mut(d.dest_x as usize, (d.dest_y + r) as usize, d.l as usize);
+            for (px, src) in dst.iter_mut().zip(ligne.chunks_exact(4)) {
+                *px = u32::from_le_bytes([src[0], src[1], src[2], src[3]]) & 0x00ff_ffff;
+            }
         }
-    }
+        Ok(())
+    })?;
+    let t_flush = crate::kernel::timer::monotonic_ns();
     // Presentation JUGEE : un refus du peripherique (transfert ou flush virtio,
     // LFB absent...) est rendu au client, jamais une empreinte du tampon arriere.
     if let Err(raison) = crate::drivers::gfx::present_rect_verifie(
         d.dest_x as usize, d.dest_y as usize, d.l as usize, d.h as usize) {
         return Err(refuse(Error::DeviceError, raison));
     }
+    let t_relecture = crate::kernel::timer::monotonic_ns();
     // 6. Relecture du tampon AFFICHE (pas du tampon arriere) : l'empreinte
     // rendue au client est celle de ce que l'ecran montre.
-    let mut illisible = false;
-    let e = contrat::empreinte((0..d.h).flat_map(|r| (0..d.l).map(move |c| (c, r))).map(|(c, r)| {
-        crate::drivers::gfx::pixel_affiche((d.dest_x + c) as usize, (d.dest_y + r) as usize).unwrap_or_else(|| {
-            illisible = true;
-            0
-        })
-    }));
-    if illisible {
-        return Err(refuse(Error::DeviceError, "relecture"));
+    // Ligne par ligne (`ligne_affichee`), dans le meme ordre de pixels que
+    // l'empreinte l'a toujours ete : la valeur rendue ne change pas.
+    let mut ligne = alloc::vec![0u32; d.l as usize];
+    let mut h = contrat::EMPREINTE_DEPART;
+    for r in 0..d.h {
+        if !crate::drivers::gfx::ligne_affichee(d.dest_x as usize, (d.dest_y + r) as usize, &mut ligne) {
+            return Err(refuse(Error::DeviceError, "relecture"));
+        }
+        h = ligne.iter().fold(h, |h, &p| contrat::empreinte_pixel(h, p));
     }
+    let e = contrat::empreinte_fin(h);
+    let t_fin = crate::kernel::timer::monotonic_ns();
     let n = PRESENTATIONS.fetch_add(1, Ordering::Relaxed) + 1;
-    crate::serial_println!(
-        "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={}",
-        n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed)
-    );
+    // Les trois phases, chronometrees : pose (region -> tampon arriere),
+    // transfert (tampon arriere -> ecran), relecture (empreinte).
+    let (pose, transfert, relecture) = (t_flush - t_pose, t_relecture - t_flush, t_fin - t_relecture);
+    CUMUL_POSE_NS.fetch_add(pose, Ordering::Relaxed);
+    CUMUL_TRANSFERT_NS.fetch_add(transfert, Ordering::Relaxed);
+    CUMUL_RELECTURE_NS.fetch_add(relecture, Ordering::Relaxed);
+    // BOUCHAUD_JOURNAL_PRESENT_ECHANTILLONNE_V1. Mesure (banc des entrees,
+    // TCG, 3192 presentations) : la ligne serie coutait ~105 us, plus que tout
+    // le travail d'une petite presentation (85 us : pose + transfert +
+    // relecture) -- 98 % des presentations du bureau. Les JOURNAL_COMPLET
+    // premieres restent toutes journalisees (sondes courtes, demarrage), puis
+    // une sur JOURNAL_PAS, qui porte les CUMULS de toutes : rien ne disparait
+    // du bilan. Les refus gardent leur ligne propre (`refuse`).
+    if n <= JOURNAL_COMPLET || n % JOURNAL_PAS == 0 {
+        crate::serial_println!(
+            "BOUCHAUD_DISPLAY_PRESENT n={} rect={}x{}@{},{} ecran={}x{} empreinte={:#x} refus={} pose_us={} transfert_us={} relecture_us={} \
+             cumul_pose_us={} cumul_transfert_us={} cumul_relecture_us={} cumul_journal_us={} journalisees={}",
+            n, d.l, d.h, d.dest_x, d.dest_y, el, eh, e, REFUS.load(Ordering::Relaxed),
+            pose / 1000, transfert / 1000, relecture / 1000,
+            CUMUL_POSE_NS.load(Ordering::Relaxed) / 1000, CUMUL_TRANSFERT_NS.load(Ordering::Relaxed) / 1000,
+            CUMUL_RELECTURE_NS.load(Ordering::Relaxed) / 1000, CUMUL_JOURNAL_NS.load(Ordering::Relaxed) / 1000,
+            JOURNALISEES.load(Ordering::Relaxed) + 1
+        );
+        JOURNALISEES.fetch_add(1, Ordering::Relaxed);
+        CUMUL_JOURNAL_NS.fetch_add(crate::kernel::timer::monotonic_ns() - t_fin, Ordering::Relaxed);
+    }
     Ok(e)
 }

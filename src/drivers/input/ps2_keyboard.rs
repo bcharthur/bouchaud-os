@@ -315,6 +315,41 @@ pub fn push_scancode(sc: u8) {
 }
 
 /// Retire un scancode si disponible (interruptions deja desactivees).
+/// BOUCHAUD_ENTREES_RING3_V1 : le clavier est confie au compositeur ring 3.
+/// Les lecteurs NOYAU (shell, /dev/input) ne prennent plus rien dans la file :
+/// une frappe n'a qu'un destinataire, la fenetre active du bureau ring 3.
+static AU_COMPOSITEUR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Confie le clavier au compositeur ring 3. Rend le nombre d'octets PURGES :
+/// ce qui attendait dans la file avant la passation (frappes destinees au
+/// shell noyau, accuses 0xFA des commandes au controleur 8042 pendant
+/// l'armement de la souris) n'appartient pas au compositeur. Sans cette purge,
+/// sa premiere lecture voyait une "frappe" que personne n'avait tapee.
+pub fn confie_au_compositeur() -> usize {
+    let mut file = FILE.lock();
+    let purges = (file.queue + QUEUE_SIZE - file.tete) % QUEUE_SIZE;
+    file.tete = file.queue;
+    AU_COMPOSITEUR.store(true, core::sync::atomic::Ordering::Release);
+    purges
+}
+
+pub fn au_compositeur() -> bool {
+    AU_COMPOSITEUR.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// La file vue par un lecteur noyau : vide si le clavier est confie.
+fn pop_scancode_noyau() -> Option<u8> {
+    if au_compositeur() { None } else { pop_scancode() }
+}
+
+/// Transition de touche pour le compositeur ring 3 (proprietaire).
+pub fn try_key_event_compositeur() -> Option<KeyEvent> {
+    loop {
+        let sc = interrupts::without_interrupts(pop_scancode)?;
+        if let Some(evenement) = ETAT.lock().decode(sc) { return Some(evenement); }
+    }
+}
+
 fn pop_scancode() -> Option<u8> {
     let mut file = FILE.lock();
     if file.tete == file.queue {
@@ -340,14 +375,14 @@ pub fn has_pending() -> bool {
 
 pub fn try_scancode() -> Option<u8> {
     // Preserve l'etat IF de l'appelant.
-    interrupts::without_interrupts(pop_scancode)
+    interrupts::without_interrupts(pop_scancode_noyau)
 }
 
 /// Attend le prochain scancode, en mettant le CPU en veille si la file est vide.
 fn read_scancode() -> u8 {
     loop {
         interrupts::disable();
-        if let Some(sc) = pop_scancode() {
+        if let Some(sc) = pop_scancode_noyau() {
             interrupts::enable();
             return sc;
         }

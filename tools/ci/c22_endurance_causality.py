@@ -80,6 +80,37 @@ def analyze(serial, fixture):
           'RSS by image may mix different PIDs. Compare stable PIDs only.',
           'This analysis never modifies the endurance or C22 verdict.'])
 
+TIMELINE_MAX = 60
+
+
+def timeline(serial, tab):
+    """Les lignes serie d'UN onglet reste ouvert : son ouverture, ses messages
+    JS, son changement de processus, la vie de son nouveau WebContent, et ce
+    que l'ouvreur dit de lui (HOST_ENDURANCE_ONGLET ... ouvert_au_cycle=).
+
+    Les artefacts CI ne sont pas toujours lisibles par qui diagnostique ; ces
+    lignes vont donc aussi au journal du job. Diagnostic seul."""
+    motifs = [re.compile(rf'onglet={tab["tab"]}\b')]
+    if tab.get('pid'):
+        motifs.append(re.compile(rf'(?<![0-9])pid={tab["pid"]}\b|nouveau_pid={tab["pid"]}\b'))
+    if tab.get('cycle') is not None:
+        motifs.append(re.compile(rf'ouvert_au_cycle={tab["cycle"]}\b|cycle={tab["cycle"]}\b.*(RELAIS|ENFANT)'))
+    debut = tab.get('opened_line') or 1
+    sortie = []
+    for lineno, raw in enumerate(serial.splitlines(), 1):
+        if lineno < debut:
+            continue
+        line = ANSI.sub('', raw)
+        if line.startswith('[C22:RSS]'):
+            continue
+        if any(m.search(line) for m in motifs):
+            sortie.append(f'{lineno}: {line[:220]}')
+            if len(sortie) >= TIMELINE_MAX:
+                sortie.append('... (tronque)')
+                break
+    return sortie
+
+
 def write_report(data, out):
     p = Path(out)
     p.mkdir(parents=True, exist_ok=True)
@@ -121,6 +152,10 @@ def selftest():
         'HOST_ENDURANCE_FIN cycles=239 t_s=1203 cadres_ok=239 cadres_echus=0 workers_ok=239 onglets=1',
         '[LB:SWAP_STATE] seq=3 swaps=1 views=2 closed=0 valid=1 distinct_new=1 new_live=1 END'])
     d = analyze(serial, '[fixture] "GET /endurance-enfant.html?cycle=3 HTTP/1.1" 200 -')
+    tl = timeline(serial, d['stale_swapped_tabs'][0])
+    assert any('PROCESS_SWAP onglet=18' in x for x in tl), tl
+    assert any('HOST_ENDURANCE_RELAIS' in x for x in tl), tl
+    assert not any('C22:RSS' in x for x in tl), tl
     assert len(d['stale_swapped_tabs']) == 1
     assert d['stale_swapped_tabs'][0]['pid'] == 85
     assert d['stale_swapped_tabs'][0]['fixture_child_request_seen'] is False
@@ -141,12 +176,20 @@ def main():
         return selftest()
     if not a.serial or not a.fixture or not a.out:
         p.error('serial, --fixture and --out required')
-    data = analyze(Path(a.serial).read_text(errors='replace'),
-                   Path(a.fixture).read_text(errors='replace'))
+    serial = Path(a.serial).read_text(errors='replace')
+    data = analyze(serial, Path(a.fixture).read_text(errors='replace'))
     write_report(data, a.out)
     print('C22_ENDURANCE_CAUSALITY_OK',
           'stale_tabs='+str(len(data['stale_swapped_tabs'])),
           'last_state='+str(data['last_state']))
+    # Chaque onglet reste ouvert, avec sa chronologie, AU JOURNAL du job.
+    for t in data['stale_swapped_tabs']:
+        print(f"C22_ONGLET_RESTANT onglet={t['tab']} cycle={t.get('cycle')} old_pid={t.get('old_pid')} "
+              f"pid={t['pid']} child_loaded={t.get('child_loaded')} nav_finished={t.get('nav_finished')} "
+              f"pid_exited={t['pid_exited']} fixture_GET_seen={t['fixture_child_request_seen']} "
+              f"fixture_status={t.get('fixture_child_status')}")
+        for ligne in timeline(serial, t):
+            print('  ' + ligne)
     return 0
 
 if __name__ == '__main__':

@@ -32,6 +32,9 @@
 #define BO_GUI_TITLE 3u
 #define BO_GUI_FRAME 6u
 #define BO_GUI_CONFIGURE 0x101u
+#define BO_GUI_KEY 0x103u
+#define BO_GUI_POINTER 0x104u
+#define BO_GUI_WHEEL 0x105u
 #define BO_GUI_CLOSE 0x106u
 
 static int gui_fd = -1;
@@ -79,6 +82,27 @@ static void pompe(void) {
             uint32_t len = get32(rx + o + 8);
             uint16_t genre = rx[o + 6] | (rx[o + 7] << 8);
             if (genre == BO_GUI_CLOSE) _exit(0);
+            /* BOUCHAUD_ENTREES_RING3_V1 : la preuve, cote application, que le
+             * compositeur ring 3 lui a route l'entree (et a elle seule). */
+            if (genre == BO_GUI_KEY && len >= 20 && o + 16 + 20 <= n) {
+                const uint8_t *c = rx + o + 16;
+                if (get32(c + 16))
+                    fprintf(stderr, "MIRE_GPU_ENTREE touche code=%u unicode=%u modificateurs=%u\n",
+                            get32(c + 4), get32(c + 12), get32(c + 8));
+            }
+            if (genre == BO_GUI_POINTER && len >= 16 && o + 16 + 16 <= n) {
+                static uint32_t boutons_prec;
+                const uint8_t *c = rx + o + 16;
+                uint32_t b = get32(c + 12);
+                if (b != boutons_prec)
+                    fprintf(stderr, "MIRE_GPU_ENTREE pointeur x=%d y=%d boutons=%u\n",
+                            (int32_t)get32(c + 4), (int32_t)get32(c + 8), b);
+                boutons_prec = b;
+            }
+            if (genre == BO_GUI_WHEEL && len >= 16 && o + 16 + 16 <= n) {
+                const uint8_t *c = rx + o + 16;
+                fprintf(stderr, "MIRE_GPU_ENTREE molette crans=%d\n", (int32_t)get32(c + 4));
+            }
             if (genre == BO_GUI_CONFIGURE && len >= 16 && o + 16 + 16 <= n) {
                 uint32_t w = get32(rx + o + 16 + 4), h = get32(rx + o + 16 + 8);
                 if (w && h && w <= aw && h <= ah) { vw = w; vh = h; }

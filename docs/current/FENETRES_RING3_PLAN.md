@@ -66,9 +66,79 @@ serveur ne manipulerait que des **identifiants de surface** et des
      58 trames/s, dessin 202 µs + présentation 16 µs. Coût mesuré à résorber :
      la relecture d'empreinte de chaque présentation. Pas encore : DOOM et
      Ladybird, plusieurs fenêtres, déplacement, entrées.
-3. **Entrées** : un service d'entrées ring 3 reçoit les événements HID et les
-   route selon `windowd` (focus, z-order). Preuve : un client qui plante ne gèle
-   ni les entrées ni le bureau.
+   - **2B — plusieurs fenêtres, déplacement, empilement, cycle de vie** : bras
+     B2 à B4 du même banc (deux clients, déplacement scripté, remontée,
+     minimisation, redimensionnement, fermeture polie, relance, mort d'un
+     client sans perte du survivant), captures au pixel.
+3. **Entrées** — **fait le 17/11, preuve TCG locale + CI Native IPC
+   (`BOUCHAUD_ENTREES_RING3_V1`, ABI native 1.5)**. Le noyau garde le pilote
+   (IRQ, décodage, disposition AZERTY) et ne donne au compositeur qu'une
+   lecture, sur la capacité `Display` qu'il est seul à détenir :
+   `bo_display_entrees(affichage, tampon*, touches_max)` (position, boutons,
+   crans de molette, transitions de touches déjà traduites). La capacité est
+   LISIBLE tant qu'une entrée attend : `composited` la met dans son waitset et
+   dort entre deux gestes (l'IRQ publie une activité différée, sans
+   ordonnanceur ; la moitié basse du minuteur réveille). `composited` décide
+   seul : zone sous le pointeur, remontée, foyer (`Configure` au perdant et au
+   gagnant), saisie de la barre et glisser, case de fermeture, routage des
+   frappes à la fenêtre active ; il route UN événement vers UNE fenêtre par
+   `bo_fenetre_entree(fenetre, genre, …)` et le noyau écrit le message du
+   protocole GUI (`Pointer`, `Wheel`, `Key`) au client, qui ne voit jamais le
+   compositeur. Propriétaire unique : à la première lecture, le clavier est
+   confié au compositeur, la file est purgée de ce qui précédait la passation
+   (frappes du shell, accusés 0xFA du 8042), et le shell noyau ne vole plus de
+   frappes.
+   Preuve (`tools/ci/banc_bureau_ring3_entrees.py`, vrais gestes par le
+   moniteur QEMU, trois clients `mire-gpu` dont un qui plante) : clic en (30,30)
+   du contenu → foyer → l'application reçoit appui et relâchement aux mêmes
+   coordonnées ; barre saisie et glissée de (150,90) au pixel près ; `a`,`b`
+   frappés → l'application active reçoit `q` (AZERTY) puis `b`, une seule fois ;
+   une application meurt d'une faute de page et la frappe suivante arrive
+   encore ; case de fermeture → l'application sort d'elle-même ; aucune
+   panique ; 9 refus de `bo_fenetre_entree` (genre inconnu, boutons > 7, x hors
+   i32, Unicode 0x110000, appui 2, molette nulle, capacités croisées, tampon
+   noyau). Non-régression : bras B0–B4 au pixel inchangés (curseur et cases de
+   fermeture n'apparaissent qu'après la première entrée réelle).
+   **Coût d'un pas de glisser (`BOUCHAUD_SHM_RECT_V1`, ABI 1.6), même banc,
+   même machine, TCG, 6 pas de (25,15)** :
+
+   | | moyen | pire | appels région / pas | présentation / pas |
+   |---|---|---|---|---|
+   | avant | 90,6 ms | 111,8 ms | 3 326 | ≈ 64 ms |
+   | `bo_shm_fill_rect` seul | 76,8 ms | 108,8 ms | 60 | 64,2 ms |
+   | + `present` sans allocation, relecture par ligne | 29,7 ms | 35,8 ms | 60 | 17,7 ms |
+   | + enveloppe ancien∪nouveau cadre | **13,6 ms** | **22,0 ms** | 32 | 8,1 ms |
+
+   Les trois leviers : fond, bordures et barres en rectangles pleins remplis
+   par le noyau (au lieu d'un `bo_shm_write` par segment et par ligne) ; la
+   pose de `present` sous un seul verrou, sans `Vec` par ligne, et la
+   relecture d'empreinte par ligne (même valeur, test hôte) ; une seule
+   recomposition de l'enveloppe des deux cadres. Les captures B0–B4 restent
+   identiques au pixel. Effet de bord mesuré au bras A/B (animation) :
+   présentation par trame 908 → 497 µs.
+
+   **Sous WHPX (non mesuré à ce jour, aucune machine Windows dans la
+   session).** Le banc se rejoue sous Windows avec un disque construit une
+   fois sous Linux/WSL, monté en `snapshot=on`, et le moniteur en TCP :
+
+   ```bash
+   # Linux/WSL, sur l'arbre d'AVANT puis sur celui d'APRES (chacun son noyau)
+   python3 tools/ci/banc_bureau_ring3_entrees.py --boot A.bin --sortie disque-A --construit-seulement
+   python3 tools/ci/banc_bureau_ring3_entrees.py --boot B.bin --sortie disque-B --construit-seulement
+   ```
+
+   ```powershell
+   # Windows PowerShell 5.1, bras alternés A B A B …, aucun seuil
+   .\tools\windows\Banc-Bureau-Entrees.ps1 -BootA A.bin -DisqueA disque-A\disque.img `
+       -BootB B.bin -DisqueB disque-B\disque.img -Repetitions 3 -Smp 2
+   ```
+
+   Sortie : `BANC_BUREAU_ENTREES_AB` (médiane du pas moyen, pire pas,
+   présentation, appels par pas, passages en échec comptés), CSV et
+   `serie.log` de chaque passage ; l'accélérateur réel est relu sur la liaison
+   série (`BOUCHAUD_CPU_ISA`), jamais déduit de l'option.
+   Pas encore : routage selon `windowd`, curseur matériel, USB HID sous ce
+   chemin, DOOM et Ladybird sous `composited`.
 4. **Applications natives** (Fichiers, Notes, Terminal, Calculatrice) en
    processus ring 3 sur le même protocole GUI.
 5. **Retrait** du fil noyau `window_manager::boucle` ; le noyau ne garde que le

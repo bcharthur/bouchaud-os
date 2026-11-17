@@ -78,12 +78,26 @@ pub fn valide(d: &Demande, octets_region: usize, ecran_l: u32, ecran_h: u32) -> 
 /// Empreinte FNV-1a 64 bits de pixels, tronquee a 62 bits pour rester un
 /// retour d'appel systeme positif.
 pub fn empreinte<I: IntoIterator<Item = u32>>(pixels: I) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = EMPREINTE_DEPART;
     for p in pixels {
-        for o in (p & 0x00ff_ffff).to_le_bytes() {
-            h ^= o as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        h = empreinte_pixel(h, p);
     }
+    empreinte_fin(h)
+}
+
+/// La meme empreinte, par morceaux (une ligne a la fois, sans allouer) :
+/// `empreinte_fin(fold(EMPREINTE_DEPART, empreinte_pixel))` == `empreinte`.
+pub const EMPREINTE_DEPART: u64 = 0xcbf2_9ce4_8422_2325;
+
+#[inline]
+pub fn empreinte_pixel(mut h: u64, p: u32) -> u64 {
+    for o in (p & 0x00ff_ffff).to_le_bytes() {
+        h ^= o as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+pub fn empreinte_fin(h: u64) -> u64 {
     h & 0x3fff_ffff_ffff_ffff
 }
