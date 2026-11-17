@@ -46,4 +46,4 @@ gh api -X POST repos/bcharthur/bouchaud-os/rulesets --input tools/github/ruleset
 
 Ou par l'interface : Settings → Rules → Rulesets → New → Import a ruleset.
 
-Historique : versions précédentes de ce fichier dans Git ; preuves d'octobre : [P13_CLOSEOUT_2026-10-20.md](P13_CLOSEOUT_2026-10-20.md).
+Historique : versions précédentes de ce fichier dans Git ; preuves d'octobre : [P13_CLOSEOUT_2026-10-20.md](../historique/notes/P13_CLOSEOUT_2026-10-20.md).

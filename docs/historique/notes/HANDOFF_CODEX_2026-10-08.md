@@ -1,7 +1,7 @@
 # Reprise Codex — 8 octobre 2026
 
 > **Mise a jour de reprise (19 h 15 Paris) :** lire d'abord
-> [Reception SCM_RIGHTS atomique](../handoffs/2026-10-08-scm-atomic-receive.md).
+> [Reception SCM_RIGHTS atomique](../../handoffs/2026-10-08-scm-atomic-receive.md).
 > La campagne instrumentee `37807102697` est terminee et analysee.
 > Le correctif noyau minimal `c78be28` est publie ; la sonde renforcee
 > `1a47387` passe 10000/10000 sous Bouchaud KVM (run `37814193790`).
@@ -218,7 +218,7 @@ Objets GitHub préparés mais **non rattachés à la branche** :
 Arbre final vérifié : `c613df21e2849edf45473c8538eeb06469beb8dc`.
 Les ancres et l'idempotence ont été testées ; ces ajouts n'ont PAS été compilés ni joués en CI.
 
-Le patch complet est conservé dans [le patch de reprise](../handoffs/2026-10-08-pending-memory.patch).
+Le patch complet est conservé dans [le patch de reprise](../../handoffs/2026-10-08-pending-memory.patch).
 Il a été vérifié, hunk par hunk, contre les fichiers GitHub des deux commits.
 Ne l'appliquer qu'une fois, après inspection du status et après la priorité KVM :
 `git apply --check docs/handoffs/2026-10-08-pending-memory.patch`,

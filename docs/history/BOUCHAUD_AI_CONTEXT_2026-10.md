@@ -2,14 +2,14 @@
 
 # Bouchaud OS — contexte de référence pour humain ou IA
 
-> **ETAT ACTUEL, 19 OCTOBRE 2026 :** lire [P13_CLOSEOUT_2026-10-19.md](../current/P13_CLOSEOUT_2026-10-19.md), puis [STATUS_CURRENT](../current/STATUS_CURRENT.md). Les tableaux du 8 octobre ci-dessous sont historiques. Cinq workflows verts sur `f5692b7`, mais P13 STRICT KVM **NON_QUALIFIANT** / **NON_CONCLUANT**; gel global SMP8 deja diagnostique/corrige en QEMU, pas de nouveau travail a faire sur ces sondes. `main` intact, PR #226 en brouillon.
+> **ETAT ACTUEL, 19 OCTOBRE 2026 :** lire [P13_CLOSEOUT_2026-10-19.md](../historique/notes/P13_CLOSEOUT_2026-10-19.md), puis [STATUS_CURRENT](../current/STATUS_CURRENT.md). Les tableaux du 8 octobre ci-dessous sont historiques. Cinq workflows verts sur `f5692b7`, mais P13 STRICT KVM **NON_QUALIFIANT** / **NON_CONCLUANT**; gel global SMP8 deja diagnostique/corrige en QEMU, pas de nouveau travail a faire sur ces sondes. `main` intact, PR #226 en brouillon.
 
 
 
 > **Mise à jour du 13 octobre 2026 : lire d'abord
-> [le handoff actif](../current/HANDOFF_CLAUDE_ACTIVE.md)**, puis
-> [l'audit de stabilité](../current/AUDIT_STABILITY_2026-10-13.md) et
-> [le registre P1→P19](../current/P_LOTS_REGISTER.md). Le reste de ce
+> [le handoff actif](../historique/notes/HANDOFF_CLAUDE_ACTIVE.md)**, puis
+> [l'audit de stabilité](../historique/notes/AUDIT_STABILITY_2026-10-13.md) et
+> [le registre P1→P19](../historique/notes/P_LOTS_REGISTER.md). Le reste de ce
 > fichier décrit le HEAD `3658af04` du 8 octobre.
 
 
@@ -21,7 +21,7 @@
 
 Ce fichier est le point d'entrée recommandé.
 
-**Reprise du 8 octobre 2026 : lire d'abord [le handoff Codex](../current/HANDOFF_CODEX_2026-10-08.md).**
+**Reprise du 8 octobre 2026 : lire d'abord [le handoff Codex](../historique/notes/HANDOFF_CODEX_2026-10-08.md).**
 Le commit ajoutant ce handoff est documentaire. La campagne du HEAD technique ci-dessus est terminée et rouge :
 Compositor réellement remplacé sur le bras KVM A, croissance RSS du WebContent principal, et preuve de pile
 os-primitives corrompue par l'entrelacement série. Les deux répétitions mémoire prouvent chacune 20/20 swaps.
@@ -33,7 +33,7 @@ Les diagnostics mémoire préparés mais non publiés comme code sont conservés
 1. code du HEAD courant ;
 2. logs et CI du même HEAD ;
 3. `docs/current/STATUS_CURRENT.md` ;
-4. `docs/current/P1_P13_CURRENT.md` ;
+4. `docs/historique/notes/P1_P13_CURRENT.md` ;
 5. documentation détaillée existante ;
 6. notes historiques.
 
@@ -79,7 +79,7 @@ Ladybird. Les notices et licences du moteur restent explicites.
 ## Lire ensuite
 
 1. `docs/current/STATUS_CURRENT.md`
-2. `docs/current/P1_P13_CURRENT.md`
+2. `docs/historique/notes/P1_P13_CURRENT.md`
 3. `docs/current/ARCHITECTURE_CURRENT.md`
 4. `docs/current/TRIGKEY_REFERENCE.md`
 5. `docs/current/BOUCHAUD_NAVIGATEUR.md`

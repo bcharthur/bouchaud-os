@@ -337,7 +337,7 @@ Liste complète et priorités : [KNOWN_LIMITATIONS](docs/current/KNOWN_LIMITATIO
 
 ## Travaux en cours et feuille de route
 
-**Branches** : `main` est la référence ; une seule branche de travail à la fois, et sa PR. L'inventaire du 17/11/2026 (54 branches mortes : 47 déjà dans `main`, prouvé fichier par fichier, et 7 à archiver en étiquettes `archive/prune-20261117/*`) et leur suppression vérifiée sont dans `tools/git/nettoie_branches_20261117.py`. Les PR ouvertes sont sur [GitHub](https://github.com/bcharthur/bouchaud-os/pulls).
+**Branches** : `main` est la référence ; une seule branche de travail à la fois, et sa PR. L'inventaire du 17/11/2026 (54 branches mortes : 47 déjà dans `main`, prouvé fichier par fichier, et 7 à archiver en étiquettes `archive/prune-20261117/*`) et leur suppression vérifiée sont dans `tools/git/nettoie_branches_20261117.py`. Les PR ouvertes sont sur [GitHub](https://github.com/bcharthur/bouchaud-os/pulls). Point d'entrée de la documentation, avec les chantiers ouverts par priorité : [docs/current/README.md](docs/current/README.md).
 
 **Chantiers ouverts**, par ordre de priorité. Ce sont des projets, pas des fonctionnalités livrées.
 

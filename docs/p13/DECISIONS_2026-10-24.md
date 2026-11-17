@@ -2,7 +2,7 @@
 
 **Statut : décisions de politique adoptées pour le prochain candidat, non encore implémentées dans les portes CI.**  
 **Base documentaire :** `audit/p13-p0-v16-20261024` (`14f872f23d662cc90e5d954186250d2b2c967642`).  
-**Source :** `docs/current/P13_CLOSEOUT_2026-10-20.md` §6.1(a), §6.2(a) et §6.5 ; `docs/current/REGISTRE_CONVERGENCE.md` (règles 1–4, C4).  
+**Source :** `docs/historique/notes/P13_CLOSEOUT_2026-10-20.md` §6.1(a), §6.2(a) et §6.5 ; `docs/historique/notes/REGISTRE_CONVERGENCE.md` (règles 1–4, C4).  
 **Périmètre :** critères d'interprétation des mesures. Aucun seuil de latence du noyau n'est abaissé. Aucun `NON_QUALIFIANT` n'est converti en `QUALIFIE_OK`.
 
 ## D-6.1(a) — A/B réveil précis : témoin négatif et bras candidat
@@ -52,7 +52,7 @@ Aucun nouveau commit d'instrumentation spécifique à un P0 tant que son mécani
 
 ## Traçabilité
 
-- Source §6 : `docs/current/P13_CLOSEOUT_2026-10-20.md`, sections « Décisions humaines requises » et « Protocole A/B en cinq verdicts ».
-- Source registre : `docs/current/REGISTRE_CONVERGENCE.md`, règles 1–4 et fiche C4.
+- Source §6 : `docs/historique/notes/P13_CLOSEOUT_2026-10-20.md`, sections « Décisions humaines requises » et « Protocole A/B en cinq verdicts ».
+- Source registre : `docs/historique/notes/REGISTRE_CONVERGENCE.md`, règles 1–4 et fiche C4.
 - Source bruit : commit `ed5602f4`, run `39479633757`, tour 1.
 - Application : **prochaine étape distincte**, vérifiée localement puis sous KVM ; ne pas réétiqueter rétroactivement les anciens runs.
