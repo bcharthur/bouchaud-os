@@ -324,8 +324,14 @@ req("BOUCHAUD_STAGE2_PAGE_ACCUEIL" in stage2,
     "annonce de la page d'accueil absente")
 req("BOUCHAUD_STAGE2_PAGE_ACCUEIL_ABSENTE" in stage2,
     "alerte page d'accueil manquante absente")
+# BOUCHAUD_TRACE_RESEAU_A_LA_DEMANDE_V1 : la trace reseau de Ladybird coute
+# un coeur sur deux au chargement (releve WHPX du 18/11) ; elle n'est plus
+# exportee par defaut, et rien ne doit la remettre en douce.
+req('set_exported_for_boot("BOUCHAUD_M9", "1")' not in stage2,
+    "BOUCHAUD_M9 exporte par defaut : trace reseau sur la console a chaque requete")
+req("BOUCHAUD_TRACE_RESEAU_A_LA_DEMANDE_V1" in stage2,
+    "decision trace reseau a la demande non documentee dans stage2")
 for token in (
-    'set_exported_for_boot("BOUCHAUD_M9", "1")',
     # Le lancement doit rester possible sans reseau; la recherche est explicite.
     # L'URL litterale a quitte l'appel pour une constante : c'est elle qu'on
     # verifie maintenant, et elle sert AUSSI a constater la presence du fichier
