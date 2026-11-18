@@ -63,6 +63,38 @@ def png_depuis_ppm(ppm: Path, png: Path) -> None:
                     + morceau(b"IDAT", zlib.compress(brut, 6)) + morceau(b"IEND", b""))
 
 
+def eprouve_message_coupe(binaire: Path) -> bool:
+    """Revue #336 : un message GUI coupe entre deux lectures du canal (flux
+    d'octets) ne doit pas etre perdu. La calculatrice tourne ICI, sur l'hote,
+    branchee a une socketpair ; une touche « 7 » lui arrive en deux ecritures."""
+    import socket
+    a, b = socket.socketpair()
+    fd = os.memfd_create("surface")
+    os.ftruncate(fd, 640 * 480 * 4)
+    env = dict(os.environ, BO_GUI_FD=str(b.fileno()), BO_SURFACE_FD=str(fd), BO_SURFACE_WIDTH="640",
+               BO_SURFACE_HEIGHT="480", BO_SURFACE_STRIDE=str(640 * 4))
+    p = subprocess.Popen([str(binaire)], env=env, pass_fds=(b.fileno(), fd), stderr=subprocess.PIPE, text=True)
+
+    def msg(genre: int, charge: bytes) -> bytes:
+        return struct.pack("<IHHII", 0x55474F42, 1, genre, len(charge), 1) + charge
+    try:
+        a.sendall(msg(0x101, struct.pack("<IIII", 0, 320, 420, 1)))
+        time.sleep(0.5)
+        touche = msg(0x103, struct.pack("<IIIII", 0, 0, 0, ord("7"), 1))
+        a.sendall(touche[:10])
+        time.sleep(0.4)
+        a.sendall(touche[10:])
+        time.sleep(0.6)
+        a.sendall(msg(0x106, b""))
+        _, err = p.communicate(timeout=5)
+    except Exception:  # noqa: BLE001
+        p.kill()
+        _, err = p.communicate()
+    finally:
+        a.close(); b.close(); os.close(fd)
+    return "CALC_GUI_TOUCHE label=7 source=clavier" in err
+
+
 class Banc:
     def __init__(self, o):
         self.o = o
@@ -85,6 +117,7 @@ class Banc:
                              str(RACINE / "userland/apps/calculatrice/calculatrice-gui.c")], check=True)
         for nom in ("mire-gpu", "attends"):
             subprocess.run(cc + ["-o", str(b / nom), str(RACINE / "tools/userland" / f"{nom}.c")], check=True)
+        self.message_coupe = eprouve_message_coupe(b / "calculatrice-gui")
         scen = self.sortie / "scen"
         (scen / "bin").mkdir(parents=True)
         shutil.copy(b / "composited-slice", scen / "bin/composited")
@@ -206,6 +239,8 @@ class Banc:
     # --- scenario ------------------------------------------------------------
     def joue(self):
         o = self.o
+        self.exige(getattr(self, "message_coupe", False),
+                   "hote : un message GUI coupe en deux lectures n'est pas perdu (touche recue)")
         pret = self.attend(r"COMPOSITED_DOCK_PRET applications=(\d+)", o.attente_boot)
         self.exige(pret is not None and pret.group(1) == "2", "le bureau ring 3 s'affiche avec son dock (2 applications)")
         if not pret:

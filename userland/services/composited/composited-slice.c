@@ -800,10 +800,15 @@ static int rang_de(int indice)
     return -1;
 }
 
-/* Une fenetre au-dessus de `indice` recouvre-t-elle `r` ? */
+/* Une fenetre au-dessus de `indice` -- ou le dock -- recouvre-t-elle `r` ?
+ * Le dock est au-dessus de toutes les fenetres : un dommage qui le touche
+ * passe par la recomposition complete, jamais par la copie directe (revue
+ * #336 : une fenetre glissee sur le dock l'effacait a chaque trame). */
+static struct rect rect_dock(void);
 static int recouverte(int indice, struct rect r)
 {
     struct rect i;
+    if (dock && intersecte(r, rect_dock(), &i)) return 1;
     for (int k = rang_de(indice) + 1; k < nfen; k++) {
         struct fen *f = &fens[ordre[k]];
         if (f->visible && intersecte(r, cadre_de(f), &i)) return 1;

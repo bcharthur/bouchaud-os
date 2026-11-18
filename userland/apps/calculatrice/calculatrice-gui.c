@@ -251,16 +251,23 @@ static const char *touche_clavier(uint32_t u)
 /* Traite les messages en attente ; rend 1 s'il faut redessiner. */
 static int pompe(void)
 {
-    static uint8_t rx[4096];
+    /* Le canal est un flux d'octets (socketpair) : une lecture peut couper
+     * un message. Les octets non consommes sont GARDES et completes par la
+     * lecture suivante (revue #336) ; seuls les messages entiers sont lus. */
+    static uint8_t rx[8192];
+    static size_t plein;
     static uint32_t boutons_prec;
     int redessine = 0;
-    ssize_t n = read(gui_fd, rx, sizeof rx);
-    if (n <= 0) _exit(0);   /* canal ferme : le gestionnaire est parti */
-    for (ssize_t o = 0; o + 16 <= n;) {
+    ssize_t lu = read(gui_fd, rx + plein, sizeof rx - plein);
+    if (lu <= 0) _exit(0);   /* canal ferme : le gestionnaire est parti */
+    plein += (size_t)lu;
+    size_t o = 0;
+    for (; o + 16 <= plein;) {
         uint32_t len = get32(rx + o + 8);
         uint16_t genre = rx[o + 6] | (rx[o + 7] << 8);
         const uint8_t *c = rx + o + 16;
-        if (o + 16 + (ssize_t)len > n) break;
+        if (len > sizeof rx - 16) { plein = 0; return redessine; }   /* en-tete invalide : resynchroniser */
+        if (o + 16 + len > plein) break;   /* message incomplet : attendre la suite */
         if (genre == BO_GUI_CLOSE) {
             fprintf(stderr, "CALC_GUI_FERMEE\n");
             _exit(0);
@@ -301,6 +308,8 @@ static int pompe(void)
         }
         o += 16 + len;
     }
+    memmove(rx, rx + o, plein - o);
+    plein -= o;
     return redessine;
 }
 
