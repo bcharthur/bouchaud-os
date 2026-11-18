@@ -901,3 +901,56 @@ fn un_ack_qui_n_avance_pas_ne_libere_rien() {
     e.renvoie(RTO_INITIAL_MS + 100, |s, _| { renvoye.push(s); true });
     assert_eq!(renvoye, vec![ISN + 4]);
 }
+
+// ---------------------------------------------------------------------------
+// Revue #338 (Codex) : deux bornes que `renvoie` ne tenait pas.
+// ---------------------------------------------------------------------------
+
+/// Des ACK dupliques entretenus ne doivent pas faire renvoyer le meme segment
+/// indefiniment : la retransmission rapide respecte RETRANSMISSIONS_MAX, et la
+/// connexion finit abandonnee (ETIMEDOUT) comme sur le chemin du RTO.
+#[test]
+fn des_ack_dupliques_entretenus_n_empechent_pas_l_abandon() {
+    let mut e = emission();
+    e.enregistre(ISN, b"trou", false, 0).unwrap();
+    let mut t = 0u64;
+    let mut abandon = false;
+    let mut renvois = 0u32;
+    for _ in 0..200 {
+        t += 100;
+        for k in 0..3u64 {
+            e.acquitte_segment(ISN, false, t + k);
+        }
+        let bilan = e.renvoie(t + 3, |_, _| true);
+        renvois += bilan.renvoyes;
+        if bilan.abandon {
+            abandon = true;
+            break;
+        }
+    }
+    assert!(abandon, "abandon attendu, {renvois} renvois sans fin");
+    assert!(renvois <= RETRANSMISSIONS_MAX, "{renvois} renvois > {RETRANSMISSIONS_MAX}");
+}
+
+/// Une volee emise a quelques millisecondes d'ecart expire en plusieurs
+/// passes de pompe. Le RTO ne doit doubler qu'une fois pour cet episode, pas
+/// une fois par segment (neuf segments a 2 ms : 1 s -> 60 s en 16 ms).
+#[test]
+fn une_volee_echelonnee_ne_double_le_rto_qu_une_fois() {
+    let mut e = emission();
+    for i in 0..9u32 {
+        e.enregistre(ISN + i * 10, b"0123456789", false, (i as u64) * 2).unwrap();
+    }
+    let mut t = RTO_INITIAL_MS;
+    let mut renvoyes = 0u32;
+    while t < RTO_INITIAL_MS + 20 {
+        renvoyes += e.renvoie(t, |_, _| true).renvoyes;
+        t += 2;
+    }
+    assert!(renvoyes >= 1, "l'expiration a bien eu lieu");
+    assert_eq!(e.rto_ms(), RTO_INITIAL_MS * 2, "un episode de perte, un seul doublement");
+    // Et toute la volee est rearmee ensemble : plus rien avant la nouvelle echeance.
+    let mut avant = 0u32;
+    e.renvoie(t + RTO_INITIAL_MS * 2 - 50, |_, _| { avant += 1; true });
+    assert_eq!(avant, 0, "la volee entiere attend la meme echeance");
+}

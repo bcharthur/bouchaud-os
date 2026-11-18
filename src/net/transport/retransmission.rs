@@ -433,6 +433,13 @@ impl Emission {
         let mut bilan = Renvoi::default();
 
         if let Some(index) = self.retransmission_rapide() {
+            // Revue #338 : la retransmission rapide est bornee comme le RTO.
+            // Des ACK dupliques entretenus repoussaient sinon l'echeance a
+            // chaque renvoi, et l'abandon (ETIMEDOUT) n'arrivait jamais.
+            if self.file[index].retransmissions >= RETRANSMISSIONS_MAX {
+                bilan.abandon = true;
+                return bilan;
+            }
             let segment = &mut self.file[index];
             emet(segment.seq, &segment.octets[..segment.longueur as usize]);
             segment.retransmissions += 1;
@@ -467,9 +474,17 @@ impl Emission {
             let segment = &mut self.file[index];
             emet(segment.seq, &segment.octets[..segment.longueur as usize]);
             segment.retransmissions += 1;
-            segment.echeance_ms = maintenant_ms.saturating_add(self.rto_ms);
             self.segments_retransmis += 1;
             bilan.renvoyes += 1;
+        }
+        // Revue #338 : UN temporisateur par connexion (RFC 6298, section 5).
+        // Toute la volee en vol est rearmee sur la meme echeance. Avec des
+        // echeances par segment, une volee emise a quelques millisecondes
+        // d'ecart expirait en autant de passes de pompe, et chacune doublait
+        // le RTO : neuf segments a 2 ms d'ecart le portaient de 1 s a 60 s.
+        let echeance = maintenant_ms.saturating_add(self.rto_ms);
+        for segment in self.file.iter_mut().filter(|s| s.occupe) {
+            segment.echeance_ms = echeance;
         }
         bilan
     }
