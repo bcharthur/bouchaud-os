@@ -647,11 +647,21 @@ jobs:
             cargo-${{ runner.os }}-
       - name: DNS depuis ring3
         run: tools/net/verifie-dns.sh
+      # BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : meme noyau, meme couche (sockets
+      # d'anneau 3). Un segment de donnees qui ne part pas -- ARP expire apres
+      # 65 s de silence -- doit etre renvoye ; avant, la connexion restait
+      # figee jusqu'a l'echeance du serveur (consentement YouTube, 4 min).
+      - name: TCP depuis ring3 - segment non parti renvoye
+        if: always()
+        run: tools/net/verifie-tcp-perte.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-dns-udp
-          path: target/verifie-dns/serie.log
+          path: |
+            target/verifie-dns/serie.log
+            target/verifie-tcp-perte/serie.log
+            target/verifie-tcp-perte/serveur.log
           if-no-files-found: warn
 
   dhcp-recuperation:

@@ -73,6 +73,8 @@ done
 # argument. C'est LUI qui a attrape le quantum impute a un coeur endormi : il
 # compare deux horloges, ce qu'aucun autre scenario ne fait.
 execute dns-udp-ring3 bash tools/net/verifie-dns.sh
+# Meme couche, en TCP : un segment non parti (ARP expire) doit etre renvoye.
+execute tcp-perte-ring3 bash tools/net/verifie-tcp-perte.sh
 
 echo
 echo "== ce qui ne peut PAS tourner ici =="

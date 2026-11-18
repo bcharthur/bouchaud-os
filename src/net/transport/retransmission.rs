@@ -144,6 +144,17 @@ pub enum Expiration {
     Abandon(usize),
 }
 
+/// Ce qu'un appel a `Emission::renvoie` a fait.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Renvoi {
+    /// Segments re-emis (tentes : la trame peut ne pas etre partie).
+    pub renvoyes: u32,
+    /// Une retransmission rapide a eu lieu.
+    pub rapide: bool,
+    /// Un segment a epuise ses essais : la connexion est perdue.
+    pub abandon: bool,
+}
+
 /// L'etat d'emission d'une connexion.
 pub struct Emission {
     /// La file, sur le TAS. Voir l'en-tete du module : en ligne, elle faisait
@@ -391,6 +402,85 @@ impl Emission {
         self.rto_ms = rto.clamp(RTO_MIN_MS, RTO_MAX_MS);
     }
 
+    /// Traite l'ACK porte par un segment entrant.
+    ///
+    /// BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : un segment qui PORTE DES DONNEES et
+    /// repete l'ACK n'est pas un doublon (RFC 5681, section 2). Le pair qui
+    /// envoie une reponse en dix segments les estampille tous du meme ACK ;
+    /// les compter declencherait une retransmission rapide a chaque page.
+    /// Seuls les ACK purs comptent comme doublons. Un segment de donnees qui
+    /// AVANCE l'ACK acquitte normalement.
+    pub fn acquitte_segment(&mut self, ack: u32, porte_donnees: bool, maintenant_ms: u64) -> bool {
+        if porte_donnees && !seq_avant(self.snd_una, ack) {
+            return false;
+        }
+        self.acquitte(ack, maintenant_ms)
+    }
+
+    /// Renvoie ce qui doit l'etre a `maintenant_ms`, par `emet(seq, charge)`.
+    ///
+    /// D'abord la retransmission rapide (trois ACK purs dupliques) : le pair
+    /// recoit, il lui manque un trou, et le RTO n'est PAS double -- ce n'est
+    /// pas une congestion. Ensuite les expirations : TOUS les segments
+    /// expires repartent, dans l'ordre des numeros de sequence, et le RTO ne
+    /// double qu'UNE fois pour cette expiration. Le doubler par segment ferait
+    /// passer trois pertes simultanees d'une seconde a huit.
+    ///
+    /// `emet` rend `false` si la trame n'est pas partie (ARP a refaire,
+    /// anneau plein) : le segment reste en file et repartira a la prochaine
+    /// echeance. C'est precisement le cas qu'aucun code ne couvrait.
+    pub fn renvoie<F: FnMut(u32, &[u8]) -> bool>(&mut self, maintenant_ms: u64, mut emet: F) -> Renvoi {
+        let mut bilan = Renvoi::default();
+
+        if let Some(index) = self.retransmission_rapide() {
+            let segment = &mut self.file[index];
+            emet(segment.seq, &segment.octets[..segment.longueur as usize]);
+            segment.retransmissions += 1;
+            segment.echeance_ms = maintenant_ms.saturating_add(self.rto_ms);
+            self.segments_retransmis += 1;
+            bilan.renvoyes += 1;
+            bilan.rapide = true;
+        }
+
+        // Les expires, tries par numero de sequence relatif a `snd_una`.
+        let mut expires = [0usize; SEGMENTS_MAX];
+        let mut nombre = 0usize;
+        for (index, segment) in self.file.iter().enumerate() {
+            if segment.occupe && maintenant_ms >= segment.echeance_ms {
+                if segment.retransmissions >= RETRANSMISSIONS_MAX {
+                    bilan.abandon = true;
+                    return bilan;
+                }
+                expires[nombre] = index;
+                nombre += 1;
+            }
+        }
+        if nombre == 0 {
+            return bilan;
+        }
+        let base = self.snd_una;
+        expires[..nombre].sort_unstable_by_key(|&i| self.file[i].seq.wrapping_sub(base));
+
+        self.rto_ms = (self.rto_ms.saturating_mul(2)).min(RTO_MAX_MS);
+        self.expirations += 1;
+        for &index in &expires[..nombre] {
+            let segment = &mut self.file[index];
+            emet(segment.seq, &segment.octets[..segment.longueur as usize]);
+            segment.retransmissions += 1;
+            segment.echeance_ms = maintenant_ms.saturating_add(self.rto_ms);
+            self.segments_retransmis += 1;
+            bilan.renvoyes += 1;
+        }
+        bilan
+    }
+
+    /// Reste-t-il une place dans la file ? Sans place, un emetteur doit
+    /// attendre un acquittement : envoyer sans enregistrer serait renoncer a
+    /// renvoyer.
+    pub fn a_de_la_place(&self) -> bool {
+        self.file.iter().any(|s| !s.occupe)
+    }
+
     /// Combien de temps attendre avant la prochaine echeance.
     ///
     /// C'est ce qui remplace le busy-poll a duree fixe : on dort exactement
@@ -540,5 +630,52 @@ pub fn stats() -> (u64, u64, u64, u64, u64, u64, u64) {
         TCP_RTO_DERNIER_MS.load(Ordering::Relaxed),
         TCP_BUSY_POLL_TOURS.load(Ordering::Relaxed),
         TCP_ATTENTES_DORMIES.load(Ordering::Relaxed),
+    )
+}
+
+// BOUCHAUD_TCP_SOCKETS_FIABLES_V1 -- LE CHEMIN DES SOCKETS D'ANNEAU 3.
+//
+// `retransmissions=0 rto_ms=0` dans `[NET-TCP]` ne parlait que de `tcp::fetch`.
+// Le TCP de Ladybird (`TcpConn`) n'avait ni file ni renvoi : une trame qui ne
+// partait pas -- entree ARP expiree, anneau plein -- etait perdue sans trace,
+// et la connexion attendait l'echeance d'inactivite du serveur. Ces compteurs
+// disent desormais ce qui se passe sur CE chemin, au moment ou cela arrive.
+static SOCK_NON_PARTIS: AtomicU64 = AtomicU64::new(0);
+static SOCK_RENVOIS: AtomicU64 = AtomicU64::new(0);
+static SOCK_RENVOIS_RAPIDES: AtomicU64 = AtomicU64::new(0);
+static SOCK_ABANDONS: AtomicU64 = AtomicU64::new(0);
+static SOCK_FILE_PLEINE: AtomicU64 = AtomicU64::new(0);
+
+/// Une trame de donnees n'est pas partie a sa premiere emission.
+pub fn note_socket_non_parti() {
+    SOCK_NON_PARTIS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bilan d'un passage de `Emission::renvoie` sur une socket.
+pub fn note_socket_renvoi(bilan: &Renvoi) {
+    if bilan.renvoyes != 0 {
+        SOCK_RENVOIS.fetch_add(bilan.renvoyes as u64, Ordering::Relaxed);
+    }
+    if bilan.rapide {
+        SOCK_RENVOIS_RAPIDES.fetch_add(1, Ordering::Relaxed);
+    }
+    if bilan.abandon {
+        SOCK_ABANDONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Un emetteur a trouve la file pleine (64 segments non acquittes).
+pub fn note_socket_file_pleine() {
+    SOCK_FILE_PLEINE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// non partis, renvois, renvois rapides, abandons, files pleines.
+pub fn stats_sockets() -> (u64, u64, u64, u64, u64) {
+    (
+        SOCK_NON_PARTIS.load(Ordering::Relaxed),
+        SOCK_RENVOIS.load(Ordering::Relaxed),
+        SOCK_RENVOIS_RAPIDES.load(Ordering::Relaxed),
+        SOCK_ABANDONS.load(Ordering::Relaxed),
+        SOCK_FILE_PLEINE.load(Ordering::Relaxed),
     )
 }

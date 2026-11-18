@@ -383,19 +383,7 @@ pub fn envoie_octets(fd: i32, data: &[u8], _flags: u32, addr: u64, addr_len: usi
     };
     let kind = state.lock().kind;
     match kind {
-        SocketKind::Tcp => {
-            let mut borrowed = state.lock();
-            match borrowed.conn.as_mut() {
-                Some(conn) => {
-                    if conn.send(&data) {
-                        len as i64
-                    } else {
-                        -errno::EPIPE
-                    }
-                }
-                None => -errno::ENOTCONN,
-            }
-        }
+        SocketKind::Tcp => ecrit_tcp(fd, &state, data, _flags),
         SocketKind::Udp => {
             let target = match read_sockaddr(addr, addr_len) {
                 Some(value) => Some(value),
@@ -1065,15 +1053,7 @@ fn send_bytes(fd: i32, data: &[u8], addr: u64, addr_len: usize, _flags: u32) -> 
     };
     let kind = state.lock().kind;
     match kind {
-        SocketKind::Tcp => {
-            let mut borrowed = state.lock();
-            match borrowed.conn.as_mut() {
-                Some(conn) => {
-                    if conn.send(data) { data.len() as i64 } else { -errno::EPIPE }
-                }
-                None => -errno::ENOTCONN,
-            }
-        }
+        SocketKind::Tcp => ecrit_tcp(fd, &state, data, _flags),
         SocketKind::Udp => {
             let target = match read_sockaddr(addr, addr_len) {
                 Some(value) => Some(value),
@@ -1114,6 +1094,70 @@ fn send_bytes(fd: i32, data: &[u8], addr: u64, addr_len: usize, _flags: u32) -> 
                 -errno::ENETUNREACH
             }
         }
+    }
+}
+
+/// Patience d'une ecriture BLOQUANTE sans aucun acquittement du pair.
+const ECRITURE_TCP_PATIENCE_MS: u64 = 30_000;
+
+/// Ecrit sur une socket TCP (`sendto`, `sendmsg`, `write`).
+///
+/// BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : `TcpConn::ecrit` met chaque segment en
+/// file AVANT de l'emettre, pour pouvoir le renvoyer. La file est bornee
+/// (64 segments) : quand elle est pleine, une socket non bloquante rend une
+/// ecriture partielle ou `EAGAIN` -- comme Linux --, et une socket bloquante
+/// attend un acquittement en rendant le processeur, verrou de la socket
+/// relache. L'ancien chemin ne pouvait jamais etre plein : il n'enregistrait
+/// rien, et c'est pour cela qu'il perdait.
+fn ecrit_tcp(fd: i32, state: &Arc<SpinLock<SocketState>>, data: &[u8], flags: u32) -> i64 {
+    let non_bloquant =
+        flags & MSG_DONTWAIT != 0 || state.lock().nonblocking || fd_non_bloquant(fd);
+    let mut total = 0usize;
+    let mut progres_ms = crate::kernel::timer::monotonic_ms();
+    loop {
+        let (n, ferme) = {
+            let mut borrowed = state.lock();
+            match borrowed.conn.as_mut() {
+                Some(conn) => {
+                    let n = conn.ecrit(&data[total..]);
+                    (n, conn.closed)
+                }
+                None => return -errno::ENOTCONN,
+            }
+        };
+        total += n;
+        if total >= data.len() {
+            return total as i64;
+        }
+        if ferme {
+            return if total > 0 { total as i64 } else { -errno::EPIPE };
+        }
+        if non_bloquant {
+            return if total > 0 { total as i64 } else { -errno::EAGAIN };
+        }
+        let maintenant = crate::kernel::timer::monotonic_ms();
+        if n != 0 {
+            progres_ms = maintenant;
+        } else if maintenant.saturating_sub(progres_ms) >= ECRITURE_TCP_PATIENCE_MS {
+            return if total > 0 { total as i64 } else { -errno::ETIMEDOUT };
+        }
+        crate::net::attente_cedante();
+    }
+}
+
+/// Une socket TCP accepte-t-elle une ecriture maintenant ? (`POLLOUT`)
+pub fn socket_inscriptible(state: &Arc<SpinLock<SocketState>>) -> bool {
+    let mut borrowed = state.lock();
+    match borrowed.conn.as_mut() {
+        Some(conn) => {
+            if !conn.peut_ecrire() {
+                // Un passage de pompe : les ACK arrives liberent la file.
+                conn.pump(20_000);
+            }
+            conn.peut_ecrire()
+        }
+        // UDP, ou TCP pas encore connecte : rien ne retient l'ecriture.
+        None => true,
     }
 }
 
