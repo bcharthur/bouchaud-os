@@ -19,6 +19,12 @@
 #   TCP_PERTE_E1_OK   temoin, avant l'expiration
 #   TCP_PERTE_E2_OK   la requete apres expiration repond en moins de 10 s
 #   TCP_PERTE_E3_OK   le flux est reste en ordre derriere
+#   TCP_PERTE_E4_OK   256 Kio bloquants : plus que la file d'emission (64
+#                     segments), l'emetteur attend les ACK
+#   TCP_PERTE_E5_OK   256 Kio non bloquants : EAGAIN puis POLLOUT, sans
+#                     perte ni duplication
+#   TCP_PERTE_E6_OK + TCP_PERTE_FIN_PAIR_OK
+#                     le serveur ferme : `recv` rend 0, sans attente
 #
 # et AUCUN `CORROMPU` cote serveur : une retransmission qui dupliquerait des
 # octets se verrait ici.
@@ -85,8 +91,14 @@ while True:
     corps = f.read(taille)
     attendu = bytes(motif(n, i) for i in range(taille))
     if corps == attendu:
-        print(f"RECU {nom} taille={taille}", flush=True)
+        print(f"RECU {nom} taille={taille} ms={(time.monotonic() - t0) * 1000:.0f}", flush=True)
         c.sendall(f"OK{n}\n".encode())
+        if n == 6:
+            # E6 : fin de connexion PAR LE PAIR.
+            c.shutdown(socket.SHUT_RDWR)
+            c.close()
+            print("FERME_PAR_SERVEUR", flush=True)
+            break
     else:
         print(f"CORROMPU {nom} taille={taille} recu={len(corps)}", flush=True)
         c.sendall(f"CORROMPU{n}\n".encode())
@@ -118,13 +130,13 @@ wait "$QEMU" 2>/dev/null || true
 sed -i 's/\x1b\[[0-9;]*m//g' "$JOURNAL"
 
 echo
-grep -a 'tcp-perte\|TCP_PERTE_\|NET-TCP\]' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\]\[[^]]*\] //' | tail -12 || true
+grep -a 'tcp-perte\|TCP_PERTE_\|NET-TCP' "$JOURNAL" | sed 's/^\[[^]]*\]\[[^]]*\]\[[^]]*\] //' | tail -12 || true
 echo "-- serveur --"
 cat "$SERVEUR_LOG"
 echo
 
 echecs=0
-for marqueur in TCP_PERTE_E1_OK TCP_PERTE_E2_OK TCP_PERTE_E3_OK; do
+for marqueur in TCP_PERTE_E1_OK TCP_PERTE_E2_OK TCP_PERTE_E3_OK TCP_PERTE_E4_OK TCP_PERTE_E5_OK TCP_PERTE_E6_OK TCP_PERTE_FIN_PAIR_OK; do
     if grep -aq "$marqueur" "$JOURNAL"; then
         ligne=$(grep -ao "$marqueur.*" "$JOURNAL" | tr -d '\r' | awk 'NR == 1')
         vert "  ok     $ligne"

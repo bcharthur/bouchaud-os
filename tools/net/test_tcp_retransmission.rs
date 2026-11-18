@@ -731,3 +731,173 @@ fn renvoie_signale_l_abandon() {
     }
     assert!(abandon, "apres {RETRANSMISSIONS_MAX} essais la connexion est perdue");
 }
+
+// ---------------------------------------------------------------------------
+// QUALIFICATION : pertes dans les deux sens, non-duplication, temporisation,
+// fin de connexion. Toujours sur le modele : temps et pertes sont des
+// parametres, donc chaque echec se rejoue a l'identique.
+// ---------------------------------------------------------------------------
+
+/// Generateur pseudo-aleatoire a graine fixe (xorshift) : des pertes
+/// « aleatoires » qui se rejouent a l'identique.
+struct Alea(u64);
+impl Alea {
+    fn tire(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn perd(&mut self, pour_mille: u64) -> bool {
+        self.tire() % 1000 < pour_mille
+    }
+}
+
+/// Le pair a RECU, mais son ACK s'est perdu : on renvoie une copie. Il doit
+/// l'ignorer -- le flux livre ne contient l'octet qu'une fois.
+#[test]
+fn un_ack_perdu_fait_renvoyer_une_copie_que_le_pair_ignore() {
+    let mut e = emission();
+    let mut pair = Recepteur::neuf(ISN);
+    let donnees = corps(1000, 4);
+    e.enregistre(ISN, &donnees, false, 0).unwrap();
+    let _ack_perdu = pair.recoit(ISN, &donnees);
+    assert_eq!(pair.recu.len(), 1000);
+
+    let mut copies = 0;
+    let mut t = 0u64;
+    while !e.vide() && t < 10_000 {
+        t += 2;
+        let mut envois = Vec::new();
+        e.renvoie(t, |s, c| { envois.push((s, c.to_vec())); true });
+        for (s, c) in envois {
+            copies += 1;
+            let ack = pair.recoit(s, &c);
+            e.acquitte_segment(ack, false, t + 5);
+        }
+    }
+    assert_eq!(copies, 1, "une seule copie, a l'echeance du RTO");
+    assert!(e.vide(), "l'ACK de la copie libere la file");
+    assert_eq!(pair.recu, donnees, "le pair n'a rien livre deux fois");
+}
+
+/// Gros transfert sur un lien qui perd dans LES DEUX SENS (donnees ET ACK),
+/// avec une file bornee a SEGMENTS_MAX comme dans `TcpConn::ecrit`. Plusieurs
+/// graines : le flux livre doit etre exactement le flux emis, et tout doit
+/// finir acquitte, sans abandon.
+#[test]
+fn transfert_avec_pertes_dans_les_deux_sens_livre_le_flux_exact() {
+    let mut pertes_totales = 0u64;
+    for graine in [0x9e3779b97f4a7c15u64, 7, 1234567, 0xdeadbeef, 42] {
+        for pour_mille in [20u64, 100] {
+            let mut alea = Alea(graine);
+            let mut e = emission();
+            let mut pair = Recepteur::neuf(ISN);
+            let donnees = corps(200_000, (graine % 26) as u8);
+            let mut seq = ISN;
+            let mut off = 0usize;
+            let mut t = 0u64;
+            let mut acks_en_vol: Vec<(u64, u32)> = Vec::new(); // (arrivee, ack)
+            let rtt = 10u64;
+            let mut pertes_donnees = 0u64;
+            while (off < donnees.len() || !e.vide()) && t < 3_600_000 {
+                t += 2;
+                // Les ACK arrives.
+                acks_en_vol.retain(|&(arrivee, ack)| {
+                    if arrivee <= t { e.acquitte_segment(ack, false, t); false } else { true }
+                });
+                // Emettre ce que la file accepte.
+                while off < donnees.len() && e.a_de_la_place() {
+                    let fin = (off + 1400).min(donnees.len());
+                    let morceau = &donnees[off..fin];
+                    e.enregistre(seq, morceau, false, t).unwrap();
+                    if !alea.perd(pour_mille) {
+                        let ack = pair.recoit(seq, morceau);
+                        if !alea.perd(pour_mille) { acks_en_vol.push((t + rtt, ack)); }
+                    } else {
+                        pertes_donnees += 1;
+                    }
+                    seq = seq.wrapping_add(morceau.len() as u32);
+                    off = fin;
+                }
+                // Renvois.
+                let mut envois = Vec::new();
+                let bilan = e.renvoie(t, |s, c| { envois.push((s, c.to_vec())); true });
+                assert!(!bilan.abandon, "graine {graine:#x} perte {pour_mille}/1000 : abandon a tort");
+                for (s, c) in envois {
+                    if !alea.perd(pour_mille) {
+                        let ack = pair.recoit(s, &c);
+                        if !alea.perd(pour_mille) { acks_en_vol.push((t + rtt, ack)); }
+                    }
+                }
+            }
+            assert_eq!(pair.recu.len(), donnees.len(), "graine {graine:#x} perte {pour_mille}/1000 : flux incomplet");
+            assert!(pair.recu == donnees, "graine {graine:#x} perte {pour_mille}/1000 : flux corrompu ou duplique");
+            assert!(e.vide(), "graine {graine:#x} : tout est acquitte");
+            eprintln!("graine={graine:#x} perte={pour_mille}/1000 segments_perdus={pertes_donnees} renvois={} fin_ms={t}", e.segments_retransmis);
+            assert!(e.segments_retransmis >= pertes_donnees, "chaque segment perdu a ete renvoye au moins une fois");
+            assert!(t < 60_000, "graine {graine:#x} perte {pour_mille}/1000 : 200 Ko en {t} ms");
+            pertes_totales += pertes_donnees;
+        }
+    }
+    assert!(pertes_totales >= 20, "les graines exercent bien des pertes ({pertes_totales})");
+}
+
+/// Le RTO double sur une perte, puis REVIENT a la mesure des qu'un segment
+/// non retransmis est acquitte : une perte isolee ne laisse pas la connexion
+/// lente pour toujours.
+#[test]
+fn le_rto_revient_a_la_mesure_apres_une_perte() {
+    let mut e = emission();
+    e.enregistre(ISN, b"aaaa", false, 0).unwrap();
+    e.acquitte_segment(ISN + 4, false, 12);
+    let rto_mesure = e.rto_ms();
+    assert_eq!(rto_mesure, RTO_MIN_MS, "RTT de 12 ms : RTO au plancher");
+
+    e.enregistre(ISN + 4, b"bbbb", false, 100).unwrap();
+    e.renvoie(100 + rto_mesure, |_, _| true);
+    assert_eq!(e.rto_ms(), rto_mesure * 2, "la perte double le RTO");
+    e.acquitte_segment(ISN + 8, false, 100 + rto_mesure + 12);
+
+    // Le segment suivant, lui, n'est pas retransmis : son echantillon compte.
+    e.enregistre(ISN + 8, b"cccc", false, 1_000).unwrap();
+    e.acquitte_segment(ISN + 12, false, 1_012);
+    assert_eq!(e.rto_ms(), RTO_MIN_MS, "le RTO est revenu a la mesure");
+}
+
+/// Pair disparu : l'abandon arrive en temps BORNE. Une application qui
+/// attend sur `recv` doit apprendre `ETIMEDOUT`, pas rester figee.
+#[test]
+fn un_pair_disparu_est_abandonne_en_temps_borne() {
+    let mut e = emission();
+    e.enregistre(ISN, b"POST", false, 0).unwrap();
+    let mut t = 0u64;
+    let mut abandon_a = None;
+    while t < 3_600_000 {
+        t += 2;
+        if e.renvoie(t, |_, _| true).abandon {
+            abandon_a = Some(t);
+            break;
+        }
+    }
+    let abandon_a = abandon_a.expect("le pair muet finit par etre abandonne");
+    // RTO initial 1 s, double a chaque essai, plafonne a RTO_MAX_MS :
+    // 1+2+4+8+16+32+60+60+60 s = 243 s au plus.
+    assert!(abandon_a <= 250_000, "abandon apres {} ms", abandon_a);
+    assert!(abandon_a >= 60_000, "pas d'abandon premature : {} ms", abandon_a);
+}
+
+/// Un FIN du pair n'acquitte pas des donnees qu'il n'a pas recues : ce qui
+/// est en vol reste a renvoyer jusqu'a l'ACK.
+#[test]
+fn un_ack_qui_n_avance_pas_ne_libere_rien() {
+    let mut e = emission();
+    e.enregistre(ISN, b"aaaa", false, 0).unwrap();
+    e.enregistre(ISN + 4, b"bbbb", false, 0).unwrap();
+    // Le pair acquitte le premier seulement.
+    e.acquitte_segment(ISN + 4, true, 10);
+    assert_eq!(e.en_vol(), 1, "le second reste en vol");
+    let mut renvoye = Vec::new();
+    e.renvoie(RTO_INITIAL_MS + 100, |s, _| { renvoye.push(s); true });
+    assert_eq!(renvoye, vec![ISN + 4]);
+}

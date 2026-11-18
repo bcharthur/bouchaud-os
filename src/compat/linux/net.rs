@@ -721,6 +721,12 @@ pub fn sys_recvfrom(
                     }
                     if !conn.rx.is_empty() {
                         Ok(Some(conn.take(len)))
+                    } else if conn.abandonnee {
+                        // BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : un pair qui n'a
+                        // plus rien acquitte apres tous les renvois n'a pas
+                        // FERME -- la connexion est perdue. Une fin de flux
+                        // ferait croire a une reponse complete.
+                        Err(-errno::ETIMEDOUT)
                     } else if conn.peer_fin || conn.closed {
                         Err(0)
                     } else {
@@ -1115,12 +1121,12 @@ fn ecrit_tcp(fd: i32, state: &Arc<SpinLock<SocketState>>, data: &[u8], flags: u3
     let mut total = 0usize;
     let mut progres_ms = crate::kernel::timer::monotonic_ms();
     loop {
-        let (n, ferme) = {
+        let (n, ferme, abandonnee) = {
             let mut borrowed = state.lock();
             match borrowed.conn.as_mut() {
                 Some(conn) => {
                     let n = conn.ecrit(&data[total..]);
-                    (n, conn.closed)
+                    (n, conn.closed, conn.abandonnee)
                 }
                 None => return -errno::ENOTCONN,
             }
@@ -1130,7 +1136,8 @@ fn ecrit_tcp(fd: i32, state: &Arc<SpinLock<SocketState>>, data: &[u8], flags: u3
             return total as i64;
         }
         if ferme {
-            return if total > 0 { total as i64 } else { -errno::EPIPE };
+            let erreur = if abandonnee { -errno::ETIMEDOUT } else { -errno::EPIPE };
+            return if total > 0 { total as i64 } else { erreur };
         }
         if non_bloquant {
             return if total > 0 { total as i64 } else { -errno::EAGAIN };

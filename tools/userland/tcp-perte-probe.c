@@ -43,6 +43,12 @@ typedef unsigned char u8;
 #define SYS_recvfrom      45
 #define SYS_exit          60
 #define SYS_clock_gettime 228
+#define SYS_fcntl         72
+#define F_GETFL 3
+#define F_SETFL 4
+#define O_NONBLOCK 04000
+#define POLLOUT 4
+#define EAGAIN 11
 
 #define AF_INET     2
 #define SOCK_STREAM 1
@@ -108,12 +114,17 @@ struct sockaddr_in { u16 famille; u16 port_be; u32 adresse_be; u8 zero[8]; };
 /// un octet duplique ou decale par une retransmission fausse se voit.
 static u8 motif(u32 n, u32 i) { return (u8)('a' + ((i * 7u + n * 13u) % 26u)); }
 
-static u8 tampon[8192];
+/// 256 Kio de corps : plus que les 64 segments (~90 Kio) que la file
+/// d'emission du noyau garde en vol -- l'emetteur DOIT attendre des ACK.
+#define GROS (256u * 1024u)
+static u8 tampon[GROS + 64];
+/// `EAGAIN` vus pendant l'envoi non bloquant (E5).
+static u64 eagain_vus;
 
 /// Envoie la requete `n` (en-tete `REQ<n> <taille>\n`, puis `taille` octets) et
 /// attend `OK<n>`. Rend la latence en ms, ou -1 si rien n'est revenu a temps,
 /// ou -2 si le serveur a vu un flux corrompu.
-static i64 echange(i64 fd, u32 n, u32 taille) {
+static i64 echange(i64 fd, u32 n, u32 taille, int non_bloquant) {
     u32 pos = 0;
     tampon[pos++] = 'R'; tampon[pos++] = 'E'; tampon[pos++] = 'Q';
     tampon[pos++] = (u8)('0' + n);
@@ -130,6 +141,16 @@ static i64 echange(i64 fd, u32 n, u32 taille) {
     u32 envoye = 0;
     while (envoye < pos) {
         i64 r = sys6(SYS_sendto, fd, (i64)(tampon + envoye), (i64)(pos - envoye), 0, 0, 0);
+        if (non_bloquant && r == -EAGAIN) {
+            // La file est pleine : POLLOUT doit revenir quand le pair acquitte.
+            ++eagain_vus;
+            struct { int fd; short events; short revents; } p = { (int)fd, POLLOUT, 0 };
+            if (sys3(SYS_poll, (i64)&p, 1, 2000) <= 0 && maintenant_ms() - debut > ECHEANCE_REPONSE_MS) {
+                ecris("tcp-perte: POLLOUT jamais revenu\n");
+                return -1;
+            }
+            continue;
+        }
         if (r <= 0) {
             ecris("tcp-perte: sendto="); ecris_i64(r); ecris("\n");
             return -1;
@@ -184,15 +205,45 @@ void principal(void) {
     i64 c = sys3(SYS_connect, fd, (i64)&a, sizeof(a));
     if (c < 0) { ecris("TCP_PERTE_CONNECT_ECHEC errno="); ecris_i64(c); ecris("\n"); sys3(SYS_exit, 1, 0, 0); }
 
-    verdict("E1", echange(fd, 1, 200));
+    verdict("E1", echange(fd, 1, 200, 0));
 
     ecris("tcp-perte: silence de "); ecris_u64(SILENCE_S); ecris(" s (expiration ARP)\n");
     struct { i64 sec; i64 nsec; } duree = { SILENCE_S, 0 };
     sys3(SYS_nanosleep, (i64)&duree, 0, 0);
 
     // Trois segments : le premier part pendant que l'ARP est a refaire.
-    verdict("E2", echange(fd, 2, 4000));
-    verdict("E3", echange(fd, 3, 200));
+    verdict("E2", echange(fd, 2, 4000, 0));
+    verdict("E3", echange(fd, 3, 200, 0));
+
+    // E4 : envoi BLOQUANT plus gros que la file d'emission.
+    verdict("E4", echange(fd, 4, GROS, 0));
+
+    // E5 : le meme en NON BLOQUANT. Ecritures partielles et EAGAIN sont
+    // permis ; un flux tronque ou duplique ne l'est pas (le serveur verifie).
+    i64 drapeaux = sys3(SYS_fcntl, fd, F_GETFL, 0);
+    sys3(SYS_fcntl, fd, F_SETFL, drapeaux | O_NONBLOCK);
+    eagain_vus = 0;
+    i64 e5 = echange(fd, 5, GROS, 1);
+    verdict("E5", e5);
+    ecris("tcp-perte: E5 eagain="); ecris_u64(eagain_vus); ecris("\n");
+    sys3(SYS_fcntl, fd, F_SETFL, drapeaux);
+
+    // E6 : le serveur repond puis FERME. La lecture suivante doit rendre 0
+    // (fin de flux) rapidement -- pas une attente, pas une erreur.
+    verdict("E6", echange(fd, 6, 100, 0));
+    {
+        u64 debut = maintenant_ms();
+        i64 r = -1;
+        u8 octet;
+        while (maintenant_ms() - debut < ECHEANCE_REPONSE_MS) {
+            struct { int fd; short events; short revents; } p = { (int)fd, POLLIN, 0 };
+            if (sys3(SYS_poll, (i64)&p, 1, 500) <= 0) continue;
+            r = sys6(SYS_recvfrom, fd, (i64)&octet, 1, 0, 0, 0);
+            break;
+        }
+        if (r == 0) { ecris("TCP_PERTE_FIN_PAIR_OK latence_ms="); ecris_u64(maintenant_ms() - debut); ecris("\n"); }
+        else { ecris("TCP_PERTE_FIN_PAIR_ECHEC recv="); ecris_i64(r); ecris("\n"); }
+    }
     ecris("TCP_PERTE_FIN\n");
     sys3(SYS_exit, 0, 0, 0);
 }
