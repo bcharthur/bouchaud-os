@@ -661,6 +661,14 @@ jobs:
       - name: Fichiers ring3 - lectures exactes, copies bornees
         if: always()
         run: tools/ci/run_lecture_fichiers.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      # BOUCHAUD_JIT_RWX_V1 : meme noyau. L'UNIQUE exception a W^X -- memoire
+      # anonyme privee d'un lanceur Java installe par root -- et rien d'autre :
+      # un binaire hors /usr/lib/jvm, ou inscriptible par le groupe, n'obtient
+      # aucune page RWX ; meme le lanceur n'en obtient ni partagee ni adossee a
+      # un fichier. Plus getrusage/fchdir/flock, que HotSpot appelait.
+      - name: JIT Java - exception W^X bornee, appels systeme de la JVM
+        if: always()
+        run: tools/ci/run_jit_rwx.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -670,6 +678,7 @@ jobs:
             target/verifie-tcp-perte/serie.log
             target/verifie-tcp-perte/serveur.log
             target/lecture-fichiers/serie.log
+            target/jit-rwx/serie.log
           if-no-files-found: warn
 
   bar-haute:

@@ -96,6 +96,15 @@ fn borne(debut: u64, longueur: u64) -> u64 {
     if longueur == 0 { SANS_FIN } else { debut.saturating_add(longueur) }
 }
 
+/// BOUCHAUD_FLOCK_V1 : les verrous `flock` vivent dans la meme table, sous une
+/// cle distincte. Sous Linux, `flock` et `fcntl` ne se voient pas : un
+/// processus qui tient l'un n'est jamais bloque par l'autre sur le meme
+/// fichier. Le bit de poids fort de la cle les separe -- aucun noeud du RAMFS
+/// n'a cet indice.
+pub const fn cle_flock(noeud: usize) -> usize {
+    noeud | (1usize << (usize::BITS - 1))
+}
+
 pub fn libere_fichier(noeud: usize, pid: u32) {
     VERROUS.lock().retain(|v| !(v.noeud == noeud && v.pid == pid));
 }

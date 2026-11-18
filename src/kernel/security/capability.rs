@@ -28,6 +28,17 @@ impl Capabilities {
     /// ce qui en a legitimement besoin -- systeme, utilisateur, courtier,
     /// serveur de requetes -- et refuse aux roles de RENDU.
     pub const NET_CONNECT: Self = Self(1 << 11);
+    /// Pages ANONYMES PRIVEES a la fois inscriptibles et executables.
+    ///
+    /// BOUCHAUD_JIT_RWX_V1 : la seule exception a W^X. HotSpot (la JVM
+    /// d'OpenJDK) exige des pages RWX -- son controle `check_pax` au
+    /// demarrage, puis son cache de code JIT -- et ne sait pas basculer RW/RX
+    /// comme le fait un JIT ecrit pour W^X (`JIT`).
+    ///
+    /// Elle n'est PAS dans `ALL` : root lui-meme ne l'a pas. Seul le profil
+    /// `RuntimeJava` la recoit, a l'exec d'un lanceur `java` installe sous
+    /// `/usr/lib/jvm` et appartenant a root (`policy::accorde_jit_rwx`).
+    pub const JIT_RWX: Self = Self(1 << 12);
 
     pub const ALL: Self = Self(
         Self::EXEC.0
@@ -52,6 +63,11 @@ impl Capabilities {
     #[inline]
     pub const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
+    }
+
+    #[inline]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 
     #[inline]

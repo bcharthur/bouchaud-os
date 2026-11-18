@@ -314,6 +314,7 @@ fn gate_native(number: u64, args: [u64; 6]) -> GateDecision {
             // reseau.
             super::profile::SecurityProfile::BrowserNetwork => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::User => 16 * 1024 * 1024u64,
+            super::profile::SecurityProfile::RuntimeJava => 16 * 1024 * 1024u64,
             super::profile::SecurityProfile::Untrusted => 4 * 1024 * 1024u64,
         };
         if args[0] > limit {

@@ -211,3 +211,43 @@ fn un_segment_refuse_aurait_bien_produit_une_page_w_et_x() {
         );
     }
 }
+
+// BOUCHAUD_JIT_RWX_V1 -- l'exception d'une JVM, et rien d'autre.
+
+#[test]
+fn l_exception_jit_exige_toutes_ses_conditions() {
+    let rwx = PROT_READ | PROT_WRITE | PROT_EXEC;
+    // Les huit combinaisons (anonyme, prive, capacite) : une seule accorde.
+    for masque in 0u8..8 {
+        let anonyme = masque & 1 != 0;
+        let prive = masque & 2 != 0;
+        let capacite = masque & 4 != 0;
+        assert_eq!(
+            exception_jit_rwx(rwx, PROT_WRITE, PROT_EXEC, anonyme, prive, capacite),
+            anonyme && prive && capacite,
+            "anonyme={anonyme} prive={prive} capacite={capacite}"
+        );
+    }
+}
+
+#[test]
+fn l_exception_jit_ne_concerne_que_w_et_x() {
+    // Elle ne s'applique qu'a une demande que la regle refuserait : sur tout
+    // le reste, elle ne dit rien, et la regle ordinaire decide.
+    for prot in 0u32..8 {
+        let accorde = exception_jit_rwx(prot, PROT_WRITE, PROT_EXEC, true, true, true);
+        assert_eq!(accorde, prot_viole_wx(prot, PROT_WRITE, PROT_EXEC), "prot={prot:#x}");
+    }
+}
+
+#[test]
+fn une_plage_avec_un_trou_n_est_pas_couverte() {
+    assert!(plage_couverte(&mut [(0x1000, 0x3000)], 0x1000, 0x3000));
+    assert!(plage_couverte(&mut [(0x2000, 0x3000), (0x1000, 0x2000)], 0x1000, 0x3000));
+    assert!(plage_couverte(&mut [(0x1000, 0x2800), (0x2000, 0x3000)], 0x1000, 0x3000));
+    assert!(!plage_couverte(&mut [(0x1000, 0x2000), (0x2800, 0x3000)], 0x1000, 0x3000));
+    assert!(!plage_couverte(&mut [(0x1800, 0x3000)], 0x1000, 0x3000));
+    assert!(!plage_couverte(&mut [(0x1000, 0x2000)], 0x1000, 0x3000));
+    assert!(!plage_couverte(&mut [], 0x1000, 0x3000));
+    assert!(!plage_couverte(&mut [(0x1000, 0x3000)], 0x2000, 0x2000));
+}

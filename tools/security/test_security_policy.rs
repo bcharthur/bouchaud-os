@@ -20,8 +20,8 @@ use access::{mode_allows, sticky_allows, AccessMask};
 use capability::Capabilities;
 use credentials::{CredentialError, Credentials};
 use profile::{
-    capabilities, classify, initial_capabilities, transition_capabilities,
-    SecurityProfile,
+    capabilities, classify, eligible_jit_rwx, initial_capabilities, runtime_java_image,
+    transition_capabilities, transition_exec, SecurityProfile,
 };
 
 const PROT_WRITE: u32 = 2;
@@ -200,4 +200,81 @@ fn transition_exec_ne_retire_jamais_no_new_privs() {
     assert!(nnp);
     // Les droits sont intersectes : un exec vers le courtier ne rend rien.
     assert!(!droits.contains(Capabilities::NET_CONNECT));
+}
+
+// BOUCHAUD_JIT_RWX_V1
+
+#[test]
+fn seul_le_lanceur_java_d_un_jdk_installe_est_reconnu() {
+    for image in [
+        "/usr/lib/jvm/java-21-openjdk/bin/java",
+        "/usr/lib/jvm/jdk-21.0.5+11/bin/java",
+        "/usr/lib/jvm/jre8/jre/bin/java",
+    ] {
+        assert!(runtime_java_image(image), "{image}");
+        assert_eq!(classify(image, 1000), SecurityProfile::RuntimeJava, "{image}");
+    }
+    for image in [
+        "/tmp/usr/lib/jvm/x/bin/java",
+        "/tmp/java",
+        "/home/user/jdk/bin/java",
+        "/usr/lib/jvm/x/bin/javac",
+        "/usr/lib/jvm/x/bin/java/x",
+        "/usr/lib/jvm//bin/java",
+        "/usr/lib/jvm/../bin/java",
+        "/usr/lib/jvm/./bin/java",
+        "/usr/lib/jvm/a/b/bin/java",
+        "/usr/lib/jvm/x/lib/java",
+        "usr/lib/jvm/x/bin/java",
+    ] {
+        assert!(!runtime_java_image(image), "{image}");
+        assert_ne!(classify(image, 1000), SecurityProfile::RuntimeJava, "{image}");
+    }
+}
+
+#[test]
+fn seul_runtime_java_hors_no_new_privs_est_eligible_a_jit_rwx() {
+    for profil in [
+        SecurityProfile::System,
+        SecurityProfile::User,
+        SecurityProfile::BrowserBroker,
+        SecurityProfile::BrowserContent,
+        SecurityProfile::BrowserNetwork,
+        SecurityProfile::Untrusted,
+    ] {
+        assert!(!eligible_jit_rwx(profil, false), "{profil:?}");
+        assert!(!eligible_jit_rwx(profil, true), "{profil:?}");
+        assert!(!capabilities(profil).contains(Capabilities::JIT_RWX), "{profil:?}");
+    }
+    assert!(eligible_jit_rwx(SecurityProfile::RuntimeJava, false));
+    assert!(!eligible_jit_rwx(SecurityProfile::RuntimeJava, true));
+    assert!(!Capabilities::ALL.contains(Capabilities::JIT_RWX));
+}
+
+#[test]
+fn jit_rwx_ne_traverse_pas_l_intersection_des_droits() {
+    // Meme un processus qui la porterait la perd a l'exec : seule la
+    // politique (proprietaire root verifie) peut la rendre.
+    let porte = capabilities(SecurityProfile::RuntimeJava).union(Capabilities::JIT_RWX);
+    assert!(!transition_capabilities(porte, SecurityProfile::RuntimeJava).contains(Capabilities::JIT_RWX));
+    let (profil, droits, nnp) =
+        transition_exec(porte, false, "/usr/lib/jvm/jdk/bin/java", 0);
+    assert_eq!(profil, SecurityProfile::RuntimeJava);
+    assert!(!droits.contains(Capabilities::JIT_RWX));
+    assert!(!nnp);
+    assert!(!initial_capabilities("/usr/lib/jvm/jdk/bin/java", 0).contains(Capabilities::JIT_RWX));
+}
+
+#[test]
+fn un_rendu_web_qui_execute_java_reste_sandboxe() {
+    // no_new_privs est monotone : un WebContent compromis qui lancerait java
+    // n'obtiendrait ni le profil eligible sans le drapeau, ni JIT_RWX.
+    let (profil, _droits, nnp) = transition_exec(
+        capabilities(SecurityProfile::BrowserContent),
+        true,
+        "/usr/lib/jvm/jdk/bin/java",
+        1000,
+    );
+    assert!(nnp);
+    assert!(!eligible_jit_rwx(profil, nnp));
 }

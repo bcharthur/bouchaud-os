@@ -529,6 +529,8 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         GETDENTS64 => file::sys_getdents64(args[0] as i32, args[1], args[2] as usize),
         GETCWD => file::sys_getcwd(args[0], args[1] as usize),
         CHDIR => file::sys_chdir(args[0]),
+        FCHDIR => file::sys_fchdir(args[0] as i32),
+        FLOCK => file::sys_flock(args[0] as i32, args[1] as u32),
         MKDIR => file::sys_mkdir(args[0], args[1] as u32),
         MKDIRAT => file::sys_mkdirat(args[0] as i32, args[1], args[2] as u32),
         UNLINK => file::sys_unlink(args[0]),
@@ -841,6 +843,7 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             seconds as i64
         }
         TIMES => 0,
+        GETRUSAGE => sys_getrusage(args[0] as i32, args[1]),
 
         // --- Informations systeme ---
         UNAME => sys_uname(args[0]),
@@ -1573,4 +1576,42 @@ pub fn print_table() {
         crate::println!("dernier appel non implemente : {} ({})", unknown, nr::name(unknown));
     }
     crate::println!("trace serie (`strace on|off`) : {}", if trace_enabled() { "active" } else { "inactive" });
+}
+
+/// `getrusage(who, usage)` -- BOUCHAUD_GETRUSAGE_V1.
+///
+/// Les temps utilisateur et noyau sont ceux que la comptabilite du noyau
+/// mesure par tache (resolution : la tranche d'ordonnancement). Les autres
+/// champs -- pagination, signaux, changements de contexte -- ne sont pas
+/// comptes par processus : ils valent 0, plutot qu'un chiffre invente.
+/// `RUSAGE_CHILDREN` vaut 0 pour la meme raison : les fils recoltes ne sont
+/// pas cumules.
+fn sys_getrusage(who: i32, out: u64) -> i64 {
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_THREAD: i32 = 1;
+    let (utilisateur, noyau) = match who {
+        RUSAGE_SELF => crate::kernel::task::cpu_ns_utilisateur_noyau(Some(
+            crate::kernel::task::current_process().pid,
+        )),
+        RUSAGE_THREAD => crate::kernel::task::cpu_ns_utilisateur_noyau(None),
+        RUSAGE_CHILDREN => (0, 0),
+        _ => return -errno::EINVAL,
+    };
+    if out == 0 {
+        return -errno::EFAULT;
+    }
+    // struct rusage : deux timeval (16 octets chacune), puis 14 `long`.
+    let mut tampon = [0u8; 144];
+    let mut ecrit = |position: usize, valeur: u64| {
+        tampon[position..position + 8].copy_from_slice(&valeur.to_le_bytes());
+    };
+    ecrit(0, utilisateur / 1_000_000_000);
+    ecrit(8, (utilisateur % 1_000_000_000) / 1_000);
+    ecrit(16, noyau / 1_000_000_000);
+    ecrit(24, (noyau % 1_000_000_000) / 1_000);
+    if !user_write(out, &tampon) {
+        return -errno::EFAULT;
+    }
+    0
 }
