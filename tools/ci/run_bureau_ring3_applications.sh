@@ -48,7 +48,13 @@ echo "=== construction : composited, mire-gpu, attends, DOOM ==="
 (cd userland/services/composited && OUT="$SORTIE/bin" bash ./build.sh >/dev/null)
 musl-gcc -O2 -static-pie -fPIE -o "$SORTIE/bin/mire-gpu" tools/userland/mire-gpu.c
 musl-gcc -O2 -static-pie -fPIE -o "$SORTIE/bin/attends" tools/userland/attends.c
-[ -x target/doom-bouchaud/doom-bouchaud ] || tools/doom/build-linux.sh >/dev/null
+# Le binaire vit dans `target/` (cache Cargo partage entre jobs), le WAD dans
+# `tools/doom/wads/` (hors cache). Un cache restaure par un job voisin rendait
+# le binaire present et le WAD absent : `build-linux.sh` etait saute et la
+# copie du WAD echouait (PR #339, job 135033901845). Les deux sont exiges.
+if [ ! -x target/doom-bouchaud/doom-bouchaud ] || [ ! -f tools/doom/wads/freedoom1.wad ]; then
+  tools/doom/build-linux.sh >/dev/null
+fi
 
 S="$SORTIE/scen"
 cp "$SORTIE/bin/composited-slice" "$S/bin/composited"

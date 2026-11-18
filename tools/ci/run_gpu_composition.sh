@@ -40,7 +40,13 @@ AIDE=$(qemu-system-x86_64 -device help 2>&1 || true)
 grep -q virtio-gpu-gl-pci <<<"$AIDE" \
   || { echo "GPU_COMPOSITION_ECHEC qemu sans virtio-gpu-gl-pci" >&2; exit 1; }
 
-[ -x target/doom-bouchaud/doom-bouchaud ] || tools/doom/build-linux.sh
+# Le binaire vit dans `target/` (cache Cargo partage entre jobs), le WAD dans
+# `tools/doom/wads/` (hors cache). Un cache restaure par un job voisin rendait
+# le binaire present et le WAD absent : `build-linux.sh` etait saute et la
+# copie du WAD echouait (PR #339, job 135033901845). Les deux sont exiges.
+if [ ! -x target/doom-bouchaud/doom-bouchaud ] || [ ! -f tools/doom/wads/freedoom1.wad ]; then
+  tools/doom/build-linux.sh
+fi
 musl-gcc -O2 -static-pie -fPIE -o "$SORTIE/mire-gpu" tools/userland/mire-gpu.c
 
 ECRAN=60

@@ -212,6 +212,12 @@ pub fn init() -> bool {
         return false;
     }
 
+    // BOUCHAUD_MMIO_HORS_FENETRE_V1 : les 128 Kio de registres de la BAR0,
+    // mappes s'ils sont hors de la fenetre physique du chargeur.
+    if let Err(raison) = memory::mappe_mmio(bar0, 128 * 1024) {
+        crate::kernel::dmesg::log_fmt(format_args!("e1000: BAR0 {:#x} inaccessible ({})", bar0, raison));
+        return false;
+    }
     unsafe {
         MMIO = memory::phys_offset() + bar0;
 

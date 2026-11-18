@@ -145,7 +145,10 @@ fn adresse(dev: &PciDevice, bar: u8, decalage: u32) -> Option<usize> {
     if physique == 0 {
         return None;
     }
-    Some(memory::phys_to_virt(physique + u64::from(decalage)) as usize)
+    // BOUCHAUD_MMIO_HORS_FENETRE_V1 : la structure virtio (configuration
+    // commune, notifications des deux files, ISR, configuration du
+    // peripherique) tient dans 8 Kio a partir de son decalage.
+    memory::mappe_mmio(physique + u64::from(decalage), 0x2000).ok().map(|p| p as usize)
 }
 
 fn capacites(dev: &PciDevice) -> Capacites {

@@ -55,6 +55,57 @@ unsafe fn mmio32(base: *mut u8, offset: usize) -> u32 {
     core::ptr::read_volatile(base.add(offset) as *const u32)
 }
 
+/// Etendue minimale mappee pour un xHCI : la BAR fait 16 Kio sous QEMU,
+/// 64 Kio sur les controleurs Intel et AMD.
+const XHCI_MMIO_MIN: u64 = 64 * 1024;
+/// Garde-fou contre une liste de capacites etendues bouclee ou corrompue.
+const XHCI_XECP_MAX: usize = 64;
+
+/// Rend les registres du xHCI a `bar0` accessibles, et rend leur base.
+///
+/// BOUCHAUD_MMIO_HORS_FENETRE_V1 : `phys_to_virt(bar0)` supposait la BAR dans
+/// la fenetre physique du chargeur. Sous WHPX, OVMF la place a 56 Tio, hors
+/// fenetre : panique au premier octet lu. Deux temps : la page des capacites,
+/// puis tout ce que les capacites designent -- registres operationnels et de
+/// ports, registres d'execution de chaque interrupteur, sonnettes de chaque
+/// slot, et chaque capacite etendue a mesure qu'on la parcourt.
+pub fn mappe_registres(bar0: u64) -> Result<*mut u8, &'static str> {
+    use crate::kernel::memory::mappe_mmio;
+    let base = mappe_mmio(bar0, 0x20)?;
+    let (cap_length, hcs1, hccparams1, dboff, rtsoff) = unsafe {
+        (
+            mmio8(base, 0x00) as u64,
+            mmio32(base, 0x04),
+            mmio32(base, 0x10),
+            (mmio32(base, 0x14) & !0x3) as u64,
+            (mmio32(base, 0x18) & !0x1F) as u64,
+        )
+    };
+    let slots = (hcs1 & 0xFF) as u64;
+    let interrupteurs = ((hcs1 >> 8) & 0x7FF) as u64;
+    let ports = ((hcs1 >> 24) & 0xFF) as u64;
+    let fin = XHCI_MMIO_MIN
+        .max(cap_length + 0x400 + 0x10 * ports)
+        .max(dboff + 4 * (slots + 1))
+        .max(rtsoff + 0x20 + 0x20 * interrupteurs);
+    mappe_mmio(bar0, fin)?;
+
+    // Capacites etendues : chacune est mappee AVANT d'etre lue.
+    let mut decalage = (((hccparams1 >> 16) & 0xFFFF) as u64) * 4;
+    let mut vues = 0;
+    while decalage != 0 && vues < XHCI_XECP_MAX {
+        mappe_mmio(bar0 + decalage, 0x40)?;
+        let entete = unsafe { mmio32(base, decalage as usize) };
+        let suivant = ((entete >> 8) & 0xFF) as u64;
+        if suivant == 0 {
+            break;
+        }
+        decalage += suivant * 4;
+        vues += 1;
+    }
+    Ok(base)
+}
+
 impl XhciInfo {
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -100,7 +151,13 @@ pub fn probe() -> Option<XhciInfo> {
     let bar0 = crate::arch::x86_64::pci::bar_decode(&dev, 0).adresse();
     if bar0 == 0 { return None; }
 
-    let base = crate::kernel::memory::phys_to_virt(bar0);
+    let base = match mappe_registres(bar0) {
+        Ok(base) => base,
+        Err(raison) => {
+            crate::serial_println!("BOUCHAUD_XHCI_MMIO_REFUSE bar0={:#x} raison={}", bar0, raison);
+            return None;
+        }
+    };
     unsafe {
         let cap_length = mmio8(base, 0x00);
         let hci_version = mmio16(base, 0x02);

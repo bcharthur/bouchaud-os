@@ -3812,8 +3812,12 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
     if bar0 == 0 {
         return Err("bar0-absent");
     }
+    // Decodage memoire (et bus master) AVANT toute lecture de registre :
+    // `mappe_registres` lit deja les capacites (revue #339).
     pci::enable_bus_master(&dev);
-    let base = memory::phys_to_virt(bar0) as usize;
+    // BOUCHAUD_MMIO_HORS_FENETRE_V1 : registres mappes avant le premier acces
+    // (BAR a 56 Tio sous WHPX).
+    let base = crate::drivers::xhci_probe::mappe_registres(bar0)? as usize;
 
     unsafe {
         let cap_len = r8(base, 0x00) as usize;
