@@ -37,6 +37,7 @@ typedef unsigned int u32;
 typedef long i64;
 
 #include "protocole.h"
+#include "police5x7.h"
 
 #define BO_BASE           0x424f0000UL
 #define BO_HANDLE_CLOSE   (BO_BASE + 0x01)
@@ -591,6 +592,17 @@ struct fen {
 };
 static struct fen fens[FEN_MAX];
 static int nfen;
+/* BOUCHAUD_BUREAU_UTILISABLE_V1 : le dock (lanceur) et les noms des
+ * applications configurees, par rang (`BO_APPS`). Sans `BO_BUREAU_DOCK`,
+ * rien de ceci n'est dessine : les bancs au pixel d'avant restent exacts. */
+#define DOCK_H 40u
+#define DOCK_BTN_L 170u
+#define POIGNEE 14u
+#define FERMER_L 22u
+static int dock;
+static char noms[FEN_MAX][24];
+static int vivantes;
+static i64 attente_g;
 static int ordre[FEN_MAX];   /* ordre[0] : fond ... ordre[nfen-1] : premier plan */
 static i64 affichage_g, region_g;
 static u64 lit_ns, lit_max, pres_ns, pres_max, trames_total, pixels_total, recompositions;
@@ -635,6 +647,63 @@ static void remplit_dans(struct rect a, struct rect zone, u32 couleur)
     if (intersecte(a, zone, &i)) remplit(i, couleur);
 }
 
+/* Un texte (police 5x7, echelle `e`) sur un fond uni, borne a `clip` : une
+ * ligne composee localement, puis UNE ecriture par ligne d'ecran. */
+static u32 ligne_texte[1024];
+static void ecris_texte(u32 x, u32 y, const char *t, unsigned e, u32 encre, u32 fond, struct rect clip)
+{
+    u32 l = police_largeur(t, e), h = POLICE_H * e;
+    if (!l) return;
+    if (l > 1024) l = 1024;
+    struct rect tr = { x, y, l, h }, i;
+    if (!intersecte(tr, clip, &i)) return;
+    for (u32 yy = i.y; yy < i.y + i.h; yy++) {
+        u32 gy = (yy - y) / e;
+        for (u32 xx = i.x; xx < i.x + i.l; xx++) {
+            u32 col = (xx - x) / e, ci = col / (POLICE_L + 1), gx = col % (POLICE_L + 1);
+            ligne_texte[xx - i.x] = (gx < POLICE_L && police_allume(t[ci], gx, gy)) ? encre : fond;
+        }
+        appels_region++;
+        sys6(BO_SHM_WRITE, (u64)region_g, ((u64)yy * ecran_l + i.x) * 4u, (u64)ligne_texte, (u64)i.l * 4u, 0, 0);
+    }
+}
+
+static struct rect rect_dock(void)
+{
+    struct rect d = { 0, ecran_h - DOCK_H, ecran_l, DOCK_H };
+    return d;
+}
+
+static struct rect bouton_dock(int k)
+{
+    struct rect b = { 8 + (u32)k * (DOCK_BTN_L + 8), ecran_h - DOCK_H + 5, DOCK_BTN_L, DOCK_H - 10 };
+    return b;
+}
+
+static int active(void);
+
+/* Couleur d'un bouton du dock : fermee, minimisee, active, ouverte. */
+static u32 couleur_dock(int k)
+{
+    if (!fens[k].vivante) return 0x39404au;
+    if (fens[k].minimisee) return 0x7a6420u;
+    return active() == k ? 0x2e6fd8u : 0x4a5568u;
+}
+
+static void dessine_dock(struct rect r)
+{
+    struct rect d = rect_dock(), i;
+    if (!intersecte(d, r, &i)) return;
+    remplit(i, 0x1b222bu);
+    for (int k = 0; k < nfen; k++) {
+        struct rect b = bouton_dock(k), cb;
+        if (!intersecte(b, r, &cb)) continue;
+        u32 c = couleur_dock(k);
+        remplit(cb, c);
+        ecris_texte(b.x + 10, b.y + (b.h - POLICE_H * 2) / 2, noms[k], 2, 0xffffffu, c, cb);
+    }
+}
+
 struct lecture_fenetre { u32 x, y, l, h, decalage, pas; };
 
 static i64 lit_fenetre(i64 fenetre, i64 region, u32 x, u32 y, u32 l, u32 h, u32 dx, u32 dy)
@@ -677,6 +746,7 @@ static int active(void)
 
 static void superpose_curseur(struct rect r);
 static void dessine_fermer(const struct fen *f, struct rect r);
+static struct rect poignee_de(const struct fen *f);
 
 /* L'algorithme du peintre sur `r`, puis UNE presentation. */
 static i64 recompose(struct rect r)
@@ -707,10 +777,19 @@ static i64 recompose(struct rect r)
         remplit_dans(gauche, i, BUREAU_BORD);
         remplit_dans(droite, i, BUREAU_BORD);
         remplit_dans(barre, i, premier_plan ? BUREAU_BARRE : BUREAU_BARRE_INACTIVE);
+        /* Le titre (nom de l'application), si le noyau l'a donne. */
+        int indice = ordre[k];
+        if (noms[indice][0] && f->l > police_largeur(noms[indice], 2) + FERMER_L + 16) {
+            struct rect ct;
+            if (intersecte(barre, i, &ct))
+                ecris_texte(f->x + 8, f->y - BUREAU_BARRE_H + (BUREAU_BARRE_H - POLICE_H * 2) / 2,
+                            noms[indice], 2, 0xffffffu, premier_plan ? BUREAU_BARRE : BUREAU_BARRE_INACTIVE, ct);
+        }
         struct rect morceau;
         if (intersecte(i, contenu, &morceau)) recopie_contenu(f, morceau);
         dessine_fermer(f, r);
     }
+    if (dock) dessine_dock(r);
     superpose_curseur(r);
     return presente_rect(r);
 }
@@ -744,6 +823,7 @@ static void remonte(int indice)
         struct rect b = { fens[ancien_haut].x, fens[ancien_haut].y - BUREAU_BARRE_H, fens[ancien_haut].l, BUREAU_BARRE_H };
         recompose(b);   /* sa barre devient inactive */
     }
+    if (dock) recompose(rect_dock());
 }
 
 static void deplace(int indice, u32 nx, u32 ny)
@@ -891,6 +971,46 @@ static void publie_fenetre(int i, const char *etiquette)
     ecris_nombre("[COMPOSITED] rang=", rang_de(i));
 }
 
+/* La valeur de la variable `nom` (« NOM= »), ou 0. */
+static const char *variable_texte(u64 *pile, const char *nom)
+{
+    u64 argc = pile[0];
+    char **envp = (char **)(pile + 1 + argc + 1);
+    for (; *envp; envp++) {
+        const char *e = *envp, *c = nom;
+        while (*c && *e == *c) { e++; c++; }
+        if (!*c) return e;
+    }
+    return 0;
+}
+
+/* BOUCHAUD_BUREAU_UTILISABLE_V1 : `BO_APPS=nom0,nom1,...` (toutes les
+ * applications configurees, par rang) et `BO_RANGS=r0,r1,...` (le rang de
+ * chaque capacite de `BO_FENETRES`). Les fenetres sont alors indexees PAR
+ * RANG : `fens[rang]`, vide tant que l'application n'est pas lancee.
+ * Rend le nombre d'applications (0 : pas de dock). */
+static int lit_apps(u64 *pile, i64 *poignees, int n)
+{
+    const char *a = variable_texte(pile, "BO_APPS="), *r = variable_texte(pile, "BO_RANGS=");
+    if (!a || !r || !variable_texte(pile, "BO_BUREAU_DOCK=1")) return 0;
+    int napps = 0;
+    while (*a && napps < FEN_MAX) {
+        int k = 0;
+        while (*a && *a != ',') { if (k < 23) noms[napps][k++] = *a; a++; }
+        noms[napps][k] = 0;
+        napps++;
+        if (*a == ',') a++;
+    }
+    for (int i = 0; i < napps; i++) { fens[i].poignee = 0; ordre[i] = i; }
+    for (int j = 0; j < n && *r; j++) {
+        int rang = 0;
+        while (*r >= '0' && *r <= '9') rang = rang * 10 + (*r++ - '0');
+        if (*r == ',') r++;
+        if (rang < napps) fens[rang].poignee = poignees[j];
+    }
+    return napps;
+}
+
 /* `BO_FENETRES=h1,h2,...` dans l'environnement. */
 static int lit_fenetres(u64 *pile)
 {
@@ -944,6 +1064,7 @@ static void minimise(int i)
     f->visible = 0; f->minimisee = 1;
     recompose(cadre_de(f));
     recompose_barre(active());   /* la fenetre qui devient active */
+    if (dock) recompose(rect_dock());
     ecris_nombre("COMPOSITED_BUREAU_MINIMISE fenetre=", i);
 }
 
@@ -955,6 +1076,7 @@ static void restaure(int i)
     f->minimisee = 0; f->visible = 1;
     recompose(cadre_de(f));
     if (avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
+    if (dock) recompose(rect_dock());
     publie_fenetre(i, "COMPOSITED_BUREAU_RESTAURE fenetre=");
 }
 
@@ -982,7 +1104,6 @@ static void restaure(int i)
 #define ENTREE_POINTEUR 1
 #define ENTREE_MOLETTE  2
 #define ENTREE_TOUCHE   3
-#define FERMER_L 22u
 #define FERMER_COULEUR 0xc0392bu
 #define CUR_L 12u
 #define CUR_H 19u
@@ -1047,12 +1168,29 @@ static struct rect case_fermer(const struct fen *f)
 static void dessine_fermer(const struct fen *f, struct rect r)
 {
     if (!interactif) return;
+    if (dock) {
+        /* La poignee : trois traits obliques dans le coin bas-droit. */
+        struct rect p = poignee_de(f);
+        for (u32 k = 0; k < 3; k++) {
+            struct rect t = { p.x + POIGNEE - 4 - 4 * k, p.y + POIGNEE - 4, 3, 3 };
+            struct rect u = { p.x + POIGNEE - 4, p.y + POIGNEE - 4 - 4 * k, 3, 3 };
+            remplit_dans(t, r, 0x9fb3c8u);
+            remplit_dans(u, r, 0x9fb3c8u);
+        }
+    }
     struct rect c = case_fermer(f), i;
     if (!c.l || !intersecte(c, r, &i)) return;
     remplit(i, FERMER_COULEUR);
 }
 
-enum { ZONE_AUCUNE, ZONE_CONTENU, ZONE_BARRE, ZONE_FERMER, ZONE_BORD };
+enum { ZONE_AUCUNE, ZONE_CONTENU, ZONE_BARRE, ZONE_FERMER, ZONE_BORD, ZONE_POIGNEE };
+
+/* Coin bas-droit du cadre : la poignee de redimensionnement (mode dock). */
+static struct rect poignee_de(const struct fen *f)
+{
+    struct rect r = { f->x + f->l + BUREAU_BORD_L - POIGNEE, f->y + f->h + BUREAU_BORD_L - POIGNEE, POIGNEE, POIGNEE };
+    return r;
+}
 
 static int contient(struct rect r, u32 x, u32 y)
 {
@@ -1067,7 +1205,8 @@ static int sous_pointeur(u32 x, u32 y, int *zone)
         if (!f->visible || !contient(cadre_de(f), x, y)) continue;
         struct rect contenu = { f->x, f->y, f->l, f->h };
         struct rect barre = { f->x, f->y - BUREAU_BARRE_H, f->l, BUREAU_BARRE_H };
-        if (contient(contenu, x, y)) *zone = ZONE_CONTENU;
+        if (dock && contient(poignee_de(f), x, y)) *zone = ZONE_POIGNEE;
+        else if (contient(contenu, x, y)) *zone = ZONE_CONTENU;
         else if (contient(barre, x, y)) *zone = x + FERMER_L >= f->x + f->l ? ZONE_FERMER : ZONE_BARRE;
         else *zone = ZONE_BORD;
         return ordre[k];
@@ -1151,6 +1290,49 @@ static void publie_entree(const char *etiquette, int i, u32 x, u32 y)
     ecris(t);
 }
 
+/* BOUCHAUD_BUREAU_UTILISABLE_V1 : un clic sur le dock. Fermee -> le noyau
+ * lance l'application configuree a ce rang (et rien d'autre) ; minimisee ->
+ * restauree ; ouverte -> premier plan, ou minimisee si deja active. */
+static void clic_dock(u32 x, u32 y)
+{
+    for (int k = 0; k < nfen; k++) {
+        if (!contient(bouton_dock(k), x, y)) continue;
+        struct fen *f = &fens[k];
+        if (!f->vivante) {
+            i64 h = sys6(BO_DISPLAY_RELANCE_CLIENT, (u64)affichage_g, (u64)k, 0, 0, 0, 0);
+            if (h <= 0) { ecris_nombre("COMPOSITED_DOCK_REFUS erreur=", h); return; }
+            f->poignee = h; f->pid = 0; f->vivante = 1; f->visible = 0; f->minimisee = 0;
+            f->trames = 0; f->livrees = 0;
+            sys6(BO_WAITSET_ADD, (u64)attente_g, (u64)h, (u64)k + 1, 0, 0, 0);
+            vivantes++;
+            remonte(k);   /* au premier plan des qu'elle peint */
+            ecris_ligne("COMPOSITED_DOCK_LANCE app=", noms[k]);
+        } else if (f->minimisee) {
+            int avant = active();
+            restaure(k);
+            remonte(k);
+            foyer(avant, k);
+            ecris_ligne("COMPOSITED_DOCK_RESTAURE app=", noms[k]);
+        } else if (f->visible) {
+            if (active() == k) {
+                minimise(k);
+                ecris_ligne("COMPOSITED_DOCK_MINIMISE app=", noms[k]);
+            } else {
+                int avant = active();
+                remonte(k);
+                foyer(avant, k);
+                ecris_ligne("COMPOSITED_DOCK_PREMIER_PLAN app=", noms[k]);
+            }
+        }
+        recompose(rect_dock());
+        return;
+    }
+}
+
+static int faute_f12;             /* BO_COMPOSITED_FAUTE_F12=1 (banc de reprise) */
+static int redim = -1;            /* fenetre saisie par sa poignee */
+static u32 redim_x0, redim_y0, redim_l0, redim_h0;
+
 /* Une lecture des entrees, et leur routage. Rend le nombre d'evenements. */
 static int traite_entrees(void)
 {
@@ -1174,12 +1356,17 @@ static int traite_entrees(void)
         u32 gauche = boutons & 1u, gauche_prec = boutons_prec & 1u;
         if (gauche && !gauche_prec) {
             /* Appui : remonter, donner le foyer, puis agir selon la zone. */
-            if (i >= 0) {
+            if (dock && y >= ecran_h - DOCK_H) {
+                clic_dock(x, y);
+            } else if (i >= 0) {
                 int avant = active();
                 if (i != avant) { remonte(i); foyer(avant, i); }
                 if (zone == ZONE_FERMER) {
                     sys6(BO_FENETRE_FERME, (u64)fens[i].poignee, 0, 0, 0, 0, 0);
                     publie_entree("COMPOSITED_ENTREE_FERME fenetre=", i, x, y);
+                } else if (zone == ZONE_POIGNEE) {
+                    redim = i; redim_x0 = x; redim_y0 = y; redim_l0 = fens[i].l; redim_h0 = fens[i].h;
+                    publie_entree("COMPOSITED_ENTREE_POIGNEE fenetre=", i, x, y);
                 } else if (zone == ZONE_BARRE) {
                     glisse = i; prise_dx = (i64)x - (i64)fens[i].x; prise_dy = (i64)y - (i64)fens[i].y;
                     publie_entree("COMPOSITED_ENTREE_PRISE fenetre=", i, x, y);
@@ -1211,6 +1398,24 @@ static int traite_entrees(void)
             }
         } else if (!gauche && gauche_prec) {
             /* Relachement : fin du glisser, ou du clic dans un contenu. */
+            if (redim >= 0) {
+                /* Nouvelle zone utile : le noyau la borne a l'allocation et
+                 * l'annonce au client (Configure) ; le client repeint a sa
+                 * nouvelle taille, la pompe recompose l'ancien et le nouveau
+                 * cadre. */
+                i64 nl = (i64)redim_l0 + ((i64)x - (i64)redim_x0);
+                i64 nh = (i64)redim_h0 + ((i64)y - (i64)redim_y0);
+                if (nl < 160) nl = 160;
+                if (nh < 120) nh = 120;
+                if (nl > (i64)ecran_l) nl = ecran_l;
+                if (nh > (i64)ecran_h) nh = ecran_h;
+                i64 z = sys6(BO_FENETRE_CONFIGURE, (u64)fens[redim].poignee, (u64)nl, (u64)nh, 1, 0, 0);
+                if (z > 0)
+                    publie_entree("COMPOSITED_ENTREE_REDIM fenetre=", redim, (u32)((u64)z >> 32), (u32)((u64)z & 0xffffffffu));
+                else
+                    ecris_nombre("COMPOSITED_ENTREE_REDIM_REFUS erreur=", z);
+                redim = -1;
+            }
             if (glisse >= 0) {
                 publie_entree("COMPOSITED_ENTREE_DEPOSE fenetre=", glisse, fens[glisse].x, fens[glisse].y);
                 ecris_nombre("[COMPOSITED] deplacement_us=", (i64)(dernier_deplacement_ns / 1000));
@@ -1258,6 +1463,12 @@ static int traite_entrees(void)
     for (i64 k = 0; k < n; k++) {
         const unsigned char *t = tampon + 24 + k * 16;
         u32 code = co_lit_u32(t, 0), unicode = co_lit_u32(t, 4), mods = co_lit_u32(t, 8), appui = co_lit_u32(t, 12);
+        if (faute_f12 && appui && code == 15 && unicode == 12) {
+            /* BOUCHAUD_REPRISE_COMPOSITEUR_V1 : banc de reprise. Une VRAIE
+             * faute de page, que le noyau doit voir et reparer. */
+            ecris("COMPOSITED_FAUTE_VOLONTAIRE touche=F12\n");
+            *(volatile u32 *)0 = 1;
+        }
         if (cible >= 0) {
             route(cible, ENTREE_TOUCHE, code, unicode, mods, appui);
             touches_routees++;
@@ -1282,7 +1493,16 @@ static int traite_entrees(void)
 static int bureau(i64 affichage, u64 *pile)
 {
     affichage_g = affichage;
-    if (lit_fenetres(pile) <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=fenetres\n"); return 1; }
+    int lancees = lit_fenetres(pile);
+    if (lancees < 0) lancees = 0;
+    faute_f12 = variable_texte(pile, "BO_COMPOSITED_FAUTE_F12=1") != 0;
+    if (variable_texte(pile, "BO_BUREAU_DOCK=1")) {
+        i64 p[FEN_MAX];
+        for (int j = 0; j < lancees; j++) p[j] = fens[j].poignee;
+        int napps = lit_apps(pile, p, lancees);
+        if (napps > 0) { dock = 1; nfen = napps; }
+    }
+    if (nfen <= 0) { ecris("COMPOSITED_BUREAU_FAIL raison=fenetres\n"); return 1; }
     int scenario = scenario_de(pile);
     u64 attente_etape = 0;   /* instant (ns) de l'etape suivante du scenario complet */
     i64 dims = sys6(BO_DISPLAY_INFO, (u64)affichage, 0, 0, 0, 0, 0);
@@ -1297,15 +1517,24 @@ static int bureau(i64 affichage, u64 *pile)
     exige(region_g > 0, "bureau : image de l'ecran creee");
     if (region_g <= 0) return 1;
     struct rect tout = { 0, 0, ecran_l, ecran_h };
+    if (dock) {
+        /* Un bureau utilisable : dock, curseur et cases visibles d'emblee. */
+        interactif = 1;
+        cur_x = ecran_l / 2; cur_y = ecran_h / 2; cur_visible = 1;
+        ecris_nombre("COMPOSITED_DOCK_PRET applications=", nfen);
+        for (int k = 0; k < nfen; k++) ecris_ligne("COMPOSITED_DOCK_APP nom=", noms[k]);
+    }
     exige(recompose(tout) >= 0, "bureau : fond presente");
 
     i64 attente = sys6(BO_WAITSET_CREATE, 0, 0, 0, 0, 0, 0);
-    int ajoutees = 0;
+    attente_g = attente;
+    int ajoutees = 0, attendues = 0;
     for (int i = 0; i < nfen; i++) {
-        fens[i].vivante = 1;
+        if (!fens[i].poignee) { fens[i].vivante = 0; continue; }   /* differee : au dock */
+        fens[i].vivante = 1; attendues++;
         if (attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)fens[i].poignee, (u64)i + 1, 0, 0, 0) == 0) ajoutees++;
     }
-    exige(ajoutees == nfen, "bureau : chaque fenetre attendue dans un waitset");
+    exige(ajoutees == attendues, "bureau : chaque fenetre attendue dans un waitset");
     /* BOUCHAUD_ENTREES_RING3_V1 : la capacite d'affichage est lisible quand
      * une entree attend ; le bureau dort entre deux gestes. */
     if (attente > 0 && sys6(BO_WAITSET_ADD, (u64)attente, (u64)affichage, 100, 0, 0, 0) == 0)
@@ -1318,9 +1547,10 @@ static int bureau(i64 affichage, u64 *pile)
 
     struct bo_wait_event evenements[FEN_MAX + 1];
     u64 premiere = 0, debut_ns = 0;
-    int refus_eprouves = 0, etape = 0, vivantes = nfen;
+    int refus_eprouves = 0, etape = 0;
+    vivantes = attendues;
     u32 etat[10];
-    while (vivantes > 0) {
+    while (vivantes > 0 || dock) {
         i64 n = sys6(BO_WAITSET_WAIT, (u64)attente, (u64)evenements, FEN_MAX + 1, 1000000000UL, 0, 0);
         if (n < 0 && n != -BO_E_TIMED_OUT) { ecris_nombre("COMPOSITED_BUREAU_FAIL attente=", n); return 1; }
         traite_entrees();
@@ -1347,6 +1577,7 @@ static int bureau(i64 affichage, u64 *pile)
                     exige(recompose(cadre_de(f)) >= 0, "bureau : fenetre du client mort effacee");
                     recompose_barre(active());   /* la fenetre qui devient active */
                 }
+                if (dock) recompose(rect_dock());
                 continue;
             }
             u32 dx = etat[4], dy = etat[5], dl = etat[6], dh = etat[7];
@@ -1361,6 +1592,11 @@ static int bureau(i64 affichage, u64 *pile)
                 publie_fenetre(i, "COMPOSITED_BUREAU_FENETRE indice=");
                 recompose(cadre_de(f));
                 if (avant >= 0 && avant != active()) recompose_barre(avant);   /* elle cesse d'etre active */
+                if (dock) {
+                    /* Ouverte depuis le dock : elle a le foyer, l'autre le perd. */
+                    if (active() == i && avant != i) foyer(avant, i);
+                    recompose(rect_dock());
+                }
                 dl = 0;
             } else if (etat[2] != f->l || etat[3] != f->h) {
                 /* Taille peinte changee : tout le cadre, ancien et nouveau. */
@@ -1532,7 +1768,7 @@ void demarre(u64 *pile)
 {
     i64 affichage = capacite_affichage(pile);
     int code;
-    if (affichage >= 0 && lit_fenetres(pile) > 0) {
+    if (affichage >= 0 && (lit_fenetres(pile) > 0 || variable_texte(pile, "BO_BUREAU_DOCK=1"))) {
         /* `/bin/composited bureau` : de vraies applications, d'autres processus. */
         nfen = 0;
         code = bureau(affichage, pile);
