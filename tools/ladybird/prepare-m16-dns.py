@@ -66,7 +66,9 @@ if "M16_DNS_CACHE_STALE_REQUERY" not in data:
             // Une entree terminee peut conserver un CNAME/negative-cache alors
             // que ses A/AAAA ont expire. Ne jamais livrer ce faux cache-hit
             // vide a RequestServer : repasser par la resolution normale.
-            if (getenv("BOUCHAUD_M9") != nullptr) {
+            // BOUCHAUD_CONTOURNEMENTS_SANS_TRACE_V1 : la reprise s'execute
+            // toujours ; seule la ligne depend de BOUCHAUD_M9.
+            {
                 bool wants_address = false;
                 for (auto const& type : desired_types) {
                     if (type == Messages::ResourceType::A || type == Messages::ResourceType::AAAA) {
@@ -75,7 +77,8 @@ if "M16_DNS_CACHE_STALE_REQUERY" not in data:
                     }
                 }
                 if (wants_address && result.is_done() && result.cached_addresses().is_empty()) {
-                    outln("[ladybird-bouchaud] M16_DNS_CACHE_STALE_REQUERY name={}", name);
+                    if (getenv("BOUCHAUD_M9") != nullptr)
+                        outln("[ladybird-bouchaud] M16_DNS_CACHE_STALE_REQUERY name={}", name);
                     return {};
                 }
             }

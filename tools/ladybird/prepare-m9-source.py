@@ -6,9 +6,9 @@
 # WebContent, pont de capture). Ce mode est retire : WebContent est lance par
 # UI/Bouchaud comme sur Linux. Ne restent que les sondes du chemin retour
 # RequestServer -> WebContent et le drainage du corps (reveil de notificateur
-# manquant sur la boucle d'evenements Bouchaud), tous deux gardes par
-# BOUCHAUD_M9, que le noyau exporte toujours et qui ne commande plus que cette
-# instrumentation reseau.
+# manquant sur la boucle d'evenements Bouchaud). BOUCHAUD_M9 ne commande que
+# les SONDES : le drainage s'execute toujours (BOUCHAUD_CONTOURNEMENTS_SANS_TRACE_V1),
+# car le produit n'exporte plus BOUCHAUD_M9 par defaut.
 
 from pathlib import Path
 import sys
@@ -103,18 +103,24 @@ if "M9_BODY_DRAIN_BEGIN" not in data:
     // Une reponse file-backed/cache-backed peut avoir un payload valide sans
     // ReadStream. Le callback du notifier dereference read_stream : ne jamais
     // le forcer dans ce cas, laisser la logique upstream appeler on_finish.
-    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && !m_internal_stream_data->read_stream)
+    // BOUCHAUD_CONTOURNEMENTS_SANS_TRACE_V1 : le drainage est un CONTOURNEMENT,
+    // pas une sonde. Il s'execute toujours ; seules ses lignes dependent de
+    // BOUCHAUD_M9, qui n'est plus exporte par defaut dans le produit.
+    bool const bouchaud_trace = getenv("BOUCHAUD_M9") != nullptr;
+    if (bouchaud_trace && m_internal_stream_data && !m_internal_stream_data->read_stream)
         outln("[ladybird-bouchaud] M9_BODY_DRAIN_SKIP reason=no-read-stream total={}", total_size);
 
-    if (getenv("BOUCHAUD_M9") != nullptr && m_internal_stream_data && m_internal_stream_data->read_stream && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
+    if (m_internal_stream_data && m_internal_stream_data->read_stream && m_internal_stream_data->read_notifier && m_internal_stream_data->read_notifier->on_activation) {
         // BOUCHAUD_DRAIN_MESURE_V1 : ce que la lecture FORCEE recupere. Zero
         // partout = le notificateur avait deja tout livre ; le contournement
         // ne sert plus et peut partir (audit des prepare-*.py).
         auto const deja_livre = m_internal_stream_data->delivered_size;
-        outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
+        if (bouchaud_trace)
+            outln("[ladybird-bouchaud] M9_BODY_DRAIN_BEGIN total={}", total_size);
         m_internal_stream_data->read_notifier->on_activation();
         auto const apres = m_internal_stream_data ? m_internal_stream_data->delivered_size : deja_livre;
-        outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={} deja_livre={} recupere={}", total_size, deja_livre, apres - deja_livre);
+        if (bouchaud_trace)
+            outln("[ladybird-bouchaud] M9_BODY_DRAIN_DONE total={} deja_livre={} recupere={}", total_size, deja_livre, apres - deja_livre);
     }
 #endif
     if (on_finish)

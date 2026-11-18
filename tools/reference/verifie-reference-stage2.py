@@ -324,8 +324,26 @@ req("BOUCHAUD_STAGE2_PAGE_ACCUEIL" in stage2,
     "annonce de la page d'accueil absente")
 req("BOUCHAUD_STAGE2_PAGE_ACCUEIL_ABSENTE" in stage2,
     "alerte page d'accueil manquante absente")
+# BOUCHAUD_TRACE_RESEAU_A_LA_DEMANDE_V1 : la trace reseau de Ladybird coute
+# un coeur sur deux au chargement (releve WHPX du 18/11) ; elle n'est plus
+# exportee par defaut, et rien ne doit la remettre en douce.
+req('set_exported_for_boot("BOUCHAUD_M9", "1")' not in stage2,
+    "BOUCHAUD_M9 exporte par defaut : trace reseau sur la console a chaque requete")
+req("BOUCHAUD_TRACE_RESEAU_A_LA_DEMANDE_V1" in stage2,
+    "decision trace reseau a la demande non documentee dans stage2")
+# BOUCHAUD_CONTOURNEMENTS_SANS_TRACE_V1 : sans BOUCHAUD_M9 exporte, tout ce
+# qu'il garde disparait du produit. Il ne doit donc garder que des SONDES : le
+# drainage du corps (reveil de notificateur manquant) et la reprise d'une
+# entree DNS vide sont des contournements, et s'executent toujours.
+m9_source = (ROOT / "tools/ladybird/prepare-m9-source.py").read_text()
+m16_dns = (ROOT / "tools/ladybird/prepare-m16-dns.py").read_text()
+drain = [l for l in m9_source.splitlines() if "read_notifier->on_activation)" in l and l.lstrip().startswith("if (")]
+req(len(drain) == 1 and "BOUCHAUD_M9" not in drain[0] and "bouchaud_trace" not in drain[0],
+    "drainage du corps M9 conditionne par la trace BOUCHAUD_M9 : absent du produit")
+req('if (getenv("BOUCHAUD_M9") != nullptr) {\n                bool wants_address' not in m16_dns
+    and "wants_address && result.is_done()" in m16_dns,
+    "reprise DNS d'entree vide conditionnee par la trace BOUCHAUD_M9 : absente du produit")
 for token in (
-    'set_exported_for_boot("BOUCHAUD_M9", "1")',
     # Le lancement doit rester possible sans reseau; la recherche est explicite.
     # L'URL litterale a quitte l'appel pour une constante : c'est elle qu'on
     # verifie maintenant, et elle sert AUSSI a constater la presence du fichier

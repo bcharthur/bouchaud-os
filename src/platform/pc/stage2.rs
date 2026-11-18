@@ -379,7 +379,21 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // Le run historique posait ces variables via /autorun. Le Stage 2 entre
     // directement dans le bureau, donc il doit fournir le meme contrat avant
     // que l'utilisateur double-clique sur Ladybird.
-    crate::shell::set_exported_for_boot("BOUCHAUD_M9", "1");
+    // BOUCHAUD_TRACE_RESEAU_A_LA_DEMANDE_V1 : plus de BOUCHAUD_M9 par defaut.
+    //
+    // BOUCHAUD_M9 n'allume plus que l'instrumentation reseau de Ladybird
+    // (M9_RS_*, M9_BODY_*, M16_DNS_*, M17_UDP_*) : ~15 lignes PAR requete,
+    // ecrites par `write(2)` sur la console serie, sur le fil d'evenements
+    // de RequestServer ET de WebContent. Releve utilisateur WHPX du 18/11
+    // (YouTube puis une recherche, SMP2) : fil `console` a 90 % d'un coeur
+    // pendant le chargement, `write` moyen 345 us (443 us au chargement,
+    // `SYSCALL_TEMPS nr=1`), 314 437 ecritures, 108 s cumulees. Chaque octet
+    // de COM1 est une sortie de VM : la trace prenait un coeur sur deux au
+    // navigateur qu'elle decrivait. Le diagnostic reste a un `export` :
+    //     export BOUCHAUD_M9=1
+    // et les bancs qui lisent ces lignes l'exportent eux-memes
+    // (run_ladybird_endurance.sh, _browser_host.sh, _memoire.sh, _wpt.sh,
+    // _crash_rendu.sh).
     // Une page locale ne depend ni du DHCP ni d'un moteur distant au lancement.
     crate::shell::set_exported_for_boot("BOUCHAUD_M9_URL", URL_ACCUEIL);
     crate::shell::set_exported_for_boot("BOUCHAUD_M11", "1");
