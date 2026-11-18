@@ -6,7 +6,6 @@
 //! Le navigateur ne figure plus ici : il vit en ring 3, dans
 //! `tools/userland/navigateur/`, et s'affiche par Qt sur `/dev/fb0`.
 
-pub mod calculator;
 pub mod file_explorer;
 pub mod journal;
 pub mod rustpad;
@@ -101,15 +100,6 @@ pub(crate) fn key_to_app(w: &mut Win, k: Key, _home: usize) -> bool {
             _ => false,
         },
 
-        App::Calc { expr } => match k {
-            Key::Enter     => { calculator::apply_key(expr, "="); false }
-            Key::Backspace => { calculator::apply_key(expr, "<"); false }
-            Key::Char(c)   => {
-                if let Some(lbl) = calculator::key_char(c as char) { calculator::apply_key(expr, lbl); }
-                false
-            }
-            _ => false,
-        },
         App::Files { cur, scroll, selected, history, ui } => {
             file_explorer::touche_clavier(cur, scroll, selected, history, ui, files_l, files_h, k);
             false
@@ -139,15 +129,6 @@ pub(crate) fn app_click(w: &mut Win, mx: i32, my: i32, _home: usize) {
 
     if let App::Notes { state } = &mut w.app {
         notes::click(state, mx - bx as i32, my - by as i32);
-        return;
-    }
-
-    if let App::Calc { expr } = &mut w.app {
-        let bwi = (win_w - 6).max(1);
-        let bhi = (win_h - TITLE_H - 4).max(1);
-        if let Some(lbl) = calculator::key_at(bx as i32, by as i32, bwi, bhi, mx, my) {
-            calculator::apply_key(expr, lbl);
-        }
         return;
     }
 
@@ -255,7 +236,6 @@ pub(crate) fn draw_app(w: &Win) {
         App::Terminal { sb, input, cwd }    => terminal::draw(sb, input, *cwd, bx, by, bw, bh),
         App::Files { cur, scroll, selected, history, ui } =>
             file_explorer::draw(*cur, *scroll, *selected, history, ui, bx, by, bw, bh),
-        App::Calc { expr }                  => calculator::draw(expr, bx, by, bw, bh),
         App::Services                       => services::draw(bx, by, bw, bh),
         App::Monitor                        => system_info::draw(bx, by, bw, bh),
         App::Insights                       => insights::draw(bx, by, bw, bh),

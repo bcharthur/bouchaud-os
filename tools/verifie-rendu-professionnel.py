@@ -5,8 +5,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# BOUCHAUD_CALCULATRICE_RING3_V1 : `src/gui/apps/calculator.rs` n'existe plus
+# (la Calculatrice est l'application ring 3 `userland/apps/calculatrice`). La
+# regle vaut pour les interfaces que le NOYAU dessine encore.
 interfaces = [
-    "src/gui/apps/calculator.rs",
     "src/gui/apps/file_explorer.rs",
     "src/gui/apps/journal.rs",
     "src/gui/apps/rustpad.rs",

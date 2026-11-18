@@ -34,6 +34,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 from pathlib import Path
@@ -106,7 +107,8 @@ class Banc:
 
     # --- QEMU ----------------------------------------------------------------
     def demarre(self):
-        self.socket = str(self.sortie / "moniteur.sock")
+        # Un chemin court : AF_UNIX borne le chemin d'une socket a ~108 octets.
+        self.socket = tempfile.mktemp(prefix="bo-util-", suffix=".sock")
         accel = ["-enable-kvm", "-cpu", "host"] if self.o.accel == "kvm" else ["-cpu", "max"]
         self.qemu = subprocess.Popen(
             ["qemu-system-x86_64", *accel, "-drive", f"format=raw,file={self.o.boot}",

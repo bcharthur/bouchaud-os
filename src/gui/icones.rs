@@ -201,7 +201,6 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         App::Application { .. } => return None,
         App::Navigateur { .. } => 0,
         App::Doom { .. } => 11,
-        App::Calc { .. } => 1,
         App::Terminal { .. } => 2,
         App::Files { .. } => 3,
         App::Rustpad { .. } => 4,

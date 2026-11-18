@@ -57,6 +57,11 @@ tools/release/build_bo_ota.sh "$SORTIE/bin/bo-ota" >/dev/null
 (cd userland/services/composited && OUT="$TRAVAIL/composited" bash ./build.sh >/dev/null)
 cp "$TRAVAIL/composited/composited-slice" "$SORTIE/bin/composited"
 
+# --- Calculatrice (application ring 3, BOUCHAUD_CALCULATRICE_RING3_V1) -----------
+# Le bureau noyau ne dessine plus de calculatrice : il lance celle-ci.
+musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/calculatrice-gui" \
+  userland/apps/calculatrice/calculatrice-gui.c
+
 # --- DOOM ------------------------------------------------------------------------
 [ -x target/doom-bouchaud/doom-bouchaud ] || tools/doom/build-linux.sh >/dev/null
 cp target/doom-bouchaud/doom-bouchaud "$SORTIE/doom"
@@ -105,7 +110,7 @@ EOF
 
 LIVRABLE=oui; [ "$LADYBIRD" = present ] || LIVRABLE=non
 {
-  printf 'services=serviced,healthd,updated,logd,ota\ncomposited=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
+  printf 'services=serviced,healthd,updated,logd,ota\ncomposited=present\ncalculatrice=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
   printf 'ota=stable\nlivrable=%s\n' "$LIVRABLE"
 } > "$SORTIE/etc/bouchaud/composants"
 echo "SYSTEME_ASSEMBLE version=$VERSION commit=${COMMIT:0:12} sequence=$SEQUENCE ladybird=$LADYBIRD livrable=$LIVRABLE fichiers=$(find "$SORTIE" -type f | wc -l) octets=$(du -sb "$SORTIE" | cut -f1)"
