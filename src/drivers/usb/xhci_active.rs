@@ -3812,8 +3812,11 @@ fn init_controller(dev: PciDevice) -> Result<(Controller, usize), &'static str> 
     if bar0 == 0 {
         return Err("bar0-absent");
     }
+    // BOUCHAUD_MMIO_HORS_FENETRE_V1 : registres mappes avant le premier acces
+    // (BAR a 56 Tio sous WHPX). Mappes AVANT le bus master : un refus laisse
+    // le controleur tel que le micrologiciel l'a laisse.
+    let base = crate::drivers::xhci_probe::mappe_registres(bar0)? as usize;
     pci::enable_bus_master(&dev);
-    let base = memory::phys_to_virt(bar0) as usize;
 
     unsafe {
         let cap_len = r8(base, 0x00) as usize;

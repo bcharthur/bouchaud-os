@@ -1069,10 +1069,16 @@ fn initialise(dev: PciDevice) -> Result<(Etat, FilesEs), &'static str> {
     if physique == 0 {
         return Err("bar0-absent");
     }
-    pci::enable_bus_master(&dev);
-    let base = memory::phys_to_virt(physique) as usize;
-
+    // BOUCHAUD_MMIO_HORS_FENETRE_V1 : la BAR peut etre hors de la fenetre
+    // physique du chargeur (au-dela de 4 Gio). Les capacites d'abord, puis
+    // les sonnettes des deux files utilisees (admin et une file d'E/S), dont
+    // le pas depend de CAP.DSTRD.
+    let base = memory::mappe_mmio(physique, 0x1000)? as usize;
     let caps = unsafe { decode_cap(lit64(base, registre::CAP)) };
+    let fin_sonnettes = registre::SONNETTES as u64 + 4 * caps.foulee_sonnette as u64;
+    memory::mappe_mmio(physique, fin_sonnettes.max(0x4000))?;
+    pci::enable_bus_master(&dev);
+
     if !caps.jeu_nvm {
         return Err("jeu-nvm-absent");
     }

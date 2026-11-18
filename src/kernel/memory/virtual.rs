@@ -713,6 +713,123 @@ pub fn identity_map_kernel_page(virt_phys: u64) -> bool {
     true
 }
 
+// ---------------------------------------------------------------------------
+// BOUCHAUD_MMIO_HORS_FENETRE_V1 -- les registres d'un peripherique au-dela de
+// la fenetre physique du chargeur.
+// ---------------------------------------------------------------------------
+//
+// Le chargeur ne mappe la fenetre physique que de 0 a la fin de sa carte
+// memoire (au moins 4 Gio). Les pilotes lisaient pourtant leurs registres par
+// `phys_to_virt(BAR)`, comme si toute adresse physique y etait.
+//
+// Sous TCG, OVMF borne l'espace physique a 40 bits et place sa fenetre PCI
+// 64 bits sous 1 Tio, que sa carte memoire couvre : les BAR tombaient dans la
+// fenetre par chance. Sous WHPX (Ryzen 7800X3D, 18/11), l'hote expose 46 bits
+// et OVMF place la fenetre a 56 Tio : BAR0 du xHCI = 0x380000000000, lu a
+// `phys_offset + BAR` = 0x3a8000000000 -- non mappe. Faute de page dans
+// `xhci_probe::probe`, panique avant le bureau. Reproduit sous TCG par
+// `-cpu max,phys-bits=46`. Une vraie machine qui place ses BAR au-dessus de
+// 4 Gio (decodage au-dela de 4G, BAR redimensionnables) tombait de meme.
+//
+// `mappe_mmio` garde la convention de tous les pilotes -- registre virtuel =
+// `phys_offset + physique` -- et cree les pages manquantes, non cachables.
+// Elle REFUSE plutot que de risquer :
+//   * une plage hors de la moitie basse canonique, ou dans le creneau
+//     utilisateur ;
+//   * une page deja mappee vers AUTRE CHOSE (collision avec une autre region) ;
+//   * une entree PML4 neuve apres la creation du premier espace de processus :
+//     ces espaces copient la PML4 noyau a leur creation et ne la verraient pas,
+//     le noyau fauterait alors pendant un appel systeme.
+// Un refus rend le peripherique indisponible ; il ne fait pas paniquer.
+
+static ESPACES_CREES: AtomicBool = AtomicBool::new(false);
+static MMIO_VERROU: crate::kernel::sync::SpinLock<()> = crate::kernel::sync::SpinLock::new(());
+static MMIO_PAGES_CREEES: AtomicU64 = AtomicU64::new(0);
+
+/// Fin (exclue) de la moitie basse canonique.
+const MOITIE_BASSE_FIN: u64 = 0x0000_8000_0000_0000;
+
+/// Rend `phys_offset + phys` utilisable pour `[phys, phys + octets)`.
+///
+/// Rend l'adresse virtuelle de `phys`, ou la raison du refus.
+pub fn mappe_mmio(phys: u64, octets: u64) -> Result<u64, &'static str> {
+    if octets == 0 {
+        return Err("plage vide");
+    }
+    let fin = phys.checked_add(octets).ok_or("plage debordante")?;
+    let root = unsafe { KERNEL_PML4 };
+    if root == 0 {
+        return Err("table noyau absente");
+    }
+    let offset = memory::phys_offset();
+    let premiere = phys & !(PAGE_SIZE - 1);
+    let derniere = fin.checked_add(PAGE_SIZE - 1).ok_or("plage debordante")? & !(PAGE_SIZE - 1);
+    let v_debut = offset.checked_add(premiere).ok_or("hors espace virtuel")?;
+    let v_fin = offset.checked_add(derniere).ok_or("hors espace virtuel")?;
+    if v_fin > MOITIE_BASSE_FIN {
+        return Err("hors moitie basse canonique");
+    }
+    let creneau = user_slot_base();
+    let creneau_fin = creneau + ((USER_SLOTS as u64) << 39);
+    if v_debut < creneau_fin && v_fin > creneau {
+        return Err("collision avec le creneau utilisateur");
+    }
+
+    let _garde = MMIO_VERROU.lock();
+    let mut page = premiere;
+    while page < derniere {
+        mappe_page_mmio(root, offset + page, page)?;
+        page += PAGE_SIZE;
+    }
+    Ok(offset + phys)
+}
+
+/// Pages que `mappe_mmio` a du creer (zero : tout etait deja dans la fenetre).
+pub fn mmio_pages_creees() -> u64 {
+    MMIO_PAGES_CREEES.load(Ordering::Relaxed)
+}
+
+fn mappe_page_mmio(root: u64, virt: u64, phys: u64) -> Result<(), &'static str> {
+    let mut table = table_at(root);
+    for niveau in (1..4).rev() {
+        let decalage = 12 + 9 * niveau;
+        let index = ((virt >> decalage) & 0x1FF) as usize;
+        let entree = table[index];
+        if entree & PTE_PRESENT != 0 {
+            if entree & PTE_HUGE != 0 {
+                // Grande page deja posee : elle doit couvrir CETTE adresse
+                // physique, sinon c'est une autre region.
+                let portee = 1u64 << decalage;
+                let base = (entree & ADDR_MASK) & !(portee - 1);
+                return if base + (virt & (portee - 1)) == phys {
+                    Ok(())
+                } else {
+                    Err("collision avec une grande page existante")
+                };
+            }
+            table = table_at(entree & ADDR_MASK);
+            continue;
+        }
+        if niveau == 3 && ESPACES_CREES.load(Ordering::Acquire) {
+            return Err("entree PML4 neuve apres creation des espaces de processus");
+        }
+        let cadre = alloc_frame().ok_or("plus de cadre pour les tables")?;
+        table[index] = cadre | PTE_PRESENT | PTE_WRITE;
+        table = table_at(cadre);
+    }
+    let feuille = ((virt >> 12) & 0x1FF) as usize;
+    let entree = table[feuille];
+    if entree & PTE_PRESENT != 0 {
+        return if entree & ADDR_MASK == phys { Ok(()) } else { Err("collision avec une page existante") };
+    }
+    // Non cachable (PCD|PWT : entree PAT 3, UC) et non executable : ce sont
+    // des registres, l'ordre et l'effet de chaque acces sont le contrat.
+    table[feuille] = phys | PTE_PRESENT | PTE_WRITE | PTE_NO_CACHE | PTE_WRITE_THROUGH | PTE_NO_EXEC;
+    flush(virt);
+    MMIO_PAGES_CREEES.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Passe une plage PHYSIQUE en ecriture combinee, dans la fenetre physique.
 ///
 /// # Pourquoi cette fonction existe
@@ -1075,6 +1192,9 @@ impl AddressSpace {
     /// Cree un espace d'adressage : entrees noyau reprises telles quelles,
     /// creneau utilisateur vierge et exclusif.
     pub fn new() -> Option<Self> {
+        // BOUCHAUD_MMIO_HORS_FENETRE_V1 : passe ce point, une entree PML4
+        // noyau creee plus tard ne serait plus vue par cet espace.
+        ESPACES_CREES.store(true, Ordering::Release);
         let pml4 = alloc_frame()?;
         let dst = table_at(pml4);
         let src = table_at(unsafe { KERNEL_PML4 });

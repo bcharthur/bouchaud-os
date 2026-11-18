@@ -664,6 +664,44 @@ jobs:
             target/verifie-tcp-perte/serveur.log
           if-no-files-found: warn
 
+  bar-haute:
+    # BOUCHAUD_MMIO_HORS_FENETRE_V1 : panique de main@4307cf6f sous WHPX (BAR
+    # du xHCI a 56 Tio, hors de la fenetre physique du chargeur). La condition
+    # est reproduite sous TCG par `-cpu max,phys-bits=46` ; le banc exige
+    # qu'elle le soit, puis le bureau, l'USB, le NVMe et l'e1000.
+    name: qemu / bar pci hors fenetre (uefi, 46 bits)
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + OVMF
+        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-uefi
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bar-haute-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            bar-haute-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Stage 2 UEFI, BAR au-dela de la fenetre physique
+        run: tools/ci/run_bar_haute.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-bar-haute
+          path: target/bar-haute/serie.log
+          if-no-files-found: warn
+
   dhcp-recuperation:
     name: qemu / dhcp + reprise rx
     needs: [gate, kernel-build]
@@ -867,7 +905,7 @@ jobs:
   integration-gate:
     name: integration-gate
     if: always()
-    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, tempete-exec, fenetre-migration, atelier-reactivite, os-primitives, mm-ng6, qt-pixel, dns-udp, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
+    needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, tempete-exec, fenetre-migration, atelier-reactivite, os-primitives, mm-ng6, qt-pixel, dns-udp, bar-haute, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Synthese
@@ -888,6 +926,7 @@ jobs:
           MM: ${{ needs.mm-ng6.result }}
           QT: ${{ needs.qt-pixel.result }}
           DNS: ${{ needs.dns-udp.result }}
+          BARHAUTE: ${{ needs.bar-haute.result }}
           DHCP: ${{ needs.dhcp-recuperation.result }}
           USB: ${{ needs.usb-arbre.result }}
           PLUG: ${{ needs.usb-branchement.result }}
@@ -904,7 +943,7 @@ jobs:
             echo "ECHEC: integration non lancee hors PR documentaire (event=$EVENT docs_only=$DOCS_ONLY)."
             exit 1
           fi
-          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" tempete "$TEMPETE" fenetre "$FENETRE" atelier "$ATELIER" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
+          printf '%-12s %s\n' kernel "$KERNEL" boot "$BOOT" nvme "$NVME" health "$HEALTH" python "$PYDISK" souffrance "$SOUFFRANCE" tempete "$TEMPETE" fenetre "$FENETRE" atelier "$ATELIER" primitives "$PRIMITIVES" mm "$MM" qt "$QT" dns "$DNS" barhaute "$BARHAUTE" dhcp "$DHCP" usb "$USB" plug "$PLUG" stockage "$STOCK" liaison "$LIAISON" brdp "$BRDP"
 
           # Un job SAUTE n est pas un job REUSSI.
           #
@@ -914,7 +953,7 @@ jobs:
           # qui passe -- et c est ainsi qu on croit valider ce qu on ne valide
           # pas. On le dit, et on echoue.
           a_tourne=0
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$ATELIER" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$ATELIER" "$PRIMITIVES" "$MM" "$DNS" "$BARHAUTE" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" = skipped ] || a_tourne=1
           done
           if [ "$a_tourne" -eq 0 ]; then
@@ -923,7 +962,7 @@ jobs:
           fi
 
           # qt-pixel reste informatif.
-          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$ATELIER" "$PRIMITIVES" "$MM" "$DNS" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
+          for r in "$KERNEL" "$BOOT" "$NVME" "$HEALTH" "$PYDISK" "$SOUFFRANCE" "$TEMPETE" "$FENETRE" "$ATELIER" "$PRIMITIVES" "$MM" "$DNS" "$BARHAUTE" "$DHCP" "$USB" "$PLUG" "$STOCK" "$LIAISON" "$BRDP"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK

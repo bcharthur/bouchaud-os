@@ -786,6 +786,11 @@ pub fn init_with_device(device: &PciDevice) -> bool {
         VUE_SUR_LE_BUS.store(true, Ordering::Relaxed);
         pose_etat(crate::drivers::etat_pilote::Etat::Detecte);
 
+        // BOUCHAUD_MMIO_HORS_FENETRE_V1 : 256 octets de registres, sur une
+        // BAR qui peut etre au-dela de la fenetre physique du chargeur.
+        if memory::mappe_mmio(bar, 0x1000).is_err() {
+            return false;
+        }
         MMIO = memory::phys_offset().wrapping_add(bar);
 
         // Arrete Rx/Tx puis reinitialise le MAC. Boucle bornee : un controleur
@@ -950,6 +955,9 @@ pub fn init_with_device(device: &PciDevice) -> bool {
 /// doit jamais faire disparaitre le materiel.
 unsafe fn programme_le_materiel() -> bool {
     if BAR_PHYSIQUE == 0 {
+        return false;
+    }
+    if memory::mappe_mmio(BAR_PHYSIQUE, 0x1000).is_err() {
         return false;
     }
     MMIO = memory::phys_offset().wrapping_add(BAR_PHYSIQUE);

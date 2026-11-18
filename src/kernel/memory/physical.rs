@@ -228,6 +228,16 @@ pub fn phys_to_virt(phys: u64) -> *mut u8 {
     (unsafe { PHYS_OFFSET } + phys) as *mut u8
 }
 
+/// Registres d'un peripherique a `[phys, phys + octets)` : les rend
+/// accessibles et rend le pointeur `phys_offset + phys`.
+///
+/// A employer a la place de `phys_to_virt` pour toute BAR PCI : la fenetre
+/// physique du chargeur ne couvre que la RAM et les 4 premiers Gio
+/// (BOUCHAUD_MMIO_HORS_FENETRE_V1, voir `vmm::mappe_mmio`).
+pub fn mappe_mmio(phys: u64, octets: u64) -> Result<*mut u8, &'static str> {
+    crate::kernel::vmm::mappe_mmio(phys, octets).map(|virt| virt as *mut u8)
+}
+
 /// `[phys, phys + len)` tient-il ENTIER dans une region RAM de la carte de boot ?
 ///
 /// Pour une sonde qui veut lire une adresse physique qu'elle n'a pas allouee
