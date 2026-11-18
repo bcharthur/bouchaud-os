@@ -542,6 +542,23 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
     // panique : n'importe quel programme arretait la machine. On enchaine les
     // tranches tant que chacune passe ENTIERE ; une ecriture partielle ou une
     // erreur s'arrete la, exactement comme un appel unique.
+    //
+    // Exception : un FICHIER ordinaire s'ecrit en UN seul appel, sous un seul
+    // verrou du systeme de fichiers, comme avant -- sinon deux `O_APPEND` de
+    // plus d'une tranche pouvaient s'entrelacer (revue #340). La copie y reste
+    // bornee : jamais plus que la taille maximale d'un fichier RAMFS, au-dela
+    // de laquelle l'ecriture serait refusee de toute facon.
+    let est_fichier = matches!(
+        task::current_process().files.lock().get(fd).map(|d| &d.kind),
+        Some(FdKind::File(_))
+    );
+    if est_fichier {
+        let n = count.min(crate::fs::ramfs::MAX_FILE_SIZE);
+        return match user_read(buffer, n) {
+            Some(data) => ecrit_octets(fd, &data),
+            None => -errno::EFAULT,
+        };
+    }
     let mut ecrits = 0usize;
     while ecrits < count {
         let n = (count - ecrits).min(TRANCHE_COPIE);
