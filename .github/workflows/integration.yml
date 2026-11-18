@@ -654,6 +654,13 @@ jobs:
       - name: TCP depuis ring3 - segment non parti renvoye
         if: always()
         run: tools/net/verifie-tcp-perte.sh
+      # BOUCHAUD_LECTURE_EXACTE_V1 / BOUCHAUD_COPIE_BORNEE_V1 : meme noyau.
+      # Un gros `read`/`write` paniquait le noyau ; `read`/`pread` rendaient
+      # des lectures courtes au milieu d'un fichier (classes de la JVM
+      # tronquees).
+      - name: Fichiers ring3 - lectures exactes, copies bornees
+        if: always()
+        run: tools/ci/run_lecture_fichiers.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -662,6 +669,7 @@ jobs:
             target/verifie-dns/serie.log
             target/verifie-tcp-perte/serie.log
             target/verifie-tcp-perte/serveur.log
+            target/lecture-fichiers/serie.log
           if-no-files-found: warn
 
   bar-haute:

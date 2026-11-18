@@ -430,7 +430,14 @@ pub fn user_read(addr: u64, len: usize) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut buffer = alloc::vec![0u8; len];
+    // BOUCHAUD_COPIE_BORNEE_V1 : la longueur vient de l'utilisateur ; une
+    // allocation infaillible de `len` octets faisait paniquer le noyau quand
+    // le tas n'avait pas de bloc contigu assez grand. Echec = `None`.
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(len).is_err() {
+        return None;
+    }
+    buffer.resize(len, 0u8);
     if avec_processus(|process| process.mm.lock().space.read(addr, &mut buffer)) {
         Some(buffer)
     } else {
@@ -718,6 +725,21 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             8
         }
         SCHED_SETAFFINITY | SCHED_SETSCHEDULER | SCHED_SETPARAM => 0,
+        // `getcpu(cpu, node, tcache)` : le coeur ou tourne l'appelant, et son
+        // noeud NUMA (un seul ici). Absent, la glibc rendait -1 a
+        // `sched_getcpu()`, et HotSpot se repliait alors sur la page vsyscall
+        // historique de Linux (0xffffffffff600800) -- qui n'existe pas ici :
+        // faute de page au demarrage de toute JVM.
+        GETCPU => {
+            let coeur = crate::arch::x86_64::smp::cpu_index() as u32;
+            if args[0] != 0 && !user_write(args[0], &coeur.to_le_bytes()) {
+                return -errno::EFAULT;
+            }
+            if args[1] != 0 && !user_write(args[1], &0u32.to_le_bytes()) {
+                return -errno::EFAULT;
+            }
+            0
+        }
         // `setpriority(which, who, nice)` : le seul moyen pour un programme de
         // se declarer interactif. Le noyau n'a que deux classes, mais le signe
         // de `nice` suffit a les distinguer — et un programme portable n'a rien

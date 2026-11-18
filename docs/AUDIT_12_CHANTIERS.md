@@ -37,7 +37,7 @@ lui fait confiance.
 <!-- MESURE-CHANTIERS:DEBUT -->
 | Mesure | Valeur |
 |---|---|
-| Appels systeme aiguilles | **163** |
+| Appels systeme aiguilles | **164** |
 | Gros verrou noyau (smp_lock) | **supprime** |
 | Sites d'acquisition du gros verrou | **0** |
 | Fichiers portant un point sur de preemption | **5** |

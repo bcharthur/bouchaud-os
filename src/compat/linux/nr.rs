@@ -139,6 +139,7 @@ pub const PIPE2: u64 = 293;
 pub const RECVMMSG: u64 = 299;
 pub const PRLIMIT64: u64 = 302;
 pub const SENDMMSG: u64 = 307;
+pub const GETCPU: u64 = 309;
 pub const GETRANDOM: u64 = 318;
 pub const MEMBARRIER: u64 = 324;
 pub const STATX: u64 = 332;
@@ -257,6 +258,7 @@ pub fn name(number: u64) -> &'static str {
         GETTID => "gettid",
         FUTEX => "futex",
         SCHED_GETAFFINITY => "sched_getaffinity",
+        GETCPU => "getcpu",
         SET_TID_ADDRESS => "set_tid_address",
         TIME => "time",
         CLOCK_GETTIME => "clock_gettime",
