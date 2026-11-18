@@ -107,6 +107,17 @@ mortes_frontiere={} mortes_parking={} endormissements_refuses={}",
         tcp_rtx, tcp_rapides, tcp_rtt, tcp_srtt, tcp_rto, tcp_busy, tcp_sommeils,
         poignees, syn_rtx, rtt_min, rtt_moyen, rtt_max,
     ));
+    // BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : le TCP des sockets d'anneau 3, celui de
+    // Ladybird. `non_partis` compte les trames de donnees qui ne sont pas
+    // parties a leur premiere emission (ARP expire, anneau plein) : avant la
+    // file d'emission, chacune etait une connexion figee jusqu'a l'echeance
+    // du serveur. `renvois` dit combien ont ete rattrapees.
+    let (non_partis, renvois, renvois_rapides, abandons, files_pleines) =
+        crate::net::transport::retransmission::stats_sockets();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "[NET-TCP-SOCKETS] non_partis={} renvois={} renvois_rapides={} abandons={} files_pleines={}",
+        non_partis, renvois, renvois_rapides, abandons, files_pleines,
+    ));
     // L'ETAT DU LIEN, A CHAQUE RELEVE ET PAS SEULEMENT AU DEMARRAGE.
     //
     // Le releve physique du 12 septembre 2026 disait `LINK_DOWN` une fois, a

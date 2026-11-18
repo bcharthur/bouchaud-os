@@ -487,3 +487,470 @@ fn les_poignees_de_main_alimentent_la_sonde_reseau() {
     let (_, _, min5, max5, moyen5) = stats_poignee();
     assert_eq!((min4, max4, moyen4), (min5, max5, moyen5));
 }
+
+// ===========================================================================
+// BOUCHAUD_TCP_SOCKETS_FIABLES_V1 -- le consentement YouTube de quatre minutes
+// ===========================================================================
+//
+// Journal WHPX du 18/11 : trois POST partis sur une connexion HTTP/2 reutilisee
+// vers www.youtube.com ne sont jamais arrives. Google a ferme la connexion a
+// l'echeance d'inactivite (240 s depuis la derniere activite qu'IL avait vue),
+// et la sauvegarde du consentement, qui attendait le premier POST, est partie
+// seulement apres.
+//
+// Cause : `TcpConn::send`, le TCP des sockets d'anneau 3, n'avait AUCUNE file
+// d'emission. Quand l'entree ARP de la passerelle avait expire, la trame ne
+// partait pas -- `send_ip_immediat` rendait `false`, ignore -- et le numero de
+// sequence avancait quand meme. Le pair attendait l'octet manquant pour
+// toujours.
+//
+// Ces cas rejouent l'incident sur un modele de lien et de recepteur dont le
+// temps est un parametre. Le recepteur est celui d'un TCP ordinaire (SLIRP) :
+// il range dans l'ordre, met de cote ce qui arrive en avance, et acquitte
+// cumulativement par des ACK PURS.
+
+use retransmission::Renvoi;
+
+/// Le recepteur d'en face : reassemble, et rend l'ACK cumulatif qu'il enverrait.
+struct Recepteur {
+    rcv_nxt: u32,
+    recu: Vec<u8>,
+    en_avance: Vec<(u32, Vec<u8>)>,
+}
+
+impl Recepteur {
+    fn neuf(isn: u32) -> Self {
+        Self { rcv_nxt: isn, recu: Vec::new(), en_avance: Vec::new() }
+    }
+
+    fn recoit(&mut self, seq: u32, charge: &[u8]) -> u32 {
+        if seq_avant(seq, self.rcv_nxt) {
+            // Doublon (copie retransmise d'un segment deja recu) : la partie
+            // deja livree est ignoree, jamais livree deux fois.
+            let deja = self.rcv_nxt.wrapping_sub(seq) as usize;
+            if deja >= charge.len() {
+                return self.rcv_nxt;
+            }
+            return self.recoit(self.rcv_nxt, &charge[deja..]);
+        }
+        if seq != self.rcv_nxt {
+            if !self.en_avance.iter().any(|(s, _)| *s == seq) {
+                self.en_avance.push((seq, charge.to_vec()));
+            }
+            return self.rcv_nxt;
+        }
+        self.recu.extend_from_slice(charge);
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(charge.len() as u32);
+        while let Some(i) = self.en_avance.iter().position(|(s, _)| *s == self.rcv_nxt) {
+            let (_, suite) = self.en_avance.remove(i);
+            self.recu.extend_from_slice(&suite);
+            self.rcv_nxt = self.rcv_nxt.wrapping_add(suite.len() as u32);
+        }
+        self.rcv_nxt
+    }
+}
+
+/// Le corps d'une requete de `n` octets, reconnaissable octet par octet.
+fn corps(n: usize, graine: u8) -> Vec<u8> {
+    (0..n).map(|i| b'a' + ((i * 7 + graine as usize * 13) % 26) as u8).collect()
+}
+
+/// Emet `donnees` en segments de 1400 octets, comme `TcpConn::envoie`. Le
+/// premier segment de la rafale ne part PAS si `arp_expire` : c'est exactement
+/// ce que `send_ip_immediat` fait sur un cache ARP vide.
+fn emet_requete(
+    e: &mut Emission,
+    pair: &mut Recepteur,
+    seq: &mut u32,
+    donnees: &[u8],
+    maintenant: u64,
+    arp_expire: bool,
+) -> Vec<u32> {
+    let mut acks = Vec::new();
+    for (rang, morceau) in donnees.chunks(1400).enumerate() {
+        e.enregistre(*seq, morceau, false, maintenant).expect("la file a de la place");
+        let parti = !(arp_expire && rang == 0);
+        if parti {
+            acks.push(pair.recoit(*seq, morceau));
+        }
+        *seq = seq.wrapping_add(morceau.len() as u32);
+    }
+    acks
+}
+
+/// LE CAS DE L'INCIDENT. Une requete passe, 65 s de silence, puis une requete
+/// de trois segments dont le premier ne part pas.
+#[test]
+fn incident_youtube_un_segment_non_parti_est_renvoye() {
+    let mut e = emission();
+    let mut pair = Recepteur::neuf(ISN);
+    let mut seq = ISN;
+
+    // E1 : passe, et donne un echantillon de RTT de 12 ms.
+    let e1 = corps(200, 1);
+    for ack in emet_requete(&mut e, &mut pair, &mut seq, &e1, 0, false) {
+        e.acquitte_segment(ack, false, 12);
+    }
+    assert_eq!(e.en_vol(), 0, "E1 est acquittee");
+
+    // E2 apres 65 s : l'ARP a expire, le premier segment reste a quai.
+    let t0 = 65_000u64;
+    let e2 = corps(4000, 2);
+    let acks = emet_requete(&mut e, &mut pair, &mut seq, &e2, t0, true);
+    assert_eq!(pair.recu.len(), 200, "le pair n'a RIEN livre de E2 : il lui manque le debut");
+    // Le pair re-ACKe le trou par des ACK purs : deux doublons, pas trois.
+    for ack in acks {
+        e.acquitte_segment(ack, false, t0 + 12);
+    }
+    assert!(e.retransmission_rapide().is_none(), "deux doublons ne suffisent pas");
+
+    // La pompe tourne toutes les deux millisecondes (`poll`). Au plus tard a
+    // l'echeance du RTO, le segment manquant repart.
+    let mut t = t0;
+    let mut livre_a = None;
+    while t < t0 + 240_000 {
+        t += 2;
+        let mut envois = Vec::new();
+        let bilan = e.renvoie(t, |s, c| { envois.push((s, c.to_vec())); true });
+        assert!(!bilan.abandon);
+        for (s, c) in envois {
+            let ack = pair.recoit(s, &c);
+            e.acquitte_segment(ack, false, t + 12);
+        }
+        if pair.recu.len() == 200 + 4000 {
+            livre_a = Some(t);
+            break;
+        }
+    }
+    let livre_a = livre_a.expect("E2 doit etre livree bien avant l'echeance de 240 s du serveur");
+    assert!(
+        livre_a - t0 <= 1_000,
+        "E2 livree {} ms apres l'envoi : un RTO, pas l'inactivite du serveur",
+        livre_a - t0
+    );
+    assert_eq!(&pair.recu[..200], &e1[..]);
+    assert_eq!(&pair.recu[200..], &e2[..], "flux intact : ni trou, ni doublon, ni decalage");
+    assert_eq!(e.en_vol(), 0, "tout est acquitte");
+}
+
+/// Le temoin de l'ancien chemin : sans file d'emission, le meme scenario ne se
+/// debloque JAMAIS -- c'est le serveur qui finit par fermer.
+#[test]
+fn incident_youtube_sans_renvoi_le_pair_attend_pour_toujours() {
+    let mut e = emission();
+    let mut pair = Recepteur::neuf(ISN);
+    let mut seq = ISN;
+    emet_requete(&mut e, &mut pair, &mut seq, &corps(4000, 2), 65_000, true);
+    // Aucun appel a `renvoie` : c'est ce que faisait `TcpConn::send`.
+    assert_eq!(pair.recu.len(), 0, "rien n'est livre, et rien ne le sera");
+    assert_eq!(e.en_vol(), 3, "trois segments en vol que personne ne renverra");
+}
+
+/// Un segment qui PORTE DES DONNEES et repete l'ACK n'est pas un doublon
+/// (RFC 5681, section 2). Le compter ferait retransmettre a tort, a chaque
+/// reponse de plus de trois segments -- c'est-a-dire a chaque page.
+#[test]
+fn un_segment_de_donnees_qui_repete_l_ack_n_est_pas_un_doublon() {
+    let mut e = emission();
+    e.enregistre(ISN, b"GET / HTTP/1.1\r\n\r\n", false, 0).unwrap();
+    for t in 0..5u64 {
+        e.acquitte_segment(ISN, true, 10 + t);
+    }
+    assert!(e.retransmission_rapide().is_none(), "une reponse en cinq segments n'est pas une perte");
+
+    for t in 0..3u64 {
+        e.acquitte_segment(ISN, false, 20 + t);
+    }
+    assert!(e.retransmission_rapide().is_some(), "trois ACK PURS dupliques, si");
+}
+
+/// Un ACK qui porte des donnees ET avance la fenetre acquitte bel et bien.
+#[test]
+fn un_segment_de_donnees_qui_avance_l_ack_acquitte() {
+    let mut e = emission();
+    e.enregistre(ISN, b"abcd", false, 0).unwrap();
+    assert!(e.acquitte_segment(ISN + 4, true, 9));
+    assert_eq!(e.en_vol(), 0);
+}
+
+/// Plusieurs segments expires ensemble : tous repartent, DANS L'ORDRE, et le
+/// RTO ne double qu'une fois. Le doubler par segment ferait passer trois pertes
+/// d'une seconde a huit.
+#[test]
+fn une_expiration_groupee_double_le_rto_une_seule_fois() {
+    let mut e = emission();
+    // Enregistres dans le desordre de la file : l'ordre d'emission doit
+    // suivre les numeros de sequence, pas les indices.
+    e.enregistre(ISN + 6, b"ccc", false, 0).unwrap();
+    e.enregistre(ISN, b"aaa", false, 0).unwrap();
+    e.enregistre(ISN + 3, b"bbb", false, 0).unwrap();
+
+    let mut ordre = Vec::new();
+    let bilan: Renvoi = e.renvoie(RTO_INITIAL_MS, |s, _| { ordre.push(s); true });
+    assert_eq!(ordre, vec![ISN, ISN + 3, ISN + 6]);
+    assert_eq!(bilan.renvoyes, 3);
+    assert_eq!(e.rto_ms(), RTO_INITIAL_MS * 2, "un seul doublement pour une seule expiration");
+    assert_eq!(e.segments_retransmis, 3);
+
+    // Rien avant la nouvelle echeance.
+    let mut rien = 0;
+    e.renvoie(RTO_INITIAL_MS + 1, |_, _| { rien += 1; true });
+    assert_eq!(rien, 0);
+}
+
+/// La retransmission rapide passe par `renvoie`, sans doubler le RTO : le pair
+/// recoit, il ne s'agit pas d'une congestion.
+#[test]
+fn renvoie_sert_la_retransmission_rapide_sans_repli() {
+    let mut e = emission();
+    e.enregistre(ISN, b"aaaa", false, 0).unwrap();
+    e.enregistre(ISN + 4, b"bbbb", false, 0).unwrap();
+    for t in 0..3u64 {
+        e.acquitte_segment(ISN, false, 5 + t);
+    }
+    let mut renvoyes = Vec::new();
+    let bilan = e.renvoie(10, |s, _| { renvoyes.push(s); true });
+    assert!(bilan.rapide);
+    assert_eq!(renvoyes, vec![ISN], "seul le trou repart");
+    assert_eq!(e.rto_ms(), RTO_INITIAL_MS);
+}
+
+/// Un pair disparu : `renvoie` finit par le dire, au lieu d'insister sans fin.
+#[test]
+fn renvoie_signale_l_abandon() {
+    let mut e = emission();
+    e.enregistre(ISN, b"x", false, 0).unwrap();
+    let mut t = 0u64;
+    let mut abandon = false;
+    for _ in 0..(RETRANSMISSIONS_MAX + 2) {
+        t += RTO_MAX_MS;
+        if e.renvoie(t, |_, _| true).abandon {
+            abandon = true;
+            break;
+        }
+    }
+    assert!(abandon, "apres {RETRANSMISSIONS_MAX} essais la connexion est perdue");
+}
+
+// ---------------------------------------------------------------------------
+// QUALIFICATION : pertes dans les deux sens, non-duplication, temporisation,
+// fin de connexion. Toujours sur le modele : temps et pertes sont des
+// parametres, donc chaque echec se rejoue a l'identique.
+// ---------------------------------------------------------------------------
+
+/// Generateur pseudo-aleatoire a graine fixe (xorshift) : des pertes
+/// « aleatoires » qui se rejouent a l'identique.
+struct Alea(u64);
+impl Alea {
+    fn tire(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn perd(&mut self, pour_mille: u64) -> bool {
+        self.tire() % 1000 < pour_mille
+    }
+}
+
+/// Le pair a RECU, mais son ACK s'est perdu : on renvoie une copie. Il doit
+/// l'ignorer -- le flux livre ne contient l'octet qu'une fois.
+#[test]
+fn un_ack_perdu_fait_renvoyer_une_copie_que_le_pair_ignore() {
+    let mut e = emission();
+    let mut pair = Recepteur::neuf(ISN);
+    let donnees = corps(1000, 4);
+    e.enregistre(ISN, &donnees, false, 0).unwrap();
+    let _ack_perdu = pair.recoit(ISN, &donnees);
+    assert_eq!(pair.recu.len(), 1000);
+
+    let mut copies = 0;
+    let mut t = 0u64;
+    while !e.vide() && t < 10_000 {
+        t += 2;
+        let mut envois = Vec::new();
+        e.renvoie(t, |s, c| { envois.push((s, c.to_vec())); true });
+        for (s, c) in envois {
+            copies += 1;
+            let ack = pair.recoit(s, &c);
+            e.acquitte_segment(ack, false, t + 5);
+        }
+    }
+    assert_eq!(copies, 1, "une seule copie, a l'echeance du RTO");
+    assert!(e.vide(), "l'ACK de la copie libere la file");
+    assert_eq!(pair.recu, donnees, "le pair n'a rien livre deux fois");
+}
+
+/// Gros transfert sur un lien qui perd dans LES DEUX SENS (donnees ET ACK),
+/// avec une file bornee a SEGMENTS_MAX comme dans `TcpConn::ecrit`. Plusieurs
+/// graines : le flux livre doit etre exactement le flux emis, et tout doit
+/// finir acquitte, sans abandon.
+#[test]
+fn transfert_avec_pertes_dans_les_deux_sens_livre_le_flux_exact() {
+    let mut pertes_totales = 0u64;
+    for graine in [0x9e3779b97f4a7c15u64, 7, 1234567, 0xdeadbeef, 42] {
+        for pour_mille in [20u64, 100] {
+            let mut alea = Alea(graine);
+            let mut e = emission();
+            let mut pair = Recepteur::neuf(ISN);
+            let donnees = corps(200_000, (graine % 26) as u8);
+            let mut seq = ISN;
+            let mut off = 0usize;
+            let mut t = 0u64;
+            let mut acks_en_vol: Vec<(u64, u32)> = Vec::new(); // (arrivee, ack)
+            let rtt = 10u64;
+            let mut pertes_donnees = 0u64;
+            while (off < donnees.len() || !e.vide()) && t < 3_600_000 {
+                t += 2;
+                // Les ACK arrives.
+                acks_en_vol.retain(|&(arrivee, ack)| {
+                    if arrivee <= t { e.acquitte_segment(ack, false, t); false } else { true }
+                });
+                // Emettre ce que la file accepte.
+                while off < donnees.len() && e.a_de_la_place() {
+                    let fin = (off + 1400).min(donnees.len());
+                    let morceau = &donnees[off..fin];
+                    e.enregistre(seq, morceau, false, t).unwrap();
+                    if !alea.perd(pour_mille) {
+                        let ack = pair.recoit(seq, morceau);
+                        if !alea.perd(pour_mille) { acks_en_vol.push((t + rtt, ack)); }
+                    } else {
+                        pertes_donnees += 1;
+                    }
+                    seq = seq.wrapping_add(morceau.len() as u32);
+                    off = fin;
+                }
+                // Renvois.
+                let mut envois = Vec::new();
+                let bilan = e.renvoie(t, |s, c| { envois.push((s, c.to_vec())); true });
+                assert!(!bilan.abandon, "graine {graine:#x} perte {pour_mille}/1000 : abandon a tort");
+                for (s, c) in envois {
+                    if !alea.perd(pour_mille) {
+                        let ack = pair.recoit(s, &c);
+                        if !alea.perd(pour_mille) { acks_en_vol.push((t + rtt, ack)); }
+                    }
+                }
+            }
+            assert_eq!(pair.recu.len(), donnees.len(), "graine {graine:#x} perte {pour_mille}/1000 : flux incomplet");
+            assert!(pair.recu == donnees, "graine {graine:#x} perte {pour_mille}/1000 : flux corrompu ou duplique");
+            assert!(e.vide(), "graine {graine:#x} : tout est acquitte");
+            eprintln!("graine={graine:#x} perte={pour_mille}/1000 segments_perdus={pertes_donnees} renvois={} fin_ms={t}", e.segments_retransmis);
+            assert!(e.segments_retransmis >= pertes_donnees, "chaque segment perdu a ete renvoye au moins une fois");
+            assert!(t < 60_000, "graine {graine:#x} perte {pour_mille}/1000 : 200 Ko en {t} ms");
+            pertes_totales += pertes_donnees;
+        }
+    }
+    assert!(pertes_totales >= 20, "les graines exercent bien des pertes ({pertes_totales})");
+}
+
+/// Le RTO double sur une perte, puis REVIENT a la mesure des qu'un segment
+/// non retransmis est acquitte : une perte isolee ne laisse pas la connexion
+/// lente pour toujours.
+#[test]
+fn le_rto_revient_a_la_mesure_apres_une_perte() {
+    let mut e = emission();
+    e.enregistre(ISN, b"aaaa", false, 0).unwrap();
+    e.acquitte_segment(ISN + 4, false, 12);
+    let rto_mesure = e.rto_ms();
+    assert_eq!(rto_mesure, RTO_MIN_MS, "RTT de 12 ms : RTO au plancher");
+
+    e.enregistre(ISN + 4, b"bbbb", false, 100).unwrap();
+    e.renvoie(100 + rto_mesure, |_, _| true);
+    assert_eq!(e.rto_ms(), rto_mesure * 2, "la perte double le RTO");
+    e.acquitte_segment(ISN + 8, false, 100 + rto_mesure + 12);
+
+    // Le segment suivant, lui, n'est pas retransmis : son echantillon compte.
+    e.enregistre(ISN + 8, b"cccc", false, 1_000).unwrap();
+    e.acquitte_segment(ISN + 12, false, 1_012);
+    assert_eq!(e.rto_ms(), RTO_MIN_MS, "le RTO est revenu a la mesure");
+}
+
+/// Pair disparu : l'abandon arrive en temps BORNE. Une application qui
+/// attend sur `recv` doit apprendre `ETIMEDOUT`, pas rester figee.
+#[test]
+fn un_pair_disparu_est_abandonne_en_temps_borne() {
+    let mut e = emission();
+    e.enregistre(ISN, b"POST", false, 0).unwrap();
+    let mut t = 0u64;
+    let mut abandon_a = None;
+    while t < 3_600_000 {
+        t += 2;
+        if e.renvoie(t, |_, _| true).abandon {
+            abandon_a = Some(t);
+            break;
+        }
+    }
+    let abandon_a = abandon_a.expect("le pair muet finit par etre abandonne");
+    // RTO initial 1 s, double a chaque essai, plafonne a RTO_MAX_MS :
+    // 1+2+4+8+16+32+60+60+60 s = 243 s au plus.
+    assert!(abandon_a <= 250_000, "abandon apres {} ms", abandon_a);
+    assert!(abandon_a >= 60_000, "pas d'abandon premature : {} ms", abandon_a);
+}
+
+/// Un FIN du pair n'acquitte pas des donnees qu'il n'a pas recues : ce qui
+/// est en vol reste a renvoyer jusqu'a l'ACK.
+#[test]
+fn un_ack_qui_n_avance_pas_ne_libere_rien() {
+    let mut e = emission();
+    e.enregistre(ISN, b"aaaa", false, 0).unwrap();
+    e.enregistre(ISN + 4, b"bbbb", false, 0).unwrap();
+    // Le pair acquitte le premier seulement.
+    e.acquitte_segment(ISN + 4, true, 10);
+    assert_eq!(e.en_vol(), 1, "le second reste en vol");
+    let mut renvoye = Vec::new();
+    e.renvoie(RTO_INITIAL_MS + 100, |s, _| { renvoye.push(s); true });
+    assert_eq!(renvoye, vec![ISN + 4]);
+}
+
+// ---------------------------------------------------------------------------
+// Revue #338 (Codex) : deux bornes que `renvoie` ne tenait pas.
+// ---------------------------------------------------------------------------
+
+/// Des ACK dupliques entretenus ne doivent pas faire renvoyer le meme segment
+/// indefiniment : la retransmission rapide respecte RETRANSMISSIONS_MAX, et la
+/// connexion finit abandonnee (ETIMEDOUT) comme sur le chemin du RTO.
+#[test]
+fn des_ack_dupliques_entretenus_n_empechent_pas_l_abandon() {
+    let mut e = emission();
+    e.enregistre(ISN, b"trou", false, 0).unwrap();
+    let mut t = 0u64;
+    let mut abandon = false;
+    let mut renvois = 0u32;
+    for _ in 0..200 {
+        t += 100;
+        for k in 0..3u64 {
+            e.acquitte_segment(ISN, false, t + k);
+        }
+        let bilan = e.renvoie(t + 3, |_, _| true);
+        renvois += bilan.renvoyes;
+        if bilan.abandon {
+            abandon = true;
+            break;
+        }
+    }
+    assert!(abandon, "abandon attendu, {renvois} renvois sans fin");
+    assert!(renvois <= RETRANSMISSIONS_MAX, "{renvois} renvois > {RETRANSMISSIONS_MAX}");
+}
+
+/// Une volee emise a quelques millisecondes d'ecart expire en plusieurs
+/// passes de pompe. Le RTO ne doit doubler qu'une fois pour cet episode, pas
+/// une fois par segment (neuf segments a 2 ms : 1 s -> 60 s en 16 ms).
+#[test]
+fn une_volee_echelonnee_ne_double_le_rto_qu_une_fois() {
+    let mut e = emission();
+    for i in 0..9u32 {
+        e.enregistre(ISN + i * 10, b"0123456789", false, (i as u64) * 2).unwrap();
+    }
+    let mut t = RTO_INITIAL_MS;
+    let mut renvoyes = 0u32;
+    while t < RTO_INITIAL_MS + 20 {
+        renvoyes += e.renvoie(t, |_, _| true).renvoyes;
+        t += 2;
+    }
+    assert!(renvoyes >= 1, "l'expiration a bien eu lieu");
+    assert_eq!(e.rto_ms(), RTO_INITIAL_MS * 2, "un episode de perte, un seul doublement");
+    // Et toute la volee est rearmee ensemble : plus rien avant la nouvelle echeance.
+    let mut avant = 0u32;
+    e.renvoie(t + RTO_INITIAL_MS * 2 - 50, |_, _| { avant += 1; true });
+    assert_eq!(avant, 0, "la volee entiere attend la meme echeance");
+}

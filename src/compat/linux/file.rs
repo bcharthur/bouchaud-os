@@ -2967,6 +2967,10 @@ fn writable(fd: i32) -> bool {
             let canal = outbox.lock();
             canal.lecteurs == 0 || canal.place() >= crate::kernel::fd::PIPE_BUF
         }
+        // BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : la file d'emission TCP est
+        // bornee. Annoncer POLLOUT quand elle est pleine ferait tourner une
+        // boucle d'evenements entre POLLOUT et EAGAIN.
+        FdKind::Socket(state) => crate::kernel::abi::net::socket_inscriptible(&state),
         // Les autres n'ont pas de tampon borne : ils acceptent toujours.
         _ => true,
     }

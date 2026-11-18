@@ -12,6 +12,17 @@
 //! la requete y sont enregistres, et sont RENVOYES quand ils expirent -- avant,
 //! un `GET` perdu faisait attendre les trente secondes du delai d'inactivite.
 //!
+//! BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : cela ne valait que pour `fetch`. Le TCP
+//! des sockets d'anneau 3 -- `TcpConn`, donc Ladybird -- n'avait AUCUNE file :
+//! une trame de donnees que `send_ip_immediat` ne pouvait pas emettre (entree
+//! ARP de la passerelle expiree, anneau plein) etait perdue sans trace, le
+//! numero de sequence avancait quand meme, et le pair attendait l'octet
+//! manquant jusqu'a fermer la connexion. Consentement YouTube, 18/11 : trois
+//! POST figes quatre minutes, debloques par l'echeance d'inactivite de Google.
+//! `TcpConn` enregistre desormais chaque segment AVANT de l'emettre, traite les
+//! ACK dans `pump` et renvoie a l'echeance ou sur trois ACK purs dupliques.
+//! Preuve : `tools/net/verifie-tcp-perte.sh` (rouge avant, vert apres).
+//!
 //! La seconde moitie reste vraie : il n'y a toujours pas de controle de
 //! congestion. `cwnd` demande de decider quand REDUIRE le debit, et cette
 //! decision se prend sur des mesures qu'on n'a pas encore ; la file d'emission
@@ -434,7 +445,21 @@ pub struct TcpConn {
     pub closed: bool,
     pub rst_seen: bool,
     pub fin_seen: bool,
+    /// BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : les segments de donnees envoyes et
+    /// pas encore acquittes. Sans elle, une trame qui ne partait pas --
+    /// entree ARP expiree, anneau plein -- etait perdue SANS TRACE et le
+    /// numero de sequence avancait quand meme : le pair attendait l'octet
+    /// manquant jusqu'a fermer la connexion. C'est le consentement YouTube
+    /// bloque quatre minutes du 18/11.
+    emission: Emission,
+    /// La connexion a ete abandonnee : un segment n'a jamais ete acquitte
+    /// apres `RETRANSMISSIONS_MAX` renvois.
+    pub abandonnee: bool,
 }
+
+/// Duree pendant laquelle un emetteur qui PEUT attendre (la poignee TLS du
+/// noyau) patiente sans progres quand la file d'emission est pleine.
+const ATTENTE_FILE_PLEINE_MS: u64 = 5_000;
 
 impl TcpConn {
     /// Ouvre une connexion (poignee SYN/SYN-ACK/ACK).
@@ -522,24 +547,93 @@ impl TcpConn {
         let a = build(&mut seg, &dst, sport, port, seq, ack, ACK, WINDOW, &[]);
         net::send_ip(dst, 6, &seg[..a]);
 
-        Some(TcpConn { dst, sport, dport: port, seq, ack, rx: Vec::new(), ooo: Vec::new(), peer_fin: false, closed: false, rst_seen: false, fin_seen: false })
+        Some(TcpConn {
+            dst, sport, dport: port, seq, ack, rx: Vec::new(), ooo: Vec::new(),
+            peer_fin: false, closed: false, rst_seen: false, fin_seen: false,
+            emission: Emission::neuve(seq), abandonnee: false,
+        })
     }
 
-    /// Envoie des donnees (segmente si necessaire).
-    pub fn send(&mut self, data: &[u8]) -> bool {
-        if self.closed { return false; }
+    /// Emet un segment de donnees deja enregistre dans la file. Rend `false`
+    /// si la trame n'est pas partie ; le segment reste alors en file et
+    /// repartira a son echeance.
+    fn emet_donnees(&self, seq: u32, charge: &[u8]) -> bool {
         let mut seg = [0u8; 1600];
+        let l = build(&mut seg, &self.dst, self.sport, self.dport, seq, self.ack, PSH | ACK, WINDOW, charge);
+        net::send_ip_immediat(self.dst, 6, &seg[..l])
+    }
+
+    /// Met un morceau en file PUIS l'emet. L'ordre compte : un segment emis
+    /// sans etre enregistre ne serait jamais renvoye.
+    ///
+    /// Rend `false` si la file est pleine ; rien n'a alors ete consomme.
+    fn enfile_et_emet(&mut self, charge: &[u8]) -> bool {
+        let maintenant = crate::kernel::timer::monotonic_ms();
+        if self.emission.enregistre(self.seq, charge, false, maintenant).is_none() {
+            return false;
+        }
+        if !self.emet_donnees(self.seq, charge) {
+            // L'ancien chemin s'arretait la : perte silencieuse. Le segment
+            // est en file, il repartira -- et on le compte.
+            retransmission::note_socket_non_parti();
+        }
+        self.seq = self.seq.wrapping_add(charge.len() as u32);
+        true
+    }
+
+    /// Envoie ce qui tient dans la file d'emission, SANS JAMAIS ATTENDRE.
+    ///
+    /// Pour les sockets : l'appelant tient le verrou de la socket et ne peut
+    /// pas dormir. Rend le nombre d'octets acceptes -- tous, sauf quand 64
+    /// segments sont deja en vol sans acquittement ; c'est alors une ecriture
+    /// partielle, et `writable` cesse d'annoncer `POLLOUT`.
+    pub fn ecrit(&mut self, data: &[u8]) -> usize {
+        if self.closed { return 0; }
         let mss = 1400usize;
         let mut off = 0;
         while off < data.len() {
+            if !self.emission.a_de_la_place() {
+                // Un passage de pompe traite les ACK deja arrives.
+                self.pump(200_000);
+                if !self.emission.a_de_la_place() {
+                    retransmission::note_socket_file_pleine();
+                    break;
+                }
+            }
             let end = (off + mss).min(data.len());
-            let chunk = &data[off..end];
-            let l = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, PSH | ACK, WINDOW, chunk);
-            net::send_ip_immediat(self.dst, 6, &seg[..l]);
-            self.seq = self.seq.wrapping_add(chunk.len() as u32);
+            if !self.enfile_et_emet(&data[off..end]) { break; }
             off = end;
             // Petite fenetre de drainage des ACK/segments entrants.
             self.pump(200_000);
+        }
+        off
+    }
+
+    /// Peut-on ecrire sans que tout reste en attente ?
+    pub fn peut_ecrire(&self) -> bool {
+        self.closed || self.emission.a_de_la_place()
+    }
+
+    /// Envoie des donnees (segmente si necessaire), en attendant de la place
+    /// dans la file si besoin. Reserve aux appelants qui PEUVENT dormir : la
+    /// poignee TLS du noyau, qui possede sa `TcpConn` et ne tient aucun verrou.
+    pub fn send(&mut self, data: &[u8]) -> bool {
+        if self.closed { return false; }
+        let mut off = 0;
+        let mut progres = crate::kernel::timer::monotonic_ms();
+        while off < data.len() {
+            let n = self.ecrit(&data[off..]);
+            off += n;
+            if off >= data.len() { break; }
+            if self.closed { return false; }
+            let maintenant = crate::kernel::timer::monotonic_ms();
+            if n != 0 {
+                progres = maintenant;
+            } else if maintenant.saturating_sub(progres) >= ATTENTE_FILE_PLEINE_MS {
+                return false;
+            } else {
+                net::attente_cedante();
+            }
         }
         true
     }
@@ -549,15 +643,14 @@ impl TcpConn {
     /// applicatif sans laisser un gros trou temporel cote client.
     pub fn send_no_pump(&mut self, data: &[u8]) -> bool {
         if self.closed { return false; }
-        let mut seg = [0u8; 1600];
         let mss = 1400usize;
         let mut off = 0;
         while off < data.len() {
             let end = (off + mss).min(data.len());
-            let chunk = &data[off..end];
-            let l = build(&mut seg, &self.dst, self.sport, self.dport, self.seq, self.ack, PSH | ACK, WINDOW, chunk);
-            net::send_ip_immediat(self.dst, 6, &seg[..l]);
-            self.seq = self.seq.wrapping_add(chunk.len() as u32);
+            if !self.enfile_et_emet(&data[off..end]) {
+                // File pleine : le chemin qui sait attendre prend le reste.
+                return self.send(&data[off..]);
+            }
             off = end;
         }
         true
@@ -594,6 +687,7 @@ impl TcpConn {
         // suite les ferait reprendre au tour suivant par ce meme appel, qui les
         // redeposerait, indefiniment. Un differe borne evite ce va-et-vient.
         let mut differes: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        let maintenant = crate::kernel::timer::monotonic_ms();
 
         for _ in 0..budget {
             // Anneau vide : insister ne fait rien arriver.
@@ -612,6 +706,11 @@ impl TcpConn {
                 break;
             }
             let plen = n - h.data_off;
+            // L'ACK du pair libere la file d'emission et mesure le RTT. Un
+            // segment de donnees qui le repete n'est pas un doublon.
+            if h.flags & ACK != 0 {
+                self.emission.acquitte_segment(h.ack, plen > 0, maintenant);
+            }
             if plen > 0 {
                 self.accept_segment(h.seq, &rb[h.data_off..n]);
                 // ACK cumulatif. Si le segment etait hors sequence, on re-ACK
@@ -630,6 +729,31 @@ impl TcpConn {
 
         for segment in differes {
             net::depose_en_attente(6, self.dst, &segment);
+        }
+
+        self.renvoie_si_besoin(maintenant);
+    }
+
+    /// Renvoie ce que la file reclame : trou signale par trois ACK purs, ou
+    /// echeance du RTO. Appele a chaque pompe -- donc toutes les deux
+    /// millisecondes tant que l'application attend sur `poll`.
+    fn renvoie_si_besoin(&mut self, maintenant: u64) {
+        if self.emission.vide() || self.rst_seen { return; }
+        let (dst, sport, dport, ack) = (self.dst, self.sport, self.dport, self.ack);
+        let bilan = self.emission.renvoie(maintenant, |seq, charge| {
+            let mut seg = [0u8; 1600];
+            let l = build(&mut seg, &dst, sport, dport, seq, ack, PSH | ACK, WINDOW, charge);
+            net::send_ip_immediat(dst, 6, &seg[..l])
+        });
+        if bilan.renvoyes != 0 || bilan.abandon {
+            retransmission::note_socket_renvoi(&bilan);
+        }
+        if bilan.abandon {
+            // Le pair ne repond plus : le dire, plutot que d'attendre en
+            // silence. Les lectures rendront la fin du flux.
+            self.abandonnee = true;
+            self.closed = true;
+            self.peer_fin = true;
         }
     }
 
