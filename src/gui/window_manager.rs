@@ -663,6 +663,10 @@ fn boucle() {
         }
     }
     for kind in window::fenetres_demandees_au_demarrage() {
+        if kind == window::KIND_CALCULATRICE {
+            lance_calculatrice(&mut wins, home, &mut degats);
+            continue;
+        }
         let fenetre = make_app(kind, home, &mut spawn_n);
         ouvre_fenetre(&mut wins, fenetre, &mut degats);
     }
@@ -1074,6 +1078,8 @@ fn boucle() {
                                 lance_navigateur(&mut wins, home, &mut degats);
                             } else if kind == window::KIND_DOOM {
                                 lance_doom(&mut wins, home, &mut degats);
+                            } else if kind == window::KIND_CALCULATRICE {
+                                lance_calculatrice(&mut wins, home, &mut degats);
                             } else {
                                 let fenetre = make_app(kind, home, &mut spawn_n);
                                 ouvre_fenetre(&mut wins, fenetre, &mut degats);
@@ -2534,11 +2540,38 @@ fn lance_navigateur(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     }
 }
 
+/// BOUCHAUD_CALCULATRICE_RING3_V1 : la Calculatrice n'est plus dessinee ni
+/// evaluee par le noyau (`gui/apps/calculator.rs`, supprime) ; c'est
+/// l'application ring 3 `/bin/calculatrice-gui`, un client du protocole GUI
+/// comme DOOM. Deja ouverte : elle revient au premier plan. Binaire absent :
+/// l'echec est journalise, le bureau continue.
+pub(crate) const CHEMIN_CALCULATRICE: &str = "/bin/calculatrice-gui";
+
+fn lance_calculatrice(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
+    if let Some(index) = wins.iter().position(|w| {
+        matches!(w.app, App::Application { .. }) && w.window.title == "Calculatrice"
+    }) {
+        let w = wins.remove(index);
+        ouvre_fenetre(wins, w, degats);
+        if let Some(w) = wins.last_mut() {
+            let id = w.id;
+            route_window_command(w, crate::gui::windowing::WindowCommand::Restore(id));
+        }
+        return;
+    }
+    lance_application_zone(wins, cwd, degats, CHEMIN_CALCULATRICE, "Calculatrice", (320, 420));
+}
+
 /// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : lance n'importe quel programme ring 3
 /// du protocole GUI dans une fenetre standard (`BO_AUTOSTART_APP=/chemin`).
 fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str) {
     let titre = chemin.rsplit('/').next().unwrap_or(chemin);
-    let (largeur, hauteur) = (640i32, 400i32);
+    lance_application_zone(wins, cwd, degats, chemin, titre, (640, 400));
+}
+
+fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str,
+                          titre: &str, zone: (i32, i32)) {
+    let (largeur, hauteur) = zone;
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
     let client = match Client::lance(chemin, titre, cwd,
         (largeur as usize, hauteur as usize), window::zone_maximale()) {
@@ -2827,6 +2860,9 @@ fn handle_click(
                     fenetre_ouverte = true;
                 } else if kind == window::KIND_DOOM {
                     lance_doom(wins, home, degats);
+                    fenetre_ouverte = true;
+                } else if kind == window::KIND_CALCULATRICE {
+                    lance_calculatrice(wins, home, degats);
                     fenetre_ouverte = true;
                 } else {
                     let fenetre = make_app(kind, home, spawn_n);

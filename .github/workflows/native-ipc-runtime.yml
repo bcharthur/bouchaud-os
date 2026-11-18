@@ -64,6 +64,12 @@ on:
       - 'src/drivers/input/**'
       - 'userland/services/composited/**'
       - 'tools/ci/banc_bureau_ring3_entrees.py'
+      # BOUCHAUD_BUREAU_UTILISABLE_V1 : dock, vraie application, reprise.
+      - 'userland/apps/**'
+      - 'userland/libs/police/**'
+      - 'tools/ci/banc_bureau_utilisable.py'
+      - 'tools/ci/banc_calculatrice_bureau_noyau.py'
+      - 'src/gui/**'
       - '.github/workflows/native-ipc-runtime.yml'
   # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
   # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
@@ -130,6 +136,12 @@ on:
       - 'src/drivers/input/**'
       - 'userland/services/composited/**'
       - 'tools/ci/banc_bureau_ring3_entrees.py'
+      # BOUCHAUD_BUREAU_UTILISABLE_V1 : dock, vraie application, reprise.
+      - 'userland/apps/**'
+      - 'userland/libs/police/**'
+      - 'tools/ci/banc_bureau_utilisable.py'
+      - 'tools/ci/banc_calculatrice_bureau_noyau.py'
+      - 'src/gui/**'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
 
@@ -188,8 +200,9 @@ jobs:
     name: native-ipc-runtime
     runs-on: ubuntu-latest
     # 30 min, plus le bureau ring 3 (deux demarrages QEMU, ~3 min sous TCG)
-    # et ses entrees (un demarrage, ~4 min sous TCG).
-    timeout-minutes: 50
+    # et ses entrees (un demarrage, ~4 min sous TCG), et le bureau utilisable
+    # (un demarrage, ~5 min sous TCG).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -243,6 +256,26 @@ jobs:
             --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             --sortie target/bureau-ring3-entrees
 
+      # BOUCHAUD_BUREAU_UTILISABLE_V1 : une image de test complete SANS bureau
+      # noyau. Dock -> la calculatrice (application ring 3) s'ouvre ; calcul a
+      # la souris et au clavier ; deplacer, redimensionner, fermer, rouvrir ;
+      # une autre application plante ; le compositeur plante et le noyau le
+      # relance. Captures PNG dans l'artefact.
+      - name: Bureau ring 3 utilisable -- dock, calculatrice, reprise du compositeur (TCG)
+        run: |
+          python3 tools/ci/banc_bureau_utilisable.py \
+            --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --sortie target/bureau-utilisable
+
+      # BOUCHAUD_CALCULATRICE_RING3_V1 : le BUREAU NOYAU ouvre la Calculatrice
+      # par son chemin reel ; c'est le processus ring 3 /bin/calculatrice-gui
+      # (src/gui/apps/calculator.rs est supprime), et il calcule au clavier.
+      - name: Bureau noyau -- la Calculatrice est l'application ring 3 (TCG)
+        run: |
+          python3 tools/ci/banc_calculatrice_bureau_noyau.py \
+            --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --sortie target/calculatrice-bureau-noyau
+
       # BOUCHAUD_NATIVE_SERVICES_V1 : service ring 3 supervise (spawn natif,
       # crash injecte, hang, budget, arret, fuite de handles) et refus des
       # cycles d'objets natifs. SMP1 et SMP4 sur le MEME noyau.
@@ -271,6 +304,10 @@ jobs:
             target/bureau-ring3/*/serie.log
             target/bureau-ring3/*/*.ppm
             target/bureau-ring3-entrees/serie.log
+            target/bureau-utilisable/serie.log
+            target/bureau-utilisable/*.png
+            target/calculatrice-bureau-noyau/serie.log
+            target/calculatrice-bureau-noyau/*.png
           if-no-files-found: error
           retention-days: 14
 

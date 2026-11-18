@@ -25,6 +25,7 @@ mkdir -p "$OUT"
   -fno-pie \
   -mno-red-zone \
   -ffreestanding \
+  -I ../../libs/police \
   composited-slice.c \
   -o "$OUT/composited-slice.o"
 

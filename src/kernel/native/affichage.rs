@@ -92,17 +92,38 @@ pub const ZONE_FENETRE: (usize, usize) = (640, 400);
 /// Au plus quatre applications confiees au compositeur ring 3.
 pub const CLIENTS_MAX: usize = 4;
 
-/// Une ligne de `CONFIG_BUREAU` : `CHEMIN [LxH] [BO_VAR=VALEUR ...]`
+/// Une ligne de `CONFIG_BUREAU` : `CHEMIN [LxH] [differe] [BO_VAR=VALEUR ...]`
 /// (variables `BO_*` et `BOUCHAUD_*` seulement).
+///
+/// BOUCHAUD_BUREAU_UTILISABLE_V1 : `differe` -- l'application n'est PAS lancee
+/// au demarrage ; elle figure au dock du compositeur, qui la lance a la
+/// demande (`bo_display_relance_client`). Ligne `@dock` : le compositeur
+/// affiche un dock (lanceur) et les titres des fenetres.
 pub struct ClientBureau {
     pub chemin: alloc::string::String,
     pub zone: (usize, usize),
     pub vars: alloc::vec::Vec<alloc::string::String>,
+    pub differe: bool,
+}
+
+/// Nom affiche d'une application : le dernier element du chemin, reduit aux
+/// caracteres sans danger pour une variable d'environnement et une police
+/// minimale (lettres, chiffres, '-', '_'), 20 au plus.
+fn nom_application(chemin: &str) -> alloc::string::String {
+    let base = chemin.rsplit('/').next().unwrap_or("application");
+    // `calculatrice-gui` s'affiche « calculatrice » : le suffixe ne dit rien
+    // a qui regarde le dock.
+    base.strip_suffix("-gui").unwrap_or(base)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(20)
+        .collect()
 }
 
 /// Lit la configuration du bureau ring 3 : les clients, dans l'ordre (le
-/// dernier est au premier plan), et le scenario eventuel (`@scenario NOM`).
-fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::string::String>)> {
+/// dernier est au premier plan), le scenario eventuel (`@scenario NOM`) et le
+/// dock (`@dock`).
+fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::string::String>, bool, bool)> {
     use alloc::string::ToString;
     let texte = {
         let fs = crate::fs::ramfs::fs();
@@ -114,6 +135,8 @@ fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::strin
     };
     let mut clients = alloc::vec::Vec::new();
     let mut scenario = None;
+    let mut dock = false;
+    let mut faute = false;
     for ligne in texte.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         let mut mots = ligne.split_whitespace();
         let Some(premier) = mots.next() else { continue };
@@ -124,13 +147,27 @@ fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::strin
                 .map(|m| m.to_string());
             continue;
         }
+        if premier == "@dock" {
+            dock = true;
+            continue;
+        }
+        if premier == "@faute-compositeur" {
+            // Banc de reprise : le PREMIER compositeur plante sur F12.
+            faute = true;
+            continue;
+        }
         if clients.len() == CLIENTS_MAX {
             crate::serial_println!("BOUCHAUD_BUREAU_RING3_ECHEC raison=trop-de-clients max={}", CLIENTS_MAX);
             break;
         }
         let mut zone = ZONE_FENETRE;
         let mut vars = alloc::vec::Vec::new();
+        let mut differe = false;
         for m in mots {
+            if m == "differe" {
+                differe = true;
+                continue;
+            }
             if let Some((l, h)) = m.split_once('x') {
                 if let (Ok(l), Ok(h)) = (l.parse::<usize>(), h.parse::<usize>()) {
                     if (64..=1920).contains(&l) && (64..=1200).contains(&h) {
@@ -146,9 +183,9 @@ fn config_bureau() -> Option<(alloc::vec::Vec<ClientBureau>, Option<alloc::strin
                 vars.push(m.to_string());
             }
         }
-        clients.push(ClientBureau { chemin: premier.to_string(), zone, vars });
+        clients.push(ClientBureau { chemin: premier.to_string(), zone, vars, differe });
     }
-    if clients.is_empty() { None } else { Some((clients, scenario)) }
+    if clients.is_empty() { None } else { Some((clients, scenario, dock, faute)) }
 }
 
 /// Lance `/bin/composited` avec la capacite d'affichage, s'il est present.
@@ -212,7 +249,7 @@ pub fn relance(args: [u64; 6]) -> Result<u64> {
     let client = {
         let clients = CLIENTS_CONFIGURES.lock();
         let c = clients.get(rang).ok_or_else(|| refuse(Error::InvalidArgument, "relance-rang"))?;
-        ClientBureau { chemin: c.chemin.clone(), zone: c.zone, vars: c.vars.clone() }
+        ClientBureau { chemin: c.chemin.clone(), zone: c.zone, vars: c.vars.clone(), differe: c.differe }
     };
     if RELANCES[rang].fetch_add(1, Ordering::AcqRel) >= RELANCES_MAX {
         RELANCES[rang].fetch_sub(1, Ordering::AcqRel);
@@ -228,18 +265,35 @@ pub fn lance_compositeur() -> Option<u32> {
     use alloc::string::{String, ToString};
     crate::fs::ramfs::fs().resolve(COMPOSITEUR, 0)?;
     let mut fenetres: alloc::vec::Vec<super::fenetre::Fenetre> = alloc::vec::Vec::new();
+    let mut rangs: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
     let mut scenario = None;
-    if let Some((clients, sc)) = config_bureau() {
+    let mut dock = false;
+    let mut noms: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    let mut faute = false;
+    if let Some((clients, sc, dk, ft)) = config_bureau() {
         scenario = sc;
-        let n = clients.len();
+        dock = dk;
+        // La faute volontaire n'est donnee qu'au premier compositeur : celui
+        // qui le remplace doit vivre.
+        faute = ft && REPRISES.load(Ordering::Acquire) == 0;
+        // Le dernier client LANCE au demarrage a le foyer.
+        let dernier = clients.iter().rposition(|c| !c.differe);
         for (i, c) in clients.iter().enumerate() {
-            if let Some(f) = lance_client(c, i, i + 1 == n) {
+            noms.push(nom_application(&c.chemin));
+            if c.differe {
+                crate::serial_println!("BOUCHAUD_BUREAU_RING3_DIFFERE chemin={} rang={}", c.chemin, i);
+                continue;
+            }
+            if let Some(f) = lance_client(c, i, Some(i) == dernier) {
                 fenetres.push(f);
+                rangs.push(i);
             }
         }
         *CLIENTS_CONFIGURES.lock() = clients;
     }
-    let bureau = !fenetres.is_empty();
+    // Avec un dock, le bureau ring 3 vaut meme sans fenetre au demarrage :
+    // les applications s'ouvrent depuis le dock.
+    let bureau = !fenetres.is_empty() || (dock && !noms.is_empty());
     let mode = if bureau { "bureau" } else { "presentation" };
     if bureau {
         BUREAU_RING3.store(true, Ordering::Release);
@@ -261,6 +315,17 @@ pub fn lance_compositeur() -> Option<u32> {
         if !poignees.is_empty() {
             vars.push(alloc::format!("BO_FENETRES={}", poignees.join(",")));
         }
+        if dock {
+            // Rang de configuration de chaque fenetre lancee, noms de TOUTES
+            // les applications configurees (le dock les montre par rang).
+            vars.push(alloc::format!("BO_RANGS={}",
+                rangs.iter().map(|r| alloc::format!("{}", r)).collect::<alloc::vec::Vec<_>>().join(",")));
+            vars.push(alloc::format!("BO_APPS={}", noms.join(",")));
+            vars.push(String::from("BO_BUREAU_DOCK=1"));
+        }
+        if faute {
+            vars.push(String::from("BO_COMPOSITED_FAUTE_F12=1"));
+        }
         if let Some(sc) = scenario.as_ref() {
             vars.push(alloc::format!("BO_BUREAU_SCENARIO={}", sc));
         }
@@ -272,6 +337,10 @@ pub fn lance_compositeur() -> Option<u32> {
                 "BOUCHAUD_COMPOSITEUR_LANCE pid={} capacite=affichage droits={:#x}",
                 pid, DROITS_COMPOSITEUR.0
             );
+            COMPOSITEUR_PID.store(pid, Ordering::Release);
+            if bureau && !SURVEILLANCE.swap(true, Ordering::AcqRel) {
+                crate::kernel::task::spawn_noyau(surveille_compositeur, "compositeur-reprise");
+            }
             Some(pid)
         }
         Err(e) => {
@@ -282,6 +351,44 @@ pub fn lance_compositeur() -> Option<u32> {
             drop(fenetres.take());
             crate::serial_println!("BOUCHAUD_COMPOSITEUR_ECHEC raison={} reservation_ecran=levee", e);
             None
+        }
+    }
+}
+
+// BOUCHAUD_REPRISE_COMPOSITEUR_V1 -- le compositeur ring 3 est un processus
+// comme un autre : il peut mourir. Ses capacites `Fenetre` meurent avec lui
+// (leurs clients sont termines), l'ecran reste reserve au bureau ring 3. Un
+// fil noyau le surveille et le RELANCE, avec les applications non differees
+// et une capacite d'affichage neuve, au plus `REPRISES_MAX` fois : un
+// compositeur qui meurt en boucle ne relance pas des processus sans fin.
+pub const REPRISES_MAX: u32 = 3;
+static REPRISES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static COMPOSITEUR_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SURVEILLANCE: AtomicBool = AtomicBool::new(false);
+
+fn surveille_compositeur() -> ! {
+    loop {
+        crate::kernel::task::sleep_ticks(250);
+        let pid = COMPOSITEUR_PID.load(Ordering::Acquire);
+        if pid == 0 || crate::kernel::task::processus_actif(pid) {
+            continue;
+        }
+        let n = REPRISES.load(Ordering::Acquire);
+        if n >= REPRISES_MAX {
+            crate::serial_println!("BOUCHAUD_COMPOSITEUR_REPRISE_EPUISEE ancien_pid={} reprises={}", pid, n);
+            COMPOSITEUR_PID.store(0, Ordering::Release);
+            continue;
+        }
+        REPRISES.store(n + 1, Ordering::Release);
+        crate::serial_println!("BOUCHAUD_COMPOSITEUR_MORT pid={} code={:?} reprise={}",
+            pid, crate::kernel::task::code_de_sortie(pid), n + 1);
+        match lance_compositeur() {
+            Some(nouveau) => crate::serial_println!(
+                "BOUCHAUD_COMPOSITEUR_REPRISE n={} ancien_pid={} nouveau_pid={}", n + 1, pid, nouveau),
+            None => {
+                crate::serial_println!("BOUCHAUD_COMPOSITEUR_REPRISE_ECHEC n={} ancien_pid={}", n + 1, pid);
+                COMPOSITEUR_PID.store(0, Ordering::Release);
+            }
         }
     }
 }

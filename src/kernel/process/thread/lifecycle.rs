@@ -997,6 +997,11 @@ pub fn pose_priorite_de(pid: u32, priorite: Priorite) {
     }
 }
 
+/// Le processus existe-t-il, et n'est-il pas termine ? (BOUCHAUD_REPRISE_COMPOSITEUR_V1)
+pub fn processus_actif(pid: u32) -> bool {
+    processes().iter().any(|p| p.pid == pid && !p.lifecycle.lock().zombie)
+}
+
 /// Le processus est-il termine, et avec quel code ?
 pub fn code_de_sortie(pid: u32) -> Option<i32> {
     processes().iter().find_map(|p| {

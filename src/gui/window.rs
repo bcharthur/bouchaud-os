@@ -160,13 +160,15 @@ pub(crate) const KIND_NOTES: usize = 9;
 pub(crate) const KIND_INSIGHTS: usize = 10;
 /// DOOM est un client graphique ring 3, independant de Ladybird.
 pub(crate) const KIND_DOOM: usize = 11;
+/// La Calculatrice : application ring 3 (`/bin/calculatrice-gui`), ouverte par
+/// `window_manager::lance_calculatrice`, jamais par `make_app`.
+pub(crate) const KIND_CALCULATRICE: usize = 4;
 
 pub(crate) enum App {
     Services,
     Terminal { sb: Vec<String>, input: String, cwd: usize },
     Files { cur: usize, scroll: i32, selected: Option<usize>, history: crate::gui::apps::file_explorer::History,
         ui: crate::gui::apps::file_explorer::Ui },
-    Calc { expr: String },
     Monitor,
     Rustpad { state: crate::gui::apps::rustpad::RustpadState },
     Notes { state: crate::gui::apps::notes::NotesState },
@@ -499,8 +501,6 @@ pub(crate) fn make_app(kind: usize, home: usize, spawn_n: &mut i32) -> Win {
                 },
                 scroll: 0, selected: None, history: crate::gui::apps::file_explorer::History::new(),
                 ui: crate::gui::apps::file_explorer::Ui::new() }),
-        4 => Win::new("Calculatrice".to_string(), x, y, 220, 300,
-            crate::gui::windowing::WindowFlags::STANDARD, App::Calc { expr: String::new() }),
         5 => Win::new("Rustpad — Hello World".to_string(), x, y, 560, 400,
             crate::gui::windowing::WindowFlags::STANDARD,
             App::Rustpad { state: crate::gui::apps::rustpad::RustpadState::new() }),
