@@ -183,12 +183,13 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             virtio_gpu::soumets_venus(session, &flux).map_or_else(erreur, |()| 0)
         }
         #[cfg(feature = "banc-gpu-venus")]
-        0x8040_42ad => {
-            if !super::fault_in_user_range(arg, virtio_gpu::OCTETS_REPONSE_VENUS, true) {
+        0x8040_42ad | 0x8200_42ad => {
+            let longueur = if request == 0x8040_42ad { 64 } else { virtio_gpu::OCTETS_REPONSE_VENUS };
+            if !super::fault_in_user_range(arg, longueur, true) {
                 return -errno::EFAULT;
             }
             match virtio_gpu::copie_reponse_venus(session) {
-                Ok(octets) if user_write(arg, &octets) => 0,
+                Ok(octets) if user_write(arg, &octets[..longueur]) => 0,
                 Ok(_) => -errno::EFAULT,
                 Err(e) => erreur(e),
             }

@@ -205,7 +205,7 @@ unsafe fn lit_version(f: &mut FileControle, aperture: usize) -> Result<u32, &'st
     gpu3d::lit_version_venus(&reponse).ok_or("reponse-vulkan")
 }
 
-pub const OCTETS_REPONSE_VENUS: usize = 64;
+pub const OCTETS_REPONSE_VENUS: usize = 512;
 
 fn aperture_possedee(p: &Peripherique, session: &Arc<()>) -> Result<usize, ErreurRendu> {
     match p.hostmem_venus.as_ref() {

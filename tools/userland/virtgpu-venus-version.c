@@ -62,13 +62,90 @@ struct drm_execbuffer {
     uint64_t in, out;
 };
 #define DRM_EXECBUFFER _IOWR('d', 0x42, struct drm_execbuffer)
-typedef uint32_t reponse_venus[16];
+typedef uint32_t reponse_venus[128];
 #define LIT_REPONSE _IOR('B', 0xad, reponse_venus)
 
 static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus reponse)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = octets, .commande = (uintptr_t)flux, .fence = -1};
     return ioctl(fd, DRM_EXECBUFFER, &req) || ioctl(fd, LIT_REPONSE, reponse);
+}
+
+static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
+                          uint32_t buffer, uint32_t besoin, uint32_t types)
+{
+    reponse_venus r;
+    uint32_t proprietes[] = {179, 0, 0, 0, 8, 1, appareil, 0, 1, 0, 32, 0, 16, 0};
+    if (execute(fd, proprietes, sizeof(proprietes), r) || r[0] != 8 || r[1] != 1
+        || r[2] || r[3] > 32 || r[4] != 32 || r[5])
+        return 1;
+    uint32_t type = 0;
+    while (type < r[3] && (!(types & (1u << type)) || (r[6 + 2 * type] & 6) != 6))
+        ++type;
+    if (type == r[3]) return 2;
+
+    enum { MEMOIRE = 0x401, QUEUE = 0x402, POOL = 0x403, COMMANDE = 0x404, FENCE = 0x405 };
+    // VkMemoryAllocateInfo, mémoire hôte visible et cohérente.
+    uint32_t alloue[] = {
+        179, 0, 0, 0, 21, 1, device, 0,
+        1, 0, 5, 0, 0, besoin, 0, type, 0, 0, 1, 0, MEMOIRE, 0
+    };
+    if (execute(fd, alloue, sizeof(alloue), r) || r[0] != 21 || r[1] || r[4] != MEMOIRE)
+        return 3;
+    uint32_t lie[] = {179, 0, 0, 0, 28, 1, device, 0, buffer, 0, MEMOIRE, 0, 0, 0};
+    if (execute(fd, lie, sizeof(lie), r) || r[0] != 28 || r[1]) return 4;
+    // GetDeviceQueue2 exige VkDeviceQueueTimelineInfoMESA sur Venus.
+    uint32_t queue[] = {
+        179, 0, 0, 0, 155, 1, device, 0,
+        1, 0, 1000145003, 1, 0, 1000384005, 0, 0, 1, 0, 0, 0,
+        1, 0, QUEUE, 0
+    };
+    if (execute(fd, queue, sizeof(queue), r) || r[0] != 155 || r[1] != 1
+        || r[2] || r[3] != QUEUE) return 5;
+    uint32_t pool[] = {
+        179, 0, 0, 0, 85, 1, device, 0,
+        1, 0, 39, 0, 0, 0, 0, 0, 0, 1, 0, POOL, 0
+    };
+    if (execute(fd, pool, sizeof(pool), r) || r[0] != 85 || r[1] || r[4] != POOL)
+        return 6;
+    uint32_t commande[] = {
+        179, 0, 0, 0, 88, 1, device, 0,
+        1, 0, 40, 0, 0, POOL, 0, 0, 1, 1, 0, COMMANDE, 0
+    };
+    if (execute(fd, commande, sizeof(commande), r) || r[0] != 88 || r[1]
+        || r[2] != 1 || r[3] || r[4] != COMMANDE) return 7;
+    uint32_t debut[] = {
+        179, 0, 0, 0, 90, 1, COMMANDE, 0, 1, 0, 42, 0, 0, 1, 0, 0
+    };
+    if (execute(fd, debut, sizeof(debut), r) || r[0] != 90 || r[1]) return 8;
+    uint32_t remplissage[] = {
+        179, 0, 0, 0, 118, 1, COMMANDE, 0, buffer, 0, 0, 0, 4096, 0, 0x5a1740d3
+    };
+    if (execute(fd, remplissage, sizeof(remplissage), r) || r[0] != 118) return 9;
+    uint32_t fin[] = {179, 0, 0, 0, 91, 1, COMMANDE, 0};
+    if (execute(fd, fin, sizeof(fin), r) || r[0] != 91 || r[1]) return 10;
+    uint32_t cloture[] = {
+        179, 0, 0, 0, 35, 1, device, 0, 1, 0, 8, 0, 0, 0, 0, 0, 1, 0, FENCE, 0
+    };
+    if (execute(fd, cloture, sizeof(cloture), r) || r[0] != 35 || r[1] || r[4] != FENCE)
+        return 11;
+    uint32_t soumet[] = {
+        179, 0, 0, 0, 18, 1, QUEUE, 0, 1, 1, 0,
+        4, 0, 0, 0, 0, 0, 0, 0,           // VkSubmitInfo sans attente
+        1, 1, 0, COMMANDE, 0, 0, 0, 0, FENCE, 0
+    };
+    if (execute(fd, soumet, sizeof(soumet), r) || r[0] != 18 || r[1]) return 12;
+    uint32_t attends[] = {
+        179, 0, 0, 0, 39, 1, device, 0, 1, 1, 0, FENCE, 0, 1, 100000000, 0
+    };
+    if (execute(fd, attends, sizeof(attends), r) || r[0] != 39 || r[1]) return 13;
+    puts("VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096");
+    uint32_t detruit_fence[] = {179, 0, 0, 0, 36, 1, device, 0, FENCE, 0, 0, 0};
+    if (execute(fd, detruit_fence, sizeof(detruit_fence), r) || r[0] != 36) return 14;
+    uint32_t detruit_pool[] = {179, 0, 0, 0, 86, 1, device, 0, POOL, 0, 0, 0};
+    if (execute(fd, detruit_pool, sizeof(detruit_pool), r) || r[0] != 86) return 15;
+    // L'appelant détruit le buffer lié avant de libérer MEMOIRE.
+    return 0;
 }
 
 static int verifie_buffer(int fd, uint32_t appareil)
@@ -107,8 +184,15 @@ static int verifie_buffer(int fd, uint32_t appareil)
     if (execute(fd, besoins, sizeof(besoins), r) || r[0] != 30 || r[1] != 1
         || r[2] || r[3] < 4096 || r[4] || !r[5] || r[6] || !r[7])
         return 4;
+    int fill = remplit_buffer(fd, appareil, device, buffer, r[3], r[7]);
+    if (fill) {
+        printf("VIRTGPU_VENUS_VKFILL_ECHEC etape=%d\n", fill);
+        return 7;
+    }
     uint32_t detruit_buffer[] = {179, 0, 0, 0, 51, 1, device, 0, buffer, 0, 0, 0};
     if (execute(fd, detruit_buffer, sizeof(detruit_buffer), r) || r[0] != 51) return 5;
+    uint32_t libere[] = {179, 0, 0, 0, 22, 1, device, 0, 0x401, 0, 0, 0};
+    if (execute(fd, libere, sizeof(libere), r) || r[0] != 22) return 8;
     uint32_t detruit_device[] = {179, 0, 0, 0, 12, 1, device, 0, 0, 0};
     if (execute(fd, detruit_device, sizeof(detruit_device), r) || r[0] != 12) return 6;
     puts("VIRTGPU_VENUS_VKBUFFER_OK octets=4096");
@@ -126,7 +210,7 @@ static int verifie_instances(int fd)
         // Venus (dont les pointeurs de présence 64 bits) sont sérialisés
         // par l'application, indépendamment du noyau.
         uint32_t creation[] = {
-            178, 0, 1, 0, 0xb107, 0, 0, 64, 0,
+            178, 0, 1, 0, 0xb107, 0, 0, sizeof(reponse_venus), 0,
             0, 1, 1, 0, 1, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 1, 0, handle, 0
         };

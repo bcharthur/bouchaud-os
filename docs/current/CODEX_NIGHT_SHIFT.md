@@ -55,3 +55,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 
 - Sous QEMU 11.2 RC avec Lavapipe, deux instances distinctes relisent un appareil et le handle attendu par `vkEnumeratePhysicalDevices`.
 - Suite immédiate. Créer une queue et un VkBuffer depuis le programme, puis utiliser les besoins mémoire de ce buffer pour préparer l'allocation et la clôture.
+
+## `a212a3ca` — périphérique logique et buffer
+
+- Le programme vérifie la capacité de transfert de la queue 0, crée VkDevice puis VkBuffer de 4 096 octets et vérifie les besoins mémoire. Deux cycles réussis sur QEMU 11.2 RC avec Lavapipe.
+- Suite immédiate. Allouer et lier la mémoire, enregistrer et soumettre vkCmdFillBuffer, puis attendre une vraie VkFence. Pour la comparaison des octets, ajouter un second blob HOST3D lié à VkDeviceMemory sans perturber le blob de réponse.
