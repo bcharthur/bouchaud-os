@@ -95,6 +95,22 @@ static int verifie_instances(int fd)
             printf("VENUS_CREATE_REPLY %x %x %x %x %x %x\n", r[0], r[1], r[2], r[3], r[4], r[5]);
             return 4;
         }
+        // vkEnumeratePhysicalDevices, d'abord par cardinalité, puis
+        // avec un emplacement d'identifiant alloué par le client.
+        uint32_t liste[] = {179, 0, 0, 0, 2, 1, handle, 0, 1, 0, 0, 0, 0};
+        if (execute(fd, liste, sizeof(liste), r) || r[0] != 2 || r[1]
+            || r[2] != 1 || r[3] || !r[4] || r[5] || r[6])
+            return 6;
+        uint32_t total = r[4];
+        uint32_t appareil = 0x100 + handle;
+        uint32_t identifiants[] = {
+            179, 0, 0, 0, 2, 1, handle, 0, 1, 0, 1, 1, 0, appareil, 0
+        };
+        if (execute(fd, identifiants, sizeof(identifiants), r) || r[0] != 2
+            || r[1] != (total > 1 ? 5 : 0) || r[2] != 1 || r[3] || r[4] != 1
+            || r[5] != 1 || r[6] || r[7] != appareil || r[8])
+            return 7;
+        printf("VIRTGPU_VENUS_APPAREILS compte=%" PRIu32 " handle=%" PRIu32 "\n", total, appareil);
         // Réinitialiser le flux de réponse afin que le premier mot
         // appartienne bien à cette commande après la clôture.
         uint32_t destruction[] = {179, 0, 0, 0, 1, 1, handle, 0, 0, 0};

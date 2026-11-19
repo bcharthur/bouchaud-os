@@ -34,6 +34,7 @@ grep -aqF 'VIRTGPU_VENUS_DRM_CAPS_OK' "$sortie/serie.log"
 grep -aqF 'VIRTGPU_VENUS_DRM_CONTEXT_OK' "$sortie/serie.log"
 grep -aoE 'VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=[0-9.]+' "$sortie/serie.log"
 if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
+    test "$(grep -acF 'VIRTGPU_VENUS_APPAREILS compte=' "$sortie/serie.log")" -eq 2
     grep -aqF 'VIRTGPU_VENUS_DRM_INSTANCES_OK cycles=2' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_TAILLES_OK cycles=4' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_PROPRIETAIRE_OK' "$sortie/serie.log"

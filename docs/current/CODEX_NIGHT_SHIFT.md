@@ -44,3 +44,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Un retour clôturé dont le contexte diffère de la requête INFO_RING_IDX est traité comme une réponse invalide. Le chemin classique garde ses critères.
 - 14 tests de la file passent. Banc complet Venus 11.2 RC vert.
 - Suite immédiate. Exercer des commandes sérialisées par le processus via le sous-ensemble DRM EXECBUFFER, puis développer l'ABI GEM et mmap nécessaire à Mesa.
+
+## `3aa517dfb17cdc2825c2f80e02496753b2acabfc` — soumission DRM
+
+- EXECBUFFER transmet les mots Venus encodés par l'application dans son contexte. Profil synchrone à un anneau, taille bornée, sans syncobj, sans descripteur de fence et sans liste GEM. Une copie privée de 64 octets lit le blob de réponse. Le banc reste hors de la configuration par défaut.
+- QEMU 11.2 RC / TCG. Deux `vkCreateInstance` et `vkDestroyInstance` émis et vérifiés côté application, reprise du blob après SIGKILL et démappage vert. Le capset et le contexte passent aussi les vérifications précédentes.
+- Suite immédiate. Énumérer les périphériques côté application, puis préparer VkDevice et un buffer. La réponse privée reste à remplacer par GEM et mmap pour Mesa.
