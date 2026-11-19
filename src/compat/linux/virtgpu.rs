@@ -157,6 +157,18 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
                 .map_or_else(erreur, |()| 0)
         }
+        // Bouchaud expérimental : _IOR('B', 0xaa, uint32_t).
+        #[cfg(feature = "banc-gpu-venus")]
+        0x8004_42aa => {
+            if !super::fault_in_user_range(arg, 4, true) { return -errno::EFAULT; }
+            match virtio_gpu::version_vulkan_banc() {
+                Ok(version) if user_write(arg, &version.to_le_bytes()) => 0,
+                Ok(_) => -errno::EFAULT,
+                Err(e) => erreur(e),
+            }
+        }
+        #[cfg(feature = "banc-gpu-venus")]
+        0x42ab => virtio_gpu::ferme_vulkan_banc().map_or_else(erreur, |()| 0),
         _ => -errno::ENOTTY,
     }
 }

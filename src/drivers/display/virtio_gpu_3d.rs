@@ -13,7 +13,7 @@ pub const F_VENUS: u64 = (1 << 3) | (1 << 4); // RESOURCE_BLOB et CONTEXT_INIT
 #[cfg(any(feature = "banc-gpu-venus", test))]
 pub const CAPSET_VENUS: u32 = 4;
 #[cfg(any(feature = "banc-gpu-venus", test))]
-const CONTEXTE_VENUS: u32 = 0xB105;
+pub const CONTEXTE_VENUS: u32 = 0xB105;
 #[cfg(any(feature = "banc-gpu-venus", test))]
 pub const RESSOURCE_BLOB_BANC: u32 = 0xB106;
 pub const CMD_GET_CAPSET_INFO: u32 = 0x0108;
@@ -88,6 +88,65 @@ pub fn blob_invite(physique: u64, octets: u32) -> [u8; 72] {
     q[56..64].copy_from_slice(&physique.to_le_bytes());
     put32(&mut q, 64, octets);
     q
+}
+
+// Blob ID zéro : SHM du render server Venus (virglrenderer 1.1.0,
+// venus/vkr_context.c), réservé au flux de réponse du banc.
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub const RESSOURCE_REPONSE_VENUS: u32 = 0xB107;
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn blob_reponse_venus(octets: u32) -> [u8; 56] {
+    let mut q = [0; 56];
+    put32(&mut q, 0, 0x010c); // RESOURCE_CREATE_BLOB
+    put32(&mut q, 16, CONTEXTE_VENUS);
+    put32(&mut q, 24, RESSOURCE_REPONSE_VENUS);
+    put32(&mut q, 28, 2); // HOST3D
+    put32(&mut q, 32, 1); // USE_MAPPABLE
+    put32(&mut q, 48, octets);
+    q
+}
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn mappe_reponse_venus(mappe: bool) -> ([u8; 40], usize) {
+    let mut q = [0; 40];
+    put32(&mut q, 0, if mappe { 0x0208 } else { 0x0209 });
+    put32(&mut q, 24, RESSOURCE_REPONSE_VENUS);
+    // Offset zéro, un seul blob mappé à la fois.
+    (q, if mappe { 40 } else { 32 })
+}
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+const VENUS_ENUMERATE_INSTANCE_VERSION: u32 = 137;
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn soumet_version_venus() -> [u8; 84] {
+    let mut q = [0; 84];
+    put32(&mut q, 0, CMD_SUBMIT_3D);
+    put32(&mut q, 4, 2); // INFO_RING_IDX, anneau de contrôle 0
+    put32(&mut q, 16, CONTEXTE_VENUS);
+    put32(&mut q, 24, 52); // taille du flux Venus
+    // venus-protocol (virglrenderer 1.1.0) : commande + flags,
+    // présence d'un pointeur (u64), puis champs de la structure.
+    put32(&mut q, 32, 178); // vkSetReplyCommandStreamMESA
+    put32(&mut q, 40, 1);
+    put32(&mut q, 48, RESSOURCE_REPONSE_VENUS);
+    put32(&mut q, 60, 20); // size_t du flux réponse, offset zéro
+    put32(&mut q, 68, VENUS_ENUMERATE_INSTANCE_VERSION);
+    put32(&mut q, 72, 1); // VK_COMMAND_GENERATE_REPLY_BIT_EXT
+    put32(&mut q, 76, 1); // pApiVersion présent
+    q
+}
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn lit_version_venus(reponse: &[u8; 20]) -> Option<u32> {
+    if get32(reponse, 0) != VENUS_ENUMERATE_INSTANCE_VERSION || get32(reponse, 4) != 0
+        || get32(reponse, 8) != 1 || get32(reponse, 12) != 0
+    {
+        return None;
+    }
+    let version = get32(reponse, 16);
+    (version >> 22 == 1).then_some(version)
 }
 
 /// 32-byte virtio_gpu_get_capset_info (24-byte common header + 8-byte body).
@@ -247,6 +306,24 @@ mod tests {
         assert_eq!(get32(&blob, 48), 4096);
         assert_eq!(get32(&blob, 56), 0x100000);
         assert_eq!(get32(&blob, 64), 4096);
+    }
+    #[test]
+    fn soumission_venus_et_reponse_strictes() {
+        let q = soumet_version_venus();
+        assert_eq!(get32(&q, 16), CONTEXTE_VENUS);
+        assert_eq!(get32(&q, 24) as usize, q.len() - 32);
+        assert_eq!(get32(&q, 60), 20);
+        assert_eq!(get32(&q, 68), VENUS_ENUMERATE_INSTANCE_VERSION);
+        let mut r = [0; 20];
+        put32(&mut r, 0, VENUS_ENUMERATE_INSTANCE_VERSION);
+        put32(&mut r, 8, 1);
+        put32(&mut r, 16, 1 << 22);
+        assert_eq!(lit_version_venus(&r), Some(1 << 22));
+        for offset in [0, 4, 8, 12, 16] {
+            let mut invalide = r;
+            put32(&mut invalide, offset, 0xffffffff);
+            assert_eq!(lit_version_venus(&invalide), None);
+        }
     }
     #[test]
     fn capset_info_strict() {

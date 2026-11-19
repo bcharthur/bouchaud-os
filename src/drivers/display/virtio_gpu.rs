@@ -33,6 +33,12 @@ mod rendu;
 pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
     transfert_texture_rendu, ErreurRendu, RegionRendu, TransfertRendu, OCTETS_TEXTURE};
 
+#[cfg(feature = "banc-gpu-venus")]
+#[path = "virtio_gpu_venus.rs"]
+mod venus;
+#[cfg(feature = "banc-gpu-venus")]
+pub use venus::{ferme_vulkan_banc, version_vulkan_banc};
+
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -430,10 +436,13 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             }
         });
         #[cfg(feature = "banc-gpu-venus")]
+        let mut hostmem_venus = None;
+        #[cfg(feature = "banc-gpu-venus")]
         if retenues & gpu3d::F_VENUS == gpu3d::F_VENUS {
             let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
             match sonde_contexte_venus(&mut file, capsets) {
-                Ok(info) => {
+                Ok((info, support_hostmem)) => {
+                    if support_hostmem { hostmem_venus = venus::mappe_fenetre(dev).map(venus::Canal::Nouveau); }
                     crate::serial_println!(
                         "P10_VENUS_CONTEXTE_OK capset={} version={} octets={}", info.id, info.version, info.size
                     );
@@ -456,6 +465,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     mire,
                     p10_virgl,
                     capset,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    hostmem_venus,
                     textures_rendu: rendu::TexturesRendu::neuf(),
                     textures: [None; cg::TEXTURES_MAX],
                     bureau_attache: false,
@@ -488,7 +499,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 // BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
 // The display path is still software raster + virtio-gpu 2D.
 #[cfg(feature = "banc-gpu-venus")]
-unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
+unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<(gpu3d::CapsetInfo, bool), &'static str> {
     for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
         if f.commande(&gpu3d::get_capset_info(idx), 40) != Ok(gpu3d::RESP_OK_CAPSET_INFO) {
             return Err("get-capset-info");
@@ -497,14 +508,16 @@ unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<gpu3d
         let raw = core::slice::from_raw_parts(f.reponse(), 40);
         let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
         if info.id != gpu3d::CAPSET_VENUS { continue; }
-        let _ = p10_lit_capset(f, info).map_err(|_| "get-capset-venus")?;
+        let octets = p10_lit_capset(f, info).map_err(|_| "get-capset-venus")?;
+        let support_hostmem = octets.get(..4) == Some(&1u32.to_le_bytes())
+            && octets.get(16..20) == Some(&1u32.to_le_bytes());
         for (cree, etape) in [(true, "ctx-create-venus"), (false, "ctx-destroy-venus")] {
             let (commande, len) = gpu3d::contexte_venus(cree);
             if f.commande(&commande[..len], ENTETE) != Ok(RESP_OK_NODATA) {
                 return Err(etape);
             }
         }
-        return Ok(info);
+        return Ok((info, support_hostmem));
     }
     Err("capset-venus-absent")
 }
@@ -1101,6 +1114,8 @@ struct Peripherique {
     mire: Option<MireTenue>,
     p10_virgl: Option<gpu3d::CapsetInfo>,
     capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
+    #[cfg(feature = "banc-gpu-venus")]
+    hostmem_venus: Option<venus::Canal>,
     textures_rendu: rendu::TexturesRendu,
     // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
     // scanout attachee au contexte, liste DMA des pages (une fois).
