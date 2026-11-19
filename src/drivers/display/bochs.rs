@@ -210,6 +210,7 @@ pub fn fin_trame() {
     if !crate::drivers::virtio_gpu::presente_trame(&plan) && !crate::drivers::virtio_gpu::actif() {
         VIRTIO_SCANOUT.store(false, Ordering::Release);
         quitte_memoire_scanout();
+        reprend_gop_apres_virtio();
     }
 }
 
@@ -241,6 +242,7 @@ pub fn fin_trame_gpu(couches: &[crate::drivers::virtio_gpu::CoucheGpu]) -> bool 
         && !crate::drivers::virtio_gpu::actif() {
         VIRTIO_SCANOUT.store(false, Ordering::Release);
         quitte_memoire_scanout();
+        reprend_gop_apres_virtio();
     }
     false
 }
@@ -922,6 +924,7 @@ fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
         // composer, plus rien n'est presente -- et le journal l'a dit.
         VIRTIO_SCANOUT.store(false, Ordering::Release);
         quitte_memoire_scanout();
+        reprend_gop_apres_virtio();
     }
     false
 }
@@ -1287,6 +1290,9 @@ fn quitte_memoire_scanout() {
         }
         LFB = core::ptr::null_mut();
     }
+}
+
+fn reprend_gop_apres_virtio() {
     if firmware_backend_installed() {
         LFB_PHYS.store(0, Ordering::Release);
         crate::drivers::gpu::deactivate();

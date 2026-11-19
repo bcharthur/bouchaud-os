@@ -918,10 +918,12 @@ fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'st
 /// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
 /// dit pourquoi.
 unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) {
-    if *m == Memoire::Attachee {
-        *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+    if ressource != 0 {
+        if *m == Memoire::Attachee {
+            *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+        }
+        let _ = suivie(m, libere(f, ressource));
     }
-    let _ = suivie(m, libere(f, ressource));
     if dma::peut_rendre(*m) {
         memory::free_dma(phys, octets);
     } else {
@@ -2079,7 +2081,7 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<(cg::Convention, [u
     let octets = (L * H * 4) as usize;
     let (sp, sv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
     let Some((dp, dv)) = memory::alloc_dma(PAGE) else {
-        memory::free_dma(sp, PAGE);
+        rend_si_sur(f, 0, sp, PAGE, &mut Memoire::NonAttachee, "autotest-sans-ressource");
         return Err("dma-autotest");
     };
     let src = core::slice::from_raw_parts_mut(sv as *mut u32, (L * H) as usize);
