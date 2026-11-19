@@ -237,9 +237,11 @@ pub fn fin_trame_gpu(couches: &[crate::drivers::virtio_gpu::CoucheGpu]) -> bool 
     if crate::drivers::virtio_gpu::presente_trame_gpu(&plan, couches) {
         return true;
     }
-    // Le GPU a renonce : le bureau de cette trame part quand meme (2D).
-    if plan.nb > 0 && !crate::drivers::virtio_gpu::presente_trame(&plan)
-        && !crate::drivers::virtio_gpu::actif() {
+    // Le bureau de cette trame part quand meme en 2D s'il a change.
+    // Une trame avec des degats uniquement dans les fenetres peut perdre le
+    // GPU elle aussi : elle doit quitter le scanout meme sans transfert 2D.
+    let presente_2d = plan.nb > 0 && crate::drivers::virtio_gpu::presente_trame(&plan);
+    if !presente_2d && !crate::drivers::virtio_gpu::actif() {
         VIRTIO_SCANOUT.store(false, Ordering::Release);
         quitte_memoire_scanout();
         reprend_gop_apres_virtio();
