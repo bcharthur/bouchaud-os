@@ -6,6 +6,11 @@ if [[ $# != 2 || -z $(printenv DISPLAY) ]]; then
     echo 'usage: DISPLAY=:N run_virtgpu_ring3.sh BOOTIMAGE NEW_OUTPUT_DIR' >&2
     exit 2
 fi
+smp=${BO_VIRTGPU_SMP:-2}
+if [[ $smp != 2 && $smp != 4 ]]; then
+    echo 'BO_VIRTGPU_SMP doit valoir 2 ou 4' >&2
+    exit 2
+fi
 boot=$(realpath "$1")
 sortie=$(realpath -m "$2")
 mkdir "$sortie"
@@ -30,14 +35,14 @@ musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-caps-probe.c -o "$
 musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/mire-gpu.c -o "$sortie/virgl/mire-gpu"
 musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-textures.c -o "$sortie/virgl/textures"
 cp "$sortie/virgl/caps" "$sortie/2d/caps"
-printf '/caps\n/textures\nexport BO_AUTOSTART_APP=/mire-gpu\ndesktop\n' > "$sortie/virgl/autorun"
+printf '/caps\n/textures\n/textures entrelacees\nexport BO_AUTOSTART_APP=/mire-gpu\ndesktop\n' > "$sortie/virgl/autorun"
 printf '/caps absent\n' > "$sortie/2d/autorun"
 
 demarre() {
     local nom=$1 peripherique=$2 affichage=$3
     local repertoire="$sortie/$nom"
     IMAGE="$sortie/$nom.img" tools/userland/mkdisk.sh "$repertoire" >/dev/null
-    qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 -vga none \
+    qemu-system-x86_64 -accel tcg -cpu max -smp "$smp" -m 2048 -vga none \
         -device "$peripherique" -display "$affichage" -no-reboot \
         -drive "format=raw,file=$boot,snapshot=on" \
         -drive "format=raw,file=$sortie/$nom.img,snapshot=on" \
@@ -62,6 +67,8 @@ attend virgl 'VIRTGPU_BLIT_RING3_OK pixels=64'
 attend virgl 'VIRTGPU_CAPS_OK'
 attend virgl 'VIRTGPU_TEXTURES_RING3_OK'
 attend virgl 'VIRTGPU_TEXTURES_VARIABLES_OK'
+attend virgl 'VIRTGPU_TEXTURES_ENTRELACEES_OK'
+attend virgl 'VIRTGPU_TEXTURES_ABORT_OK'
 attend virgl 'GPU_COUCHE'
 sleep 3
 import -window root "$sortie/virgl/capture.png"
