@@ -53,6 +53,57 @@ static int verifie_contexte(int fd)
     return 0;
 }
 
+struct drm_execbuffer {
+    uint32_t flags, taille;
+    uint64_t commande, bo_handles;
+    uint32_t n_bo;
+    int32_t fence;
+    uint32_t anneau, sync_stride, n_in, n_out;
+    uint64_t in, out;
+};
+#define DRM_EXECBUFFER _IOWR('d', 0x42, struct drm_execbuffer)
+typedef uint32_t reponse_venus[16];
+#define LIT_REPONSE _IOR('B', 0xad, reponse_venus)
+
+static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus reponse)
+{
+    struct drm_execbuffer req = {.flags = 4, .taille = octets, .commande = (uintptr_t)flux, .fence = -1};
+    return ioctl(fd, DRM_EXECBUFFER, &req) || ioctl(fd, LIT_REPONSE, reponse);
+}
+
+static int verifie_instances(int fd)
+{
+    struct drm_execbuffer req = {.flags = 4, .taille = 4, .commande = 1, .fence = -1};
+    if (!ioctl(fd, DRM_EXECBUFFER, &req) || errno != EFAULT) return 1;
+    req.anneau = 1;
+    if (!ioctl(fd, DRM_EXECBUFFER, &req) || errno != EINVAL) return 2;
+    for (uint32_t handle = 1; handle <= 2; ++handle) {
+        // vkSetReplyCommandStreamMESA puis vkCreateInstance. Les champs
+        // Venus (dont les pointeurs de présence 64 bits) sont sérialisés
+        // par l'application, indépendamment du noyau.
+        uint32_t creation[] = {
+            178, 0, 1, 0, 0xb107, 0, 0, 64, 0,
+            0, 1, 1, 0, 1, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 0, handle, 0
+        };
+        reponse_venus r;
+        if (execute(fd, creation, sizeof(creation), r)) {
+            perror("VENUS_CREATE_INSTANCE");
+            return 3;
+        }
+        if (r[0] || r[1] || r[2] != 1 || r[3] || r[4] != handle || r[5]) {
+            printf("VENUS_CREATE_REPLY %x %x %x %x %x %x\n", r[0], r[1], r[2], r[3], r[4], r[5]);
+            return 4;
+        }
+        // Réinitialiser le flux de réponse afin que le premier mot
+        // appartienne bien à cette commande après la clôture.
+        uint32_t destruction[] = {179, 0, 0, 0, 1, 1, handle, 0, 0, 0};
+        if (execute(fd, destruction, sizeof(destruction), r) || r[0] != 1) return 5;
+    }
+    puts("VIRTGPU_VENUS_DRM_INSTANCES_OK cycles=2");
+    return 0;
+}
+
 static int verifie_proprietaire(int fd, uint32_t reference)
 {
     int notification[2];
@@ -105,6 +156,7 @@ int main(int argc, char **argv)
     printf("VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=%" PRIu32 ".%" PRIu32 ".%" PRIu32 "\n",
            reference >> 22, (reference >> 12) & 0x3ff, reference & 0xfff);
     if (argc > 1) {
+        if (verifie_instances(fd)) return 16;
         if (ioctl(fd, DEMAPPE)) {
             perror("VENUS_DEMAPPE");
             return 6;

@@ -165,6 +165,34 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
                 .map_or_else(erreur, |()| 0)
         }
+        // DRM_IOCTL_VIRTGPU_EXECBUFFER, profil de banc synchrone.
+        // Les flux qui demandent une réponse utilisent le blob de transport
+        // de l'ouverture. Pas de liste GEM ni de syncobj dans ce profil.
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc040_6442 => {
+            let Some(buf) = user_read(arg, 64) else { return -errno::EFAULT; };
+            let taille = mot(&buf, 4) as usize;
+            if !matches!(mot(&buf, 0), 0 | 4) || taille == 0 || taille > 2016
+                || taille % 4 != 0 || mot(&buf, 28) != u32::MAX
+                || buf[16..28].iter().chain(&buf[32..]).any(|b| *b != 0)
+            {
+                return -errno::EINVAL;
+            }
+            let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+            let Some(flux) = user_read(adresse, taille) else { return -errno::EFAULT; };
+            virtio_gpu::soumets_venus(session, &flux).map_or_else(erreur, |()| 0)
+        }
+        #[cfg(feature = "banc-gpu-venus")]
+        0x8040_42ad => {
+            if !super::fault_in_user_range(arg, virtio_gpu::OCTETS_REPONSE_VENUS, true) {
+                return -errno::EFAULT;
+            }
+            match virtio_gpu::copie_reponse_venus(session) {
+                Ok(octets) if user_write(arg, &octets) => 0,
+                Ok(_) => -errno::EFAULT,
+                Err(e) => erreur(e),
+            }
+        }
         // DRM_IOCTL_VIRTGPU_CONTEXT_INIT, sous-ensemble Venus à un anneau.
         #[cfg(feature = "banc-gpu-venus")]
         0xc010_644b => {

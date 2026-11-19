@@ -37,7 +37,8 @@ pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
 #[path = "virtio_gpu_venus.rs"]
 mod venus;
 #[cfg(feature = "banc-gpu-venus")]
-pub use venus::{contexte_venus_disponible, ferme_vulkan_banc, initialise_contexte_venus, version_vulkan_banc};
+pub use venus::{contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
+    initialise_contexte_venus, soumets_venus, version_vulkan_banc, OCTETS_REPONSE_VENUS};
 
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};

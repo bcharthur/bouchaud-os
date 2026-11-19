@@ -38,3 +38,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - CONTEXT_INIT crée un contexte Venus réel à un anneau, détenu par l'ouverture. Le banc 11.2 RC vérifie le rejet d'un second anneau, d'un pointeur invalide et d'une réinitialisation avec EEXIST, puis réutilise le contexte pour la soumission.
 - Contre-épreuve avec QEMU 11.1.3, virglrenderer **1.3.0** et le même noyau invité. La version 1.4.309 est lue, mais UNMAP expire à 1 001 201 µs. La mise à jour de virglrenderer seule ne suffit donc pas dans ce montage. Le chemin asynchrone QEMU reste à isoler.
 - Suite immédiate. Vérifier l'identité du contexte dans la clôture renvoyée puis rejouer le profil normal VIRGL.
+
+## `088031540c901809fe829f7bea69143d7aacbd42` — clôture contextualisée
+
+- Un retour clôturé dont le contexte diffère de la requête INFO_RING_IDX est traité comme une réponse invalide. Le chemin classique garde ses critères.
+- 14 tests de la file passent. Banc complet Venus 11.2 RC vert.
+- Suite immédiate. Exercer des commandes sérialisées par le processus via le sous-ensemble DRM EXECBUFFER, puis développer l'ABI GEM et mmap nécessaire à Mesa.

@@ -205,6 +205,56 @@ unsafe fn lit_version(f: &mut FileControle, aperture: usize) -> Result<u32, &'st
     gpu3d::lit_version_venus(&reponse).ok_or("reponse-vulkan")
 }
 
+pub const OCTETS_REPONSE_VENUS: usize = 64;
+
+fn aperture_possedee(p: &Peripherique, session: &Arc<()>) -> Result<usize, ErreurRendu> {
+    match p.hostmem_venus.as_ref() {
+        Some(Canal::Ouvert(fenetre, Some(_), proprietaire)) => {
+            if proprietaire.ptr_eq(&Arc::downgrade(session)) {
+                Ok(fenetre.adresse)
+            } else {
+                Err(ErreurRendu::Occupe)
+            }
+        }
+        _ => Err(ErreurRendu::Invalide),
+    }
+}
+
+pub fn soumets_venus(session: &Arc<()>, flux: &[u8]) -> Result<(), ErreurRendu> {
+    let entete = gpu3d::entete_soumission_venus(flux.len()).ok_or(ErreurRendu::Invalide)?;
+    let mut q = alloc::vec::Vec::new();
+    q.try_reserve_exact(entete.len() + flux.len()).map_err(|_| ErreurRendu::Plein)?;
+    q.extend_from_slice(&entete);
+    q.extend_from_slice(flux);
+    let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
+    let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    let mem = aperture_possedee(p, session)? as *mut u32;
+    unsafe {
+        for i in 0..OCTETS_REPONSE_VENUS / 4 { write_volatile(mem.add(i), u32::MAX); }
+        fence(Ordering::SeqCst);
+        if p.file.commande(&q, ENTETE) == Ok(RESP_OK_NODATA)
+            && attente_reponse(250, || read_volatile(mem) != u32::MAX)
+        {
+            return Ok(());
+        }
+    }
+    // Impossible de prouver qu'un flux incomplet a cessé d'écrire.
+    p.hostmem_venus = None;
+    Err(ErreurRendu::Commande)
+}
+
+pub fn copie_reponse_venus(session: &Arc<()>) -> Result<[u8; OCTETS_REPONSE_VENUS], ErreurRendu> {
+    let garde = verrou().ok_or(ErreurRendu::Indisponible)?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    let mem = aperture_possedee(p, session)? as *const u8;
+    let mut octets = [0; OCTETS_REPONSE_VENUS];
+    fence(Ordering::SeqCst);
+    for (i, octet) in octets.iter_mut().enumerate() {
+        *octet = unsafe { read_volatile(mem.add(i)) };
+    }
+    Ok(octets)
+}
+
 unsafe fn ferme_objets(f: &mut FileControle, blob: bool) -> Result<(), &'static str> {
     if !blob { return ferme_contexte(f, false); }
     let (q, n) = gpu3d::mappe_reponse_venus(false);

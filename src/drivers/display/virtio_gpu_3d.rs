@@ -119,6 +119,14 @@ pub fn mappe_reponse_venus(mappe: bool) -> ([u8; 40], usize) {
 #[cfg(any(feature = "banc-gpu-venus", test))]
 const VENUS_ENUMERATE_INSTANCE_VERSION: u32 = 137;
 
+#[cfg(feature = "banc-gpu-venus")]
+pub fn entete_soumission_venus(octets: usize) -> Option<[u8; 32]> {
+    let mut q = submit_header(octets)?;
+    put32(&mut q, 4, 2); // INFO_RING_IDX, anneau de contrôle 0
+    put32(&mut q, 16, CONTEXTE_VENUS);
+    Some(q)
+}
+
 #[cfg(any(feature = "banc-gpu-venus", test))]
 pub fn soumet_version_venus() -> [u8; 84] {
     let mut q = [0; 84];
