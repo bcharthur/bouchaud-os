@@ -9,6 +9,7 @@
 pub const F_VIRGL: u64 = 1;
 pub const F_VERSION_1: u64 = 1 << 32;
 pub const CMD_GET_CAPSET_INFO: u32 = 0x0108;
+pub const CMD_GET_CAPSET: u32 = 0x0109;
 pub const CMD_CTX_CREATE: u32 = 0x0200;
 pub const CMD_CTX_DESTROY: u32 = 0x0201;
 pub const CMD_CTX_ATTACH_RESOURCE: u32 = 0x0202;
@@ -16,6 +17,7 @@ pub const CMD_CTX_DETACH_RESOURCE: u32 = 0x0203;
 pub const CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
 pub const CMD_SUBMIT_3D: u32 = 0x0207;
 pub const RESP_OK_CAPSET_INFO: u32 = 0x1102;
+pub const RESP_OK_CAPSET: u32 = 0x1103;
 pub const RESP_OK_NODATA: u32 = 0x1100;
 pub const CAPSET_VIRGL: u32 = 1;
 pub const CAPSET_VIRGL2: u32 = 2;
@@ -58,8 +60,28 @@ pub fn get_capset_info(index: u32) -> [u8; 32] {
 pub fn parse_capset_info(r: &[u8]) -> Option<CapsetInfo> {
     if r.len() < 40 || get32(r, 0) != RESP_OK_CAPSET_INFO { return None; }
     let info = CapsetInfo { id: get32(r, 24), version: get32(r, 28), size: get32(r, 32) };
-    if info.id == 0 || info.version == 0 || info.size == 0 { return None; }
+    if info.id == 0 || info.size == 0
+        || (matches!(info.id, CAPSET_VIRGL | CAPSET_VIRGL2) && info.version == 0)
+    { return None; }
     Some(info)
+}
+
+/// La charge utile tient dans le descripteur de reponse, en plus de l'entete.
+pub fn get_capset(info: CapsetInfo, capacite: usize) -> Option<([u8; 32], usize)> {
+    let taille = 24usize.checked_add(info.size as usize)?;
+    if info.size == 0 || taille > capacite { return None; }
+    let mut q = [0u8; 32];
+    put32(&mut q, 0, CMD_GET_CAPSET);
+    put32(&mut q, 24, info.id);
+    put32(&mut q, 28, info.version);
+    Some((q, taille))
+}
+
+pub fn capset_payload(reponse: &[u8], taille: usize) -> Option<&[u8]> {
+    if reponse.len().checked_sub(24)? != taille || get32(reponse, 0) != RESP_OK_CAPSET {
+        return None;
+    }
+    Some(&reponse[24..])
 }
 
 pub fn supported(capset: CapsetInfo) -> bool {
@@ -135,6 +157,22 @@ pub fn submit_header(body_len: usize) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capset_zero_version_and_length() {
+        let info = CapsetInfo { id: 4, version: 0, size: 8 };
+        let (q, taille) = get_capset(info, 32).unwrap();
+        assert_eq!((get32(&q, 0), get32(&q, 24), get32(&q, 28)), (0x0109, 4, 0));
+        assert_eq!(taille, 32);
+        assert!(get_capset(info, 31).is_none());
+        let mut r = [0u8; 32];
+        put32(&mut r, 0, RESP_OK_CAPSET);
+        r[24] = 42;
+        assert_eq!(capset_payload(&r, 8).unwrap()[0], 42);
+        assert!(capset_payload(&r[..31], 8).is_none());
+        put32(&mut r, 0, RESP_OK_NODATA);
+        assert!(capset_payload(&r, 8).is_none());
+    }
+
     #[test]
     fn negotiation_never_enables_3d_by_default() {
         assert_eq!(negotiated_features(F_VERSION_1 | F_VIRGL, false), F_VERSION_1);

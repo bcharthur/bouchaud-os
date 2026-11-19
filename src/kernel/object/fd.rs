@@ -45,6 +45,8 @@ pub enum FdKind {
     Random,
     /// `/dev/fb0`.
     Framebuffer,
+    /// Noeud de decouverte VirtIO-GPU, sans soumission utilisateur.
+    GpuRender,
     /// `/dev/input/event0` (clavier).
     InputKeyboard,
     /// `/dev/input/event1` (souris).
@@ -599,6 +601,8 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     match path {
         "/dev/null" => Some(FdKind::Null),
         "/dev/zero" => Some(FdKind::Zero),
+        "/dev/dri/renderD128" => crate::drivers::virtio_gpu::capset_render_id()
+            .map(|_| FdKind::GpuRender),
         "/dev/random" | "/dev/urandom" => Some(FdKind::Random),
         "/dev/tty" | "/dev/console" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" => Some(FdKind::Console),
         // Les consoles virtuelles sont ouvertes par le plugin linuxfb de Qt

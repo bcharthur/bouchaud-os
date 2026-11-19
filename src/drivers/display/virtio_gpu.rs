@@ -389,7 +389,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             match p10_probe_3d(&mut file, capsets) {
                 Ok(info) => {
                     match calibre_convention(&mut file) {
-                        Ok(conv) => {
+                        Ok((conv, _)) => {
                             CONVENTION.store(if conv == cg::Convention::Brut { 1 } else { 2 }, Ordering::Release);
                             P10_VIRGL_PRET.store(true, Ordering::Release);
                             crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK convention={:?} blit_gpu=8x3 relu_au_pixel=64/64", conv);
@@ -407,6 +407,16 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 }
             }
         };
+        let capset = p10_virgl.and_then(|info| match p10_lit_capset(&mut file, info) {
+            Ok(octets) => {
+                crate::serial_println!("P10_GPU_CAPSET_LU id={} version={} octets={}", info.id, info.version, octets.len());
+                Some((info, octets))
+            }
+            Err(cause) => {
+                crate::serial_println!("P10_GPU_CAPSET_NON_LU id={} raison={}", info.id, cause);
+                None
+            }
+        });
         if file.cassee { autotest_ok = false; }
         match verrou() {
             Some(mut garde) => {
@@ -417,6 +427,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     scanout: None,
                     mire,
                     p10_virgl,
+                    capset,
                     textures: [None; cg::TEXTURES_MAX],
                     bureau_attache: false,
                     entrees: None,
@@ -458,12 +469,9 @@ unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::Capset
         if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
         let raw = core::slice::from_raw_parts(f.reponse(), 40);
         let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
-        if gpu3d::supported(info) {
-            if info.id == gpu3d::CAPSET_VIRGL2 {
-                selected = Some(info);
-                break;
-            }
-            if selected.is_none() { selected = Some(info); }
+        crate::serial_println!("P10_GPU_CAPSET id={} version={} octets={}", info.id, info.version, info.size);
+        if gpu3d::supported(info) && (selected.is_none() || info.id == gpu3d::CAPSET_VIRGL2) {
+            selected = Some(info);
         }
     }
     let info = selected.ok_or("virgl-capset-absent")?;
@@ -496,6 +504,35 @@ unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::Capset
         return Err(e);
     }
     Ok(info)
+}
+
+unsafe fn p10_lit_capset(f: &mut FileControle, info: gpu3d::CapsetInfo)
+    -> Result<alloc::vec::Vec<u8>, &'static str>
+{
+    let (req, taille) = gpu3d::get_capset(info, PAGE - REPONSE).ok_or("capset-trop-grand")?;
+    if f.commande(&req, taille)? != gpu3d::RESP_OK_CAPSET {
+        return Err("capset-refuse");
+    }
+    let raw = core::slice::from_raw_parts(f.reponse(), f.derniere_reponse_len as usize);
+    let octets = gpu3d::capset_payload(raw, info.size as usize).ok_or("capset-tronque")?;
+    Ok(octets.to_vec())
+}
+
+/// Copie bornee des capacites lues a la sonde. Aucun DMA vers le processus.
+pub fn copie_capset(id: u32, version: u32, sortie: &mut [u8]) -> Option<usize> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    let (info, octets) = p.capset.as_ref()?;
+    if info.id != id || info.version != version { return None; }
+    let n = sortie.len().min(octets.len());
+    sortie[..n].copy_from_slice(&octets[..n]);
+    Some(n)
+}
+
+pub fn capset_render_id() -> Option<u32> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    p.capset.as_ref().map(|(info, _)| info.id)
 }
 
 /// A real kernel-only VIRGL command submission entry point. No ring3 uAPI.
@@ -597,6 +634,7 @@ struct FileControle {
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
 const REPONSE: usize = 2048;
+pub const CAPSET_OCTETS_MAX: usize = PAGE - REPONSE - ENTETE;
 const REQUETE_MAX: usize = REPONSE;
 
 impl FileControle {
@@ -986,6 +1024,7 @@ struct Peripherique {
     /// La mire de l'autotest, a l'ecran tant que le bureau ne l'a pas pris.
     mire: Option<MireTenue>,
     p10_virgl: Option<gpu3d::CapsetInfo>,
+    capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
     // scanout attachee au contexte, liste DMA des pages (une fois).
     textures: [Option<TextureFenetre>; cg::TEXTURES_MAX],
@@ -2018,14 +2057,17 @@ fn convention() -> Option<cg::Convention> {
 /// textures 8x8, relu par `TRANSFER_FROM_HOST_3D` et juge au pixel, dans les
 /// deux conventions possibles. Le compositeur n'est autorise que si l'une
 /// d'elles donne EXACTEMENT la mire attendue.
-unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'static str> {
+unsafe fn calibre_convention(f: &mut FileControle) -> Result<(cg::Convention, [u32; 64]), &'static str> {
     const S: u32 = 0xB2F0;
     const D: u32 = 0xB2F1;
     const L: u32 = 8;
     const H: u32 = 8;
     let octets = (L * H * 4) as usize;
     let (sp, sv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
-    let (dp, dv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
+    let Some((dp, dv)) = memory::alloc_dma(PAGE) else {
+        memory::free_dma(sp, PAGE);
+        return Err("dma-autotest");
+    };
     let src = core::slice::from_raw_parts_mut(sv as *mut u32, (L * H) as usize);
     let dst = core::slice::from_raw_parts_mut(dv as *mut u32, (L * H) as usize);
     for y in 0..H { for x in 0..L { src[(y * L + x) as usize] = cg::pixel_mire(x, y); } }
@@ -2034,7 +2076,7 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
     let tout = cg::R::neuf(0, 0, L as i32, H as i32);
     let mut memoire = [Memoire::NonAttachee; 2];
     let mut cree = [false; 2];
-    let resultat = (|| -> Result<cg::Convention, &'static str> {
+    let resultat = (|| -> Result<(cg::Convention, [u32; 64]), &'static str> {
         for (k, (id, phys)) in [(S, sp), (D, dp)].into_iter().enumerate() {
             let q = cg::cree_texture_liee(id, L, H, liaison).ok_or("texture")?;
             if f.commande(&q, ENTETE)? != RESP_OK_NODATA { return Err("creation-refusee"); }
@@ -2063,7 +2105,7 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
             let mut vu = [0u32; 64];
             for (i, v) in vu.iter_mut().enumerate() { *v = read_volatile(dst.as_ptr().add(i)); }
             if cg::juge_autotest(&vu, L, H, 2, 1, 3) {
-                return Ok(conv);
+                return Ok((conv, vu));
             }
         }
         Err("aucune-convention-exacte")
@@ -2081,6 +2123,21 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
         }
     }
     resultat
+}
+
+/// Sonde ring 3 bornee : un seul BLIT de reference par boot, avec buffers
+/// et commandes du noyau. Elle ne permet pas de designer une ressource DMA.
+pub fn blit_sonde() -> Result<[u32; 64], &'static str> {
+    static JOUEE: AtomicBool = AtomicBool::new(false);
+    let mut garde = verrou().ok_or("occupe")?;
+    let p = garde.as_mut().filter(|p| p.capset.is_some() && p.p10_virgl.is_some() && !p.file.cassee)
+        .ok_or("absent")?;
+    if JOUEE.swap(true, Ordering::AcqRel) { return Err("deja-jouee"); }
+    let resultat = unsafe { calibre_convention(&mut p.file) };
+    if p.file.cassee {
+        P10_VIRGL_PRET.store(false, Ordering::Release);
+    }
+    resultat.map(|(_, pixels)| pixels)
 }
 
 const ENTREES_MAX: usize = 2048;

@@ -373,7 +373,7 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             (fin - offset) as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer | FdKind::VirtualTerminal => -errno::EINVAL,
+        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender => -errno::EINVAL,
         FdKind::InputKeyboard => read_input(buffer, count, input::Device::Keyboard),
         FdKind::InputMouse => read_input(buffer, count, input::Device::Mouse),
         FdKind::Pipe(shared, readable) => {
@@ -742,7 +742,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             data.len() as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer | FdKind::VirtualTerminal => -errno::EINVAL,
+        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender => -errno::EINVAL,
         FdKind::InputKeyboard | FdKind::InputMouse => count as i64,
         FdKind::Pipe(shared, readable) => {
             if readable {
@@ -1754,6 +1754,12 @@ fn stat_bytes_date(inode: u64, mode: u32, uid: u32, gid: u32, size: u64, now: u6
 }
 
 /// `stat` / `lstat` (pas de lien symbolique dans le RAMFS : meme resultat).
+fn stat_gpu_render() -> [u8; 144] {
+    let mut buffer = stat_bytes(128, S_IFCHR | 0o666, 0, 0, 0);
+    buffer[40..48].copy_from_slice(&((226u64 << 8) | 128).to_le_bytes());
+    buffer
+}
+
 pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => absolute(&path),
@@ -1771,7 +1777,11 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
             }
             _ => (S_IFCHR | 0o666, 0),
         };
-        let buffer = stat_bytes(1, mode, 0, 0, taille);
+        let buffer = if matches!(kind, FdKind::GpuRender) {
+            stat_gpu_render()
+        } else {
+            stat_bytes(1, mode, 0, 0, taille)
+        };
         return if user_write(out, &buffer) {
             0
         } else {
@@ -1799,6 +1809,7 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         None => return -errno::EBADF,
     };
     let buffer = match kind {
+        FdKind::GpuRender => stat_gpu_render(),
         FdKind::File(node) | FdKind::Dir(node) => fill_stat(node),
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
@@ -2415,6 +2426,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     };
 
     match kind {
+        FdKind::GpuRender => super::virtgpu::ioctl(request as u32, arg),
         // --- Sortie audio, protocole OSS -------------------------------------
         //
         // OSS plutot qu'ALSA : quatre ioctls suffisent a regler un flux, alors
