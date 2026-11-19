@@ -3,7 +3,7 @@
 
 use super::{errno, user_read, user_write};
 use alloc::sync::Arc;
-use crate::drivers::virtio_gpu::{self, ErreurRendu, TransfertRendu, OCTETS_TEXTURE};
+use crate::drivers::virtio_gpu::{self, ErreurRendu, RegionRendu, TransfertRendu, OCTETS_TEXTURE};
 
 const GETPARAM: u32 = 0xc010_6443;
 const GET_CAPS: u32 = 0xc018_6449;
@@ -15,6 +15,41 @@ const DETRUIT: u32 = 0x4004_42a2;
 const CHARGE: u32 = 0x4010_42a3;
 const RELIT: u32 = 0x4010_42a4;
 const BLIT: u32 = 0x4008_42a5;
+
+const CREE_TEXTURE: u32 = 0xc010_42a6;
+const CHARGE_REGION: u32 = 0x4020_42a7;
+const RELIT_REGION: u32 = 0x4020_42a8;
+const BLIT_REGION: u32 = 0x4020_42a9;
+
+fn mot(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+}
+
+fn transfert(session: &Arc<()>, charge: bool, id: u32, region: Option<RegionRendu>,
+    pas: usize, adresse: u64) -> i64
+{
+    let longueur = match region {
+        Some(r) => match r.longueur(pas) {
+            Some(n) => n,
+            None => return -errno::EINVAL,
+        },
+        None => OCTETS_TEXTURE,
+    };
+    let (mut octets, sens) = if charge {
+        let Some(octets) = user_read(adresse, longueur) else { return -errno::EFAULT; };
+        (octets, TransfertRendu::VersGpu)
+    } else {
+        if !super::fault_in_user_range(adresse, longueur, true) { return -errno::EFAULT; }
+        let mut sortie = alloc::vec::Vec::new();
+        if sortie.try_reserve_exact(longueur).is_err() { return -errno::ENOMEM; }
+        sortie.resize(longueur, 0);
+        (sortie, TransfertRendu::DepuisGpu)
+    };
+    if let Err(e) = virtio_gpu::transfert_texture_rendu(session, id, region, pas, &mut octets, sens) {
+        return erreur(e);
+    }
+    if charge || user_write(adresse, &octets) { 0 } else { -errno::EFAULT }
+}
 
 fn erreur(e: ErreurRendu) -> i64 {
     -(match e {
@@ -69,13 +104,21 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             }
             if user_write(arg, &octets) { 0 } else { -errno::EFAULT }
         }
-        CREE => {
-            if !super::fault_in_user_range(arg, 4, true) { return -errno::EFAULT; }
-            let id = match virtio_gpu::cree_texture_rendu(session) {
+        CREE | CREE_TEXTURE => {
+            let (dimensions, sortie) = if request == CREE_TEXTURE {
+                let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT; };
+                if mot(&buf, 8) != 2 || mot(&buf, 12) != 0 { return -errno::EINVAL; }
+                let Some(sortie) = arg.checked_add(12) else { return -errno::EFAULT; };
+                (Some((mot(&buf, 0), mot(&buf, 4))), sortie)
+            } else {
+                (None, arg)
+            };
+            if !super::fault_in_user_range(sortie, 4, true) { return -errno::EFAULT; }
+            let id = match virtio_gpu::cree_texture_rendu(session, dimensions) {
                 Ok(id) => id,
                 Err(e) => return erreur(e),
             };
-            if !user_write(arg, &id.to_le_bytes()) {
+            if !user_write(sortie, &id.to_le_bytes()) {
                 let _ = virtio_gpu::detruit_texture_rendu(session, id);
                 return -errno::EFAULT;
             }
@@ -87,28 +130,32 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
         }
         CHARGE | RELIT => {
             let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT; };
-            let id = u32::from_le_bytes(buf[..4].try_into().unwrap());
-            if buf[4..8] != [0; 4] { return -errno::EINVAL; }
-            let adresse = u64::from_le_bytes(buf[8..].try_into().unwrap());
-            if request == CHARGE {
-                let Some(octets) = user_read(adresse, OCTETS_TEXTURE) else { return -errno::EFAULT; };
-                let sens = TransfertRendu::VersGpu(octets.as_slice().try_into().unwrap());
-                return virtio_gpu::transfert_texture_rendu(session, id, sens)
-                    .map_or_else(erreur, |()| 0);
-            }
-            if !super::fault_in_user_range(adresse, OCTETS_TEXTURE, true) { return -errno::EFAULT; }
-            let mut octets = [0; OCTETS_TEXTURE];
-            let sens = TransfertRendu::DepuisGpu(&mut octets);
-            if let Err(e) = virtio_gpu::transfert_texture_rendu(session, id, sens) {
-                return erreur(e);
-            }
-            if user_write(adresse, &octets) { 0 } else { -errno::EFAULT }
+            if mot(&buf, 4) != 0 { return -errno::EINVAL; }
+            let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+            transfert(session, request == CHARGE, mot(&buf, 0), None, 32, adresse)
         }
-        BLIT => {
-            let Some(buf) = user_read(arg, 8) else { return -errno::EFAULT; };
-            let source = u32::from_le_bytes(buf[..4].try_into().unwrap());
-            let cible = u32::from_le_bytes(buf[4..].try_into().unwrap());
-            virtio_gpu::blit_texture_rendu(session, source, cible).map_or_else(erreur, |()| 0)
+        CHARGE_REGION | RELIT_REGION => {
+            let Some(buf) = user_read(arg, 32) else { return -errno::EFAULT; };
+            let region = RegionRendu {
+                x: mot(&buf, 4), y: mot(&buf, 8), largeur: mot(&buf, 12), hauteur: mot(&buf, 16),
+            };
+            let adresse = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+            transfert(session, request == CHARGE_REGION, mot(&buf, 0), Some(region), mot(&buf, 20) as usize, adresse)
+        }
+        BLIT | BLIT_REGION => {
+            let taille = if request == BLIT_REGION { 32 } else { 8 };
+            let Some(buf) = user_read(arg, taille) else { return -errno::EFAULT; };
+            let zones = if request == BLIT_REGION {
+                let (largeur, hauteur) = (mot(&buf, 24), mot(&buf, 28));
+                Some((
+                    RegionRendu { x: mot(&buf, 8), y: mot(&buf, 12), largeur, hauteur },
+                    RegionRendu { x: mot(&buf, 16), y: mot(&buf, 20), largeur, hauteur },
+                ))
+            } else {
+                None
+            };
+            virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
+                .map_or_else(erreur, |()| 0)
         }
         _ => -errno::ENOTTY,
     }

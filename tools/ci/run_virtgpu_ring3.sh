@@ -28,8 +28,9 @@ trap arrete EXIT
 mkdir "$sortie/virgl" "$sortie/2d"
 musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-caps-probe.c -o "$sortie/virgl/caps"
 musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/mire-gpu.c -o "$sortie/virgl/mire-gpu"
+musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-textures.c -o "$sortie/virgl/textures"
 cp "$sortie/virgl/caps" "$sortie/2d/caps"
-printf '/caps\nexport BO_AUTOSTART_APP=/mire-gpu\ndesktop\n' > "$sortie/virgl/autorun"
+printf '/caps\n/textures\nexport BO_AUTOSTART_APP=/mire-gpu\ndesktop\n' > "$sortie/virgl/autorun"
 printf '/caps absent\n' > "$sortie/2d/autorun"
 
 demarre() {
@@ -60,6 +61,7 @@ demarre virgl virtio-gpu-gl-pci sdl,gl=on
 attend virgl 'VIRTGPU_BLIT_RING3_OK pixels=64'
 attend virgl 'VIRTGPU_CAPS_OK'
 attend virgl 'VIRTGPU_TEXTURES_RING3_OK'
+attend virgl 'VIRTGPU_TEXTURES_VARIABLES_OK'
 attend virgl 'GPU_COUCHE'
 sleep 3
 import -window root "$sortie/virgl/capture.png"

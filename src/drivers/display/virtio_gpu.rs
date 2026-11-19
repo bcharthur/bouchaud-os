@@ -31,7 +31,7 @@
 #[path = "virtio_gpu_rendu.rs"]
 mod rendu;
 pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
-    transfert_texture_rendu, ErreurRendu, TransfertRendu, OCTETS_TEXTURE};
+    transfert_texture_rendu, ErreurRendu, RegionRendu, TransfertRendu, OCTETS_TEXTURE};
 
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -989,13 +989,7 @@ fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'st
 /// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
 /// dit pourquoi.
 unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) -> bool {
-    let mut liberee = true;
-    if ressource != 0 {
-        if *m == Memoire::Attachee {
-            *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
-        }
-        liberee = suivie(m, libere(f, ressource)) == Ok(RESP_OK_NODATA);
-    }
+    let liberee = ressource == 0 || detache_et_libere(f, ressource, m);
     if dma::peut_rendre(*m) {
         memory::free_dma(phys, octets);
     } else {
@@ -1005,6 +999,13 @@ unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: u
         );
     }
     liberee && dma::peut_rendre(*m)
+}
+
+unsafe fn detache_et_libere(f: &mut FileControle, ressource: u32, m: &mut Memoire) -> bool {
+    if *m == Memoire::Attachee {
+        *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+    }
+    suivie(m, libere(f, ressource)) == Ok(RESP_OK_NODATA)
 }
 
 unsafe fn autotest_2d_etapes(
