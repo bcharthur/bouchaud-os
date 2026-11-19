@@ -185,7 +185,21 @@ class Evaluateur:
             if self.voit("("):
                 self.i += 1
                 if not self.voit(")"):
-                    raise SimulationErreur(f"{val}() avec arguments non simule")
+                    # Fonction de chaine de GitHub, sans etat de job,
+                    # insensible a la casse comme sur GitHub.
+                    args = [self.ou()]
+                    while self.voit(","):
+                        self.i += 1
+                        args.append(self.ou())
+                    if not self.voit(")"):
+                        raise SimulationErreur(f"{val}() : parenthese non fermee")
+                    self.i += 1
+                    # SEUL startsWith est simule (jobs de branche de perf) ;
+                    # toute autre fonction a arguments reste refusee.
+                    chaines = {"startsWith": lambda a, b: a.startswith(b)}
+                    if val not in chaines or len(args) != 2:
+                        raise SimulationErreur(f"{val}() avec arguments non simule")
+                    return chaines[val](str(norm(args[0]) or "").lower(), str(norm(args[1]) or "").lower())
                 self.i += 1
                 if val not in self.fn:
                     raise SimulationErreur(f"fonction inconnue {val}()")
