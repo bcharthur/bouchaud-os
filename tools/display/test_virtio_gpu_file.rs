@@ -168,3 +168,12 @@ fn le_type_et_la_longueur_doivent_correspondre_a_la_commande() {
     assert!(!file::corps_valide(0x0100, 0x1101, 40, 408));
     assert!(file::corps_valide(0x0109, 0x1205, ENTETE, 80));
 }
+
+
+#[test]
+fn la_barriere_d_un_anneau_venus_doit_identifier_son_contexte() {
+    assert!(file::contexte_valide(0b11, 0xb105, 0xb105));
+    assert!(!file::contexte_valide(0b11, 0xb105, 0xb104));
+    assert!(!file::contexte_valide(0b11, 0xb105, 0));
+    assert!(file::contexte_valide(0b01, 0xb105, 0));
+}

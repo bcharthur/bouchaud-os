@@ -857,6 +857,17 @@ impl FileControle {
             );
             return Err(dma::REPONSE_INVALIDE);
         }
+        let flags_requete = u32::from_le_bytes(requete[4..8].try_into().unwrap());
+        let contexte_attendu = u32::from_le_bytes(requete[16..20].try_into().unwrap());
+        let contexte_recu = read_volatile(reponse.add(16) as *const u32);
+        if !file::contexte_valide(flags_requete, contexte_attendu, contexte_recu) {
+            self.cassee = true;
+            crate::serial_println!(
+                "VIRTIO_GPU_FILE violation=contexte-incompatible attendu={:#x} recu={:#x}",
+                contexte_attendu, contexte_recu
+            );
+            return Err(dma::REPONSE_INVALIDE);
+        }
         { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
         // BOUCHAUD_GPU_ATTRIBUTION_V1 : duree de l'aller-retour, par genre.

@@ -146,6 +146,12 @@ pub fn corps_valide(commande: u32, reponse: u32, taille: u32, capacite: u32) -> 
     reponse == attendu && taille == if attendu == 0x1100 { ENTETE } else { capacite }
 }
 
+/// QEMU renvoie ctx_id avec la clôture mais pas nécessairement le ring_idx.
+pub fn contexte_valide(drapeaux: u32, attendu: u32, recu: u32) -> bool {
+    const INFO_RING_IDX: u32 = 1 << 1;
+    drapeaux & INFO_RING_IDX == 0 || attendu == recu
+}
+
 /// Pose le drapeau et le `fence_id` dans l'en-tete d'une requete.
 pub fn pose_barriere(requete: &mut [u8], barriere: u64) {
     let d = u32::from_le_bytes([
