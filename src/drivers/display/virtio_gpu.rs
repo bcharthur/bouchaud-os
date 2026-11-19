@@ -1602,6 +1602,15 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
     Some((virt as *mut u32, phys))
 }
 
+/// Ferme le scanout lors du retour au GOP, sous le meme verrou que la presentation.
+pub fn desactive_scanout() {
+    let Some(mut garde) = verrou() else { return };
+    let Some(p) = garde.as_mut() else { return };
+    if let Some(s) = p.scanout {
+        unsafe { rend_scanout(p, s) };
+    }
+}
+
 /// Rend le scanout du bureau : ecran eteint (SET_SCANOUT ressource 0),
 /// DETACH, UNREF ; la memoire n'est rendue que si le peripherique ne peut
 /// plus la tenir (`virtio_gpu_dma`).
@@ -1890,6 +1899,11 @@ static GPU_NS: AtomicU64 = AtomicU64::new(0);
 /// `gpu-composition on|off` : la politique (A/B) ; rend la precedente.
 pub fn veut_composition_gpu(oui: bool) -> bool {
     COMPOSITION_VOULUE.swap(oui, Ordering::AcqRel)
+}
+
+/// Le BLIT et sa convention ont ete verifies au pixel pendant la sonde.
+pub fn composition_gpu_etalonnee() -> bool {
+    P10_VIRGL_PRET.load(Ordering::Acquire)
 }
 
 /// Le compositeur GPU peut-il servir cette trame ? VIRGL negocie, scanout

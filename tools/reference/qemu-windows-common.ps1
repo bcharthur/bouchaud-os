@@ -82,7 +82,8 @@ function Get-BouchaudGraphicsArguments {
         throw "QEMU ne fournit pas virtio-gpu-gl-pci. Utiliser le profil CPU ou un build QEMU disposant de virglrenderer."
     }
     Write-Host 'QEMU_GPU_DEVICE=virtio-gpu-gl-pci GL=on RENDERER_HOST=non-verifie'
-    return @('-vga','none','-device','virtio-gpu-gl-pci')
+    Write-Host 'QEMU_GPU_DISPLAY=virtio secondaire. Le VGA primaire porte le GOP de secours.'
+    return @('-vga','std','-device','virtio-gpu-gl-pci')
 }
 
 function Get-BouchaudInputArguments {
