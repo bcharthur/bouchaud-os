@@ -36,6 +36,9 @@ fi
 SORTIE=${GPU_COMPOSITION_SORTIE:-$PWD/gpu-composition}
 DUREE_AB=${GPU_COMPOSITION_DUREE:-110}
 rm -rf "$SORTIE"; mkdir -p "$SORTIE"
+# Un rebuild en cours de banc ne doit pas changer le noyau d'un bras A/B.
+cp -- "$BOOT" "$SORTIE/boot-reference.bin"
+BOOT="$SORTIE/boot-reference.bin"
 AIDE=$(qemu-system-x86_64 -device help 2>&1 || true)
 grep -q virtio-gpu-gl-pci <<<"$AIDE" \
   || { echo "GPU_COMPOSITION_ECHEC qemu sans virtio-gpu-gl-pci" >&2; exit 1; }
