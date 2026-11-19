@@ -162,7 +162,7 @@ jobs:
     # echec bloque, un run annule ou saute ne prouve rien. Pas sur les
     # workflows dont un gate est un check requis de `main`.
     name: dedoublonne push/PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
@@ -198,7 +198,7 @@ jobs:
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: native-ipc-runtime
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 30 min, plus le bureau ring 3 (deux demarrages QEMU, ~3 min sous TCG)
     # et ses entrees (un demarrage, ~4 min sous TCG), et le bureau utilisable
     # (un demarrage, ~5 min sous TCG).
@@ -323,7 +323,7 @@ jobs:
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: ab-rollback (${{ matrix.scenario }}, ${{ matrix.support }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # BOUCHAUD_OTA_V1 : ota-complet / ota-rollback construisent DEUX noyaux et
     # telechargent ~100 Mo en TLS sous TCG (ota-reseau : deux fois, plus une
     # relance de 60 s) ; les autres scenarios gardent 40.
@@ -396,7 +396,7 @@ jobs:
     name: native-ipc / verdict
     needs: [dedoublonne, native-ipc-runtime, ab-rollback]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read

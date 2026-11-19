@@ -41,7 +41,7 @@ concurrency:
 jobs:
   gate:
     name: integration / gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.gate.outputs.run }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
@@ -102,7 +102,7 @@ jobs:
     name: kernel / bootimage once
     needs: gate
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -154,7 +154,7 @@ jobs:
     name: qemu / boot smoke
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 8 min pour le boot minimal, plus ~1 min pour le releve des fils.
     timeout-minutes: 12
     steps:
@@ -186,7 +186,7 @@ jobs:
     name: qemu / nvme + gpt
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
@@ -261,7 +261,7 @@ jobs:
     name: qemu / system health
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -291,7 +291,7 @@ jobs:
     name: qemu / python depuis le disque
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -320,7 +320,7 @@ jobs:
     name: qemu / noyau fige, proprietaire du verrou
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -387,7 +387,7 @@ jobs:
     name: qemu / tempete fork+exec (fuite de processus)
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -422,7 +422,7 @@ jobs:
     name: qemu / reactivite Atelier (KVM, TCG)
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -460,7 +460,7 @@ jobs:
     name: qemu / fenetre de migration des marques par coeur
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -501,7 +501,7 @@ jobs:
     name: qemu / os primitives
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.primitives == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -533,7 +533,7 @@ jobs:
     name: qemu / proc-stat et cout du fork
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Deux scenarios QEMU emules, dont un qui projette et recopie 256 Mio.
     timeout-minutes: 45
     steps:
@@ -571,7 +571,7 @@ jobs:
     name: qemu / mm-ng6 smp4
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.mm == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -607,7 +607,7 @@ jobs:
     name: host / qt pixel
     needs: gate
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.userland == 'true' || needs.gate.outputs.browser_engine == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     timeout-minutes: 12
     steps:
@@ -627,7 +627,7 @@ jobs:
     name: qemu / dns udp ring3
     needs: gate
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -688,7 +688,7 @@ jobs:
     name: qemu / bar pci hors fenetre (uefi, 46 bits)
     needs: gate
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -722,7 +722,7 @@ jobs:
     name: qemu / dhcp + reprise rx
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -774,7 +774,7 @@ jobs:
     name: qemu / arbre usb
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -800,7 +800,7 @@ jobs:
     name: qemu / branchement a chaud
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -827,7 +827,7 @@ jobs:
     name: qemu / stockage usb (bulk-only)
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
@@ -863,7 +863,7 @@ jobs:
     name: qemu / liaison volume usb
     needs: [gate, kernel-build]
     if: needs.gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -889,7 +889,7 @@ jobs:
     name: qemu / BRDP + telemetry e2e
     needs: gate
     if: needs.gate.outputs.run == 'true' && (needs.gate.outputs.kernel == 'true' || inputs.suite == 'all')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -922,7 +922,7 @@ jobs:
     name: integration-gate
     if: always()
     needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, tempete-exec, fenetre-migration, atelier-reactivite, os-primitives, mm-ng6, qt-pixel, dns-udp, bar-haute, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Synthese
         env:

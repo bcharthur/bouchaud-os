@@ -38,7 +38,7 @@ concurrency:
 jobs:
   unix-fs:
     name: unix-fs (TCG + KVM)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4

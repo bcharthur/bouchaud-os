@@ -17,7 +17,7 @@ jobs:
   non-regression-gate:
     name: non-regression-gate
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
