@@ -49,6 +49,10 @@ R_PROC_STAT_TEMPS = re.compile(r"\[PROC-STAT\] capacite_ms=\d+ occupe_ms=\d+ .*?
 R_PERF_RIP = re.compile(r"\[PERF-RIP\] t=\d+ pid=\d+ tid=\d+ image=(\S*) user=(\d+) noyau=(\d+) base=\S+ top=\S* topn=(\S*)")
 R_IPI = re.compile(r"\[SMP-IPI\] t=(\d+) (.*)")
 R_IPI_COEUR = re.compile(r"c\d+=(\d+)/")
+R_DISPO = re.compile(r"\[DISPO\] notifs_globales=(\d+) notifs_ciblees=(\d+) files_reveillees=(\d+) attentes=(\d+) reveils_a_vide=(\d+)")
+# Le temps de l'invite porte par les releves periodiques (`t=` en ms) : en
+# UEFI, `PROC-STAT` (ticks/mono) n'est pas publie.
+R_T_INVITE = re.compile(r"\[(?:PERF-PROC|PERF-RIP|SMP-IPI)\] t=(\d+) ")
 R_CONSOLE = re.compile(r"BOUCHAUD_CONSOLE_BILAN active=\d+ repli_securite=\d+ lignes=(\d+) emises=(\d+) .*?synchrones=(\d+) synchrone_pire_us=(\d+)")
 R_SYSCALL_TOP = re.compile(r"\[SYSCALL-TOP\] window_ns=(\d+) appels=(\d+) distincts=\d+ cumul=(\d+)(.*)")
 R_APPEL = re.compile(r" ([a-z_0-9?]+)=(\d+)/eagain=(\d+)")
@@ -106,6 +110,9 @@ def coherence_hote(texte: str, duree_hote_s: float | None) -> dict:
     """
     vus = R_PROC_STAT_TEMPS.findall(texte)
     ticks, mono = (int(vus[-1][0]), int(vus[-1][1])) if vus else (None, None)
+    if mono is None:
+        t = [int(x) for x in R_T_INVITE.findall(texte)]
+        mono = max(t) if t else None
     r = {"ticks_ms": ticks, "mono_ms": mono,
          "ticks_sur_mono_pour_mille": (ticks * 1000 // mono) if ticks and mono else None,
          "duree_hote_s": duree_hote_s, "invite_sur_hote_pour_mille": None}
@@ -175,6 +182,7 @@ def analyse(texte: str, duree_hote_s: float | None = None) -> dict:
     ipi_total = sum(int(x) for x in R_IPI_COEUR.findall(ipi[-1][1])) if ipi else None
     ipi_t_s = int(ipi[-1][0]) / 1000 if ipi else None
     console = R_CONSOLE.findall(texte)
+    dispo = R_DISPO.findall(texte)
     appels: dict[str, int] = {}
     eagain: dict[str, int] = {}
     fenetres_ns = 0
@@ -194,6 +202,12 @@ def analyse(texte: str, duree_hote_s: float | None = None) -> dict:
         "rip_noyau_chaudes": dict(sorted(chaudes.items(), key=lambda kv: -kv[1])[:12]),
         "ipi_total": ipi_total,
         "ipi_par_s": round(ipi_total / ipi_t_s) if ipi_total is not None and ipi_t_s else None,
+        # BOUCHAUD_REVEIL_CIBLE_V1 : notifications, reveils, et reveils A VIDE
+        # (une attente reveillee sans rien de pret) -- le cout du reveil
+        # collectif. Absent des noyaux anterieurs : None.
+        "dispo": ({"notifs_globales": int(dispo[-1][0]), "notifs_ciblees": int(dispo[-1][1]),
+                   "files_reveillees": int(dispo[-1][2]), "attentes": int(dispo[-1][3]),
+                   "reveils_a_vide": int(dispo[-1][4])} if dispo else None),
         "journal_octets": len(texte.encode("utf-8", "replace")),
         "journal_lignes": texte.count("\n"),
         "console": ({"lignes": int(console[-1][0]), "emises": int(console[-1][1]),
@@ -256,6 +270,10 @@ def resume(a: dict) -> str:
             f"{k}=u{u}/n{n}" for k, (u, n) in sorted(a["rip_user_noyau"].items(), key=lambda kv: -sum(kv[1]))[:6]))
         l.append("RIP noyau chauds : " + " ".join(f"{k}:{v}" for k, v in list(a["rip_noyau_chaudes"].items())[:8]))
     l.append(f"IPI              : total={a['ipi_total']} par_s={a['ipi_par_s']}")
+    d = a["dispo"]
+    if d:
+        l.append(f"reveils (poll)   : attentes={d['attentes']} reveils_a_vide={d['reveils_a_vide']} "
+                 f"notifs ciblees={d['notifs_ciblees']} globales={d['notifs_globales']} files_reveillees={d['files_reveillees']}")
     cons = a["console"]
     l.append(f"journal serie    : {a['journal_octets'] // 1024} Kio, {a['journal_lignes']} lignes"
              + (f" ; console emises={cons['emises']} synchrones={cons['synchrones']} (pire {cons['synchrone_pire_us']} us)"

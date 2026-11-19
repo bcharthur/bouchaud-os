@@ -83,6 +83,15 @@ class Analyse(unittest.TestCase):
         self.assertEqual(a.verdict_final(a.analyse(texte, 150.0))[0], "incoherente")
         self.assertEqual(a.verdict_final(a.analyse(texte))[0], "inconnue")
 
+    def test_temps_invite_sans_proc_stat_et_dispo(self):
+        texte = ("[SMP-IPI] t=150000 c0=1/0ms/0x1/u0 c1=0/0ms/0x0/u0 c2=0/0ms/0x0/u0 c3=0/0ms/0x0/u0\n"
+                 "[DISPO] notifs_globales=5 notifs_ciblees=900 files_reveillees=950 attentes=1000 reveils_a_vide=20 abonnes=30")
+        s = a.analyse(texte, 160.0)
+        # UEFI : pas de PROC-STAT ; le temps de l'invite vient des releves t=.
+        self.assertEqual(s["coherence"]["invite_sur_hote_pour_mille"], 937)
+        self.assertEqual(a.verdict_final(s)[0], "coherente")
+        self.assertEqual(s["dispo"]["reveils_a_vide"], 20)
+
     def test_horloge_incoherente_refusee(self):
         h = a.horloge("BOUCHAUD_TSC_CONTROLE hz=1000000000 source=pit2 hz_selon_ticks=4000000000 rapport_pour_mille=4000 cycles_par_ms=1")
         self.assertEqual(h["verdict"], "incoherente")
