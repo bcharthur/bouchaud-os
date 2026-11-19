@@ -179,7 +179,12 @@ def verifie(t: dict) -> list:
         if attendu not in art:
             f.append("artefact : producteur unique non exige")
             break
-    # 6
+    # 6 -- la condition d'attente, telle quelle ; une conjonction de plus
+    # (`&& startsWith(github.head_ref, ...)`) ne peut que RESTREINDRE le job,
+    # jamais le faire jouer sans l'artefact verifie.
+    ATTENTE_ARTEFACT = re.compile(
+        r"if: \$\{\{ !cancelled\(\) && needs\.dedoublonne\.outputs\.reutilise != 'true' "
+        r"&& needs\.artefact\.result == 'success'( && [^|\n]+?)? \}\}$", re.M)
     for nom, bloc in j.items():
         if nom in ("build", "reutilise"):
             continue
@@ -190,7 +195,7 @@ def verifie(t: dict) -> list:
         i_v = index(es, lambda x: LIAISON in x[1])
         e_job = entete(bloc)
         if not re.search(r"^    needs: \[dedoublonne, artefact\]$", e_job, re.M) or not i_dl < i_v \
-                or "if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}" not in e_job:
+                or not ATTENTE_ARTEFACT.search(e_job):
             f.append(f"{nom} : joue l'artefact sans l'attendre explicitement ou sans le verifier")
     # 7
     conv = j.get("convergence", "")

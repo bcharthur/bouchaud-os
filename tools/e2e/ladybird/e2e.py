@@ -54,6 +54,8 @@ PANIQUES = ("KERNEL PANIC", "DOUBLE FAULT", "TRIPLE FAULT", "panicked at")
 
 sys.path.insert(0, str(ICI))
 import fixture as _fixture  # noqa: E402  (couleurs des pages de reference)
+sys.path.insert(0, str(RACINE / "tools" / "perf"))
+import analyse_session as _session  # noqa: E402  (BOUCHAUD_PERF_SESSION_V1)
 
 # Bouchaud OS decode le clavier en AZERTY (src/drivers/input/clavier_decodeur.rs) ;
 # `sendkey` nomme des touches PHYSIQUES (QWERTY US). Meme table que
@@ -143,6 +145,12 @@ class Moniteur:
     def touche(self, physique: str) -> None:
         self.cmd(f"sendkey {physique}")
         time.sleep(0.05)
+
+    def molette(self, crans: int) -> None:
+        """`crans` < 0 : vers le BAS (`mouse_move 0 0 -1`, run_ladybird_browser_host.sh)."""
+        pas = -1 if crans < 0 else 1
+        for _ in range(abs(crans)):
+            self.cmd(f"mouse_move 0 0 {pas}")
 
     def capture(self, chemin: Path) -> None:
         self.cmd("stop")
@@ -335,6 +343,25 @@ class Banc:
             if e.get("entree"):
                 self.mon.touche("ret")
             return True, ""
+        if "survole_client" in e:
+            # Le pointeur au-dessus de la PAGE : la molette va a la vue sous lui.
+            z = zone_client(self.texte(), e["survole_client"])
+            if z is None:
+                return False, f"geometrie de la fenetre « {e['survole_client']} » absente"
+            x, y, w, h = z
+            self.mon.va(x + w // 2, y + int(e.get("dy", h // 2)))
+            return True, ""
+        if "molette" in e:
+            # BOUCHAUD_E2E_PAGE_LOURDE_V1 : l'instant est pris AVANT le geste ;
+            # l'attente suivante (`apres_molette=1`) ne voit que la trame qui
+            # le suit, jamais une trame plus ancienne.
+            self.curseur = len(self.texte())
+            if nom:
+                self.instants[nom] = self.maintenant_ms()
+            self.mon.molette(int(e["molette"]))
+            return True, ""
+        if "attend_couleur" in e:
+            return self.attend_couleur(e, nom)
         if "pause_s" in e:
             time.sleep(float(e["pause_s"]))
             return True, ""
@@ -397,6 +424,41 @@ class Banc:
             self.instants[nom] = self.maintenant_ms()
         self.mon.clic()
         return True, ""
+
+    def attend_couleur(self, e: dict, nom: str | None) -> tuple[bool, str]:
+        """L'IMAGE UTILE : le bloc de couleur de la page est A L'ECRAN.
+
+        Un document charge n'est pas une image affichee. On sonde l'ecran
+        (`screendump`) jusqu'a voir le bloc ; l'instant retenu est celui de la
+        capture qui le montre. Resolution : une capture (~0,1 a 0,5 s, la VM
+        etant suspendue pendant la copie) -- assez pour des delais de
+        plusieurs secondes, pas pour des millisecondes.
+        """
+        couleur = _fixture.COULEURS[e["attend_couleur"]]
+        min_px = int(e.get("min_px", 20000))
+        fin = time.time() + float(e.get("delai_s", 120))
+        ppm = self.captures / "sonde.ppm"
+        n = 0
+        while time.time() < fin:
+            t = self.maintenant_ms()
+            self.mon.capture(ppm)
+            limite = time.time() + 10
+            while (not ppm.exists() or ppm.stat().st_size == 0) and time.time() < limite:
+                time.sleep(0.05)
+            try:
+                _, _, rgb = lit_ppm(ppm)
+                n = pixels_de_couleur(rgb, couleur)
+            except (OSError, ValueError, IndexError):
+                n = 0
+            ppm.unlink(missing_ok=True)
+            if n >= min_px:
+                if nom:
+                    self.instants[nom] = t
+                return True, ""
+            if self.qemu.poll() is not None:
+                return False, "QEMU arrete pendant l'attente de l'image utile"
+            time.sleep(0.2)
+        return False, f"bloc {e['attend_couleur']} jamais visible en {e.get('delai_s', 120)} s (dernier : {n} px)"
 
     def capture(self, e: dict) -> tuple[bool, str]:
         nom = e["capture"]
@@ -550,6 +612,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--tls-dir", dest="tls_dir", default=None,
                    help="materiel de tls/genere_tls.py ; sert ${FIXTURE_TLS} (certificat expire)")
     p.add_argument("--exige", default="E2E-01,E2E-02")
+    # BOUCHAUD_PERF_SESSION_V1 : une ETIQUETTE de l'A/B, posee par
+    # prepare_disque.py --mimalloc sur le disque ; le banc ne la verifie pas,
+    # il la porte dans le rapport pour que deux runs ne se confondent pas.
+    p.add_argument("--politique-mimalloc", dest="politique_mimalloc", default="actuelle")
     o = p.parse_args(argv[1:])
     for f in (o.boot, o.disque):
         if not f.is_file():
@@ -568,7 +634,7 @@ def main(argv: list[str]) -> int:
         "commit": commit_git(), "bootimage_sha256": sha256(o.boot), "disque_sha256": empreinte_disque,
         "qemu": version_qemu(o.qemu), "hote": hote(),
         "environnement": {"accel_demande": o.accel, "accel_reel": None, "signature_cpuid": None, "smp": o.smp,
-                          "memoire_mio": o.memoire, "affichage": "vga std, sans fenetre", "gpu": "aucun (VGA standard)"},
+                          "politique_mimalloc": o.politique_mimalloc, "memoire_mio": o.memoire, "affichage": "vga std, sans fenetre", "gpu": "aucun (VGA standard)"},
         "horloges": "t_hote_ms : horloge monotone de l'HOTE depuis le lancement de QEMU ; *_invite : horloge du noyau. Jamais melangees.",
     }
     banc = Banc(o, sortie)
@@ -596,6 +662,9 @@ def main(argv: list[str]) -> int:
     accel_ok = manifeste["environnement"]["accel_reel"] == attendu
     panique = [p for p in PANIQUES if p in texte]
     disque_intact = sha256(o.disque) == empreinte_disque
+    session = _session.analyse(texte, duree_hote_s=banc.maintenant_ms() / 1000)
+    for ligne in _session.resume(session).splitlines():
+        print("E2E_SESSION " + ligne, flush=True)
 
     liste = [resultats[sc["id"]] for sc in choisis]
     echecs = [r for r in liste if r["statut"] == "FAIL" and r.get("bloquant", True)]
@@ -612,7 +681,8 @@ def main(argv: list[str]) -> int:
     (sortie / "performance.json").write_text(json.dumps({
         "schema": "bouchaud-e2e-performance/1", "environnement": manifeste["environnement"],
         "avertissement": "valeurs d'UN demarrage ; ne jamais melanger des environnements (TCG, KVM, WHPX, materiel)",
-        "metriques": {r["id"]: r.get("metriques", {}) for r in liste}}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        "metriques": {r["id"]: r.get("metriques", {}) for r in liste},
+        "session": session}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (sortie / "failures.json").write_text(json.dumps([
         {"id": r["id"], "statut": r["statut"], "cause": r.get("cause")} for r in liste
         if r["statut"] in ("FAIL", "BLOCKED_EXTERNAL", "NON_MESURABLE")]

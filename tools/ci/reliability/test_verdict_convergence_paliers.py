@@ -151,8 +151,10 @@ class SimulationTests(unittest.TestCase):
         # cablage de 14f9bcfa. GitHub a saute ces 15 jobs ; le simulateur aussi.
         casse = self.texte.replace(
             "    needs: [dedoublonne, artefact]\n", "    needs: artefact\n")
+        # La condition peut porter une conjonction de plus (jobs des branches
+        # de perf, BOUCHAUD_PERF_SESSION_V1) : la ligne entiere est retiree.
         casse = "\n".join(l for l in casse.split("\n")
-                          if l != "    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}")
+                          if not l.startswith("    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success'"))
         sc = self.sp.Scenario("dev", "push", mode="reutilise")
         r = self.sp.simule(casse, sc)
         sautes = sorted(j for j, res in r["resultats"].items() if res == "skipped")
@@ -161,7 +163,10 @@ class SimulationTests(unittest.TestCase):
         # (image de livraison, BOUCHAUD_LIVRAISON_V1), `perf-surface` (A/B
         # de la surface, BOUCHAUD_PERF_V1) et `e2e-parcours` (parcours E2E,
         # BOUCHAUD_E2E_LADYBIRD_V1), cables de meme.
-        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance", "attente")]), 18,
+        # Les jobs des branches de perf (ab-perf, son bilan, C22 sous purge
+        # 10 ms) sautent ici de toute facon : aucune branche claude/perf-*.
+        self.assertEqual(len([j for j in sautes if j not in ("build", "primitives", "performance", "attente",
+                                                            "ab-perf", "ab-perf-bilan", "memoire-c22-delai10")]), 18,
                          sautes)
         self.assertFalse(r["verdict_ok"])
         self.assertTrue(self.sp.controle(casse))
@@ -216,6 +221,9 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(ev.evalue("'l''apostrophe'"), "l'apostrophe")
         with self.assertRaises(self.sp.SimulationErreur):
             ev.evalue("contains(x, 'a')")
+        # BOUCHAUD_PERF_SESSION_V1 : startsWith, et lui seul, est simule.
+        self.assertTrue(ev.evalue("startsWith(x, 'A')"))
+        self.assertFalse(ev.evalue("startsWith(y, 'a')"))
 
 
 if __name__ == "__main__":
