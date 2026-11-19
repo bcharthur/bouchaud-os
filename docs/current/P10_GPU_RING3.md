@@ -37,6 +37,22 @@ Le profil journalise RENDERER_HOST=non-verifie. Pour qualifier la RTX
 GPU pendant la charge via les outils Windows/NVIDIA. Une RTX détectée
 dans l’hôte ou un périphérique VirtIO négocié ne suffit pas.
 
+La campagne est reproductible avec les deux profils Stage 2 déjà
+construits et le même disque Ladybird. Dans PowerShell :
+
+~~~powershell
+.\tools\reference\build-reference-stage2.ps1
+.\tools\reference\build-reference-stage2.ps1 -Virgl
+.\tools\reference\run-stage2-gpu-ab.ps1 -Url https://example.com/ -Sortie .\target\gpu-ab -Accel whpx -Smp 1
+~~~
+
+Le banc alterne l’ordre CPU/VIRGL et vérifie les empreintes des deux
+images Stage 2 et de Ladybird entre les essais. Les interactions sont
+affichées pour être répétées à l’identique. Chaque rapport JSON
+référence la série, les diagnostics QEMU et le fichier de mesures,
+et distingue un contexte GL refusé d’un périphérique 3D refusé.
+Il s’arrête sur un échec et conserve les rapports déjà produits.
+
 Pour qualifier la session, conserver le même exécutable QEMU, la même
 image Ladybird, un instantané disque par lancement, la même résolution,
 le même nombre de vCPU et la même séquence d’actions. Alterner les
@@ -84,6 +100,21 @@ endian.
 | Relire | `0x401042a4` | Même structure, sortie de 256 octets |
 | Copier | `0x400842a5` | `{u32 source, u32 cible}` |
 
+Pour une nouvelle application, utiliser `tools/userland/bouchaud-gpu.h`.
+Les ioctls `0xa6` à `0xa9` acceptent des textures BGRX8888 de 1 à
+1 024 pixels de côté, initialisées à zéro, et des rectangles bornés.
+Le pas utilisateur est exprimé en octets, multiple de quatre, entre
+la largeur du rectangle × 4 et 4 096. La relecture rend zéro dans les
+interstices entre lignes. Les pixels hors du rectangle cible d’un
+BLIT restent intacts. Le contenu X est ignoré. Le dossier utilisateur
+contient une application autonome qui utilise uniquement cet en-tête.
+
+Le pilote borne le total à 16 Mio et à 8 Mio par ouverture. Il utilise
+une liste VirtIO de segments DMA de 64 Kio au plus et libère tous les
+segments seulement après détachement confirmé. Le compteur
+d’identifiants ne recycle pas les valeurs lors d’un démarrage.
+L’API historique 8 × 8 continue d’accepter les mêmes requêtes.
+
 Chaque descripteur ouvert possède jusqu’à deux textures, dans une limite
 globale de huit. Un descripteur dupliqué ou hérité conserve le même
 propriétaire. Une ouverture indépendante reçoit un autre propriétaire.
@@ -113,6 +144,17 @@ relecture avant initialisation, la réutilisation d’un identifiant
 détruit, le quota et la récupération après fermeture. Le capset VIRGL2 v2
 obtenu en TCG faisait 1 384 octets. La mire a donné 254 934 pixels exacts,
 1 066 blancs attendus et zéro pixel erroné.
+
+Le banc supplémentaire vérifie 2 376 978 pixels sur huit cycles à
+64 × 64, 256 × 256, 513 × 137 et 1 024 × 1 024. Les dimensions
+irrégulières exercent les lignes qui traversent un segment DMA.
+Il vérifie aussi le rejet du format, du pas et des rectangles invalides.
+Le test multiprocessus synchronise la création, le chargement et le
+BLIT entre deux ouvertures indépendantes, puis compare 786 432 pixels
+sur douze cycles. Un processus tué par SIGKILL laisse deux textures
+que l’allocation suivante doit récupérer. Le banc reste à exécuter
+avec une fermeture pendant une commande en vol. Répéter avec
+`BO_VIRTGPU_SMP=4` pour le profil quatre vCPU.
 
 ## Mesure Linux TCG avec rendu logiciel hôte
 
@@ -168,10 +210,40 @@ grep -E 'P10_VENUS_CONTEXTE_OK|P10_BLOB_INVITE_OK' venus-serie.log
 Les deux marqueurs doivent apparaître. L’essai local utilise
 Mesa logiciel pour GL et Lavapipe comme ICD Vulkan hôte.
 Les images livrées continuent de négocier VERSION_1 et VIRGL.
-Un pilote Vulkan invité exige encore le mappage hostmem,
-les ressources `HOST3D`, la soumission de commandes Venus et
-une validation avec Mesa Venus dans l’invité. Le test UEFI sans
+Un pilote Vulkan invité exige encore des handles DRM et le
+cycle complet des ressources adossées à de la mémoire Vulkan. Le test UEFI sans
 périphérique VirtIO a sélectionné le GOP avec la même image.
+
+Le banc ring 3 exécuté sur QEMU 10.0.13 puis 11.1.3, avec
+virglrenderer 1.1.0 et son exécutable `virgl_render_server`, a reçu trois
+réponses à `vkEnumerateInstanceVersion` par hôte. Le périphérique
+annonce une fenêtre PCI hostmem de 256 Mio. Seule une page de cette
+fenêtre est utilisée, dans le noyau. Un blob HOST3D mappable (ID blob
+zéro) porte le flux de réponse. Le banc contrôle l’opcode, le résultat
+Vulkan et la version 1.3.309 après la clôture et la publication de la
+réponse. Aucun flux de commandes arbitraire n’entre par l’ioctl.
+
+~~~bash
+cargo bootimage --features banc-gpu-venus
+DISPLAY=:77 tools/ci/run_virtgpu_venus.sh \
+  target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin /tmp/venus-ring3
+~~~
+
+Il faut le module OpenGL de QEMU et le serveur de rendu correspondant
+à virglrenderer. En installation extraite, définir
+`RENDER_SERVER_EXEC_PATH` vers `virgl_render_server`. Pour reproduire
+le profil logiciel, fournir le chemin de l’ICD Lavapipe avec
+`VK_DRIVER_FILES` et définir `LIBGL_ALWAYS_SOFTWARE=1`.
+
+Le profil `BO_VENUS_DEMAPPE=1` ajoute le détachement et la réouverture.
+Sur QEMU 11.1.3, `RESOURCE_UNMAP_BLOB` a expiré en TCG à un et plusieurs
+fils d’émulation. Sur QEMU 11.2 RC avec virglrenderer 1.3.0, le
+démappage, la destruction et la réouverture ont passé avec Vulkan
+1.4.309. Ce profil doit réussir le démappage pour passer.
+Le profil de requête garde une seule page de transport jusqu’au reset
+et les images de production excluent le banc. La requête de version
+n’alloue pas de buffer de périphérique ni ne soumet `vkCmdFillBuffer`.
+Mesa et le loader restent à intégrer dans l’invité.
 
 La sonde autonome tools/userland/vulkan-transfert-probe.c fait un
 vkCmdFillBuffer puis vérifie une relecture de 4 096 octets après fence.
@@ -233,3 +305,17 @@ du noir intermittent. Les garde-fous DMA et VirtIO-PCI passent
 avec 13 cas négatifs DMA et 31 cas VirtIO-PCI, dont les 25
 existants. Les nouveaux cas vérifient l’isolement du banc Venus,
 les bits écrits et la restitution de sa page DMA.
+
+Pour le repli GOP, construire une image Stage 2 avec
+`uefi-boot,reference-bringup,reference-desktop,p10-virgl-experimental,banc-gpu-perte-scanout`
+et passer cette image à `tools/ci/run_virtgpu_gop_fault.sh` avec les deux
+fichiers OVMF et un dossier de preuves neuf. Le banc lance une mire
+ring 3, vérifie l’ordre couche GPU → perte injectée sans transfert 2D
+→ retour GOP → 600 trames, puis lit l’écran VGA primaire via QMP.
+Sous QEMU 11.1.3 TCG, le repli à la trame 120 a laissé 254 934 pixels
+exacts et zéro pixel faux. La capture QMP porte sur le GOP après la
+perte. Le passage du GPU avant la perte est vérifié dans la série.
+Le banc injecte une file cassée et exige un redémarrage pour retrouver
+VirtIO après ce type de perte. Sur un des lancements QEMU 10.0.13/GTK,
+le processus a échoué sur EGL_BAD_ACCESS avant le scanout de l’invité.
+Le premier écran noir de la campagne antérieure reste à isoler.
