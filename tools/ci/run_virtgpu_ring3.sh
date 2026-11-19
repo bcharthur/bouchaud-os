@@ -39,8 +39,9 @@ demarre() {
 
 attend() {
     local nom=$1 marqueur=$2 fin=$((SECONDS + 60))
-    while (( SECONDS < fin )) && kill -0 "$pid" 2>/dev/null; do
+    while (( SECONDS < fin )); do
         if grep -aqF "$marqueur" "$sortie/$nom/serie.log" 2>/dev/null; then return 0; fi
+        kill -0 "$pid" 2>/dev/null || break
         sleep 0.5
     done
     echo "VIRTGPU_RING3_ECHEC $nom marqueur_absent=$marqueur" >&2
@@ -60,4 +61,8 @@ arrete
 demarre 2d virtio-gpu-pci none
 attend 2d 'BOUCHAUD_VIRTIO_GPU_2D_AUTOTEST_OK'
 attend 2d 'VIRTGPU_CAPS_ABSENT_OK'
+if grep -aEq 'KERNEL PANIC|panicked at|DOUBLE FAULT|TRIPLE FAULT' "$sortie"/{virgl,2d}/serie.log; then
+    echo 'VIRTGPU_RING3_ECHEC faute noyau' >&2
+    exit 1
+fi
 echo VIRTGPU_RING3_OK
