@@ -78,3 +78,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 
 - Le contrôle de propriétaire renvoie désormais EBUSY dès CONTEXT_INIT, y compris avant la création de la fenêtre de réponse. Le banc tue les deux formes de propriétaire (avec et sans blob) et valide que la prochaine ouverture recrée et démonte le canal.
 - Banc Venus complet vert sous QEMU 11.2 RC / TCG / Lavapipe. Les deux marqueurs de récupération sont présents. Les 216 garde-fous d'architecture passent sur le lot précédent.
+
+## `f2f18d4b172067697120c3086c3f3d090a901aee` — validation et diagnostic de relecture
+
+- Compilation de l'image par défaut et du banc Venus. VIRTGPU_RING3_OK en SMP2 et SMP4 sous TCG avec VirGL logiciel, y compris capture de mire (254 934 pixels exacts et 0 pixels faux dans chaque capture), textures et repli 2D. Non-regression Gate 44626700794 vert. GPU composition 44626700649 en attente au contrôle.
+- Premier motif comparé côté noyau dans le prototype, avant le démappage. `P10_VENUS_DIAGNOSTIC_MEMOIRE octets=4096 differences=0`, puis `P10_VENUS_RELECTURE_ECHEC etape=unmap-memoire-sans-reponse`. Le banc doit donc rester en échec avec ce prototype. Le programme ring 3 n'a pas reçu le contenu et la deuxième comparaison n'a pas eu lieu.
+- Traces locales de la contre-épreuve dans `/workspace/work/p10/resume-readback-diagnostic`. Vérifier les délais côté hôte et les références MemoryRegion avant d'envisager tout changement de stratégie de mappage. Conserver la quarantaine si l'issue d'une commande reste inconnue.
