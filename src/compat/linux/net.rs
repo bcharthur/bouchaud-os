@@ -1022,7 +1022,7 @@ pub fn sys_sendmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
                     ch.descripteurs.extend(droits_a_passer.drain(..));
                     ch.octets.extend_from_slice(&payload[..ecrits]);
                     drop(ch);
-                    crate::kernel::fd::notify_readiness();
+                    crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&canal));
                     return ecrits as i64;
                 }
             }
@@ -1237,7 +1237,7 @@ pub fn sys_recvmsg(fd: i32, msghdr: u64, flags: u32) -> i64 {
             }
             crate::kernel::fd::wait_readiness(ticket, Some(echeance));
         };
-        crate::kernel::fd::notify_readiness();
+        crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&canal));
         if !user_write(base, &data) {
             // Les droits recus meurent ici : peut-etre la derniere extremite
             // d'un tube (BOUCHAUD_EOF_HORS_CLOSE_V1).
