@@ -2394,8 +2394,8 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 // exemple, d'ou « la barre des taches n'affiche Fichiers que si je passe la
 // souris dessus ».
 //
-// Une fenetre qui apparait est le seul cas ou le plein ecran est justifie : ce
-// qu'elle recouvre n'a jamais ete dessine, et le bureau est seul a le savoir.
+// L'ouverture invalide l'empreinte peinte, le focus precedent et la barre
+// des taches. Le registre des effets ajoute les zones de l'animation.
 //
 // Pousser directement dans `wins` est desormais interdit ailleurs qu'ici :
 // `tools/verifie-ouverture-fenetre.py` echoue si un `wins.push` reapparait hors
