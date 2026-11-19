@@ -161,8 +161,21 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
         #[cfg(feature = "banc-gpu-venus")]
         0x8004_42aa => {
             if !super::fault_in_user_range(arg, 4, true) { return -errno::EFAULT; }
-            match virtio_gpu::version_vulkan_banc() {
+            match virtio_gpu::version_vulkan_banc(4096) {
                 Ok(version) if user_write(arg, &version.to_le_bytes()) => 0,
+                Ok(_) => -errno::EFAULT,
+                Err(e) => erreur(e),
+            }
+        }
+        // _IOWR('B', 0xac, {u32 octets, u32 version}).
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc008_42ac => {
+            let Some(buf) = user_read(arg, 8) else { return -errno::EFAULT; };
+            if mot(&buf, 4) != 0 { return -errno::EINVAL; }
+            let Some(sortie) = arg.checked_add(4) else { return -errno::EFAULT; };
+            if !super::fault_in_user_range(sortie, 4, true) { return -errno::EFAULT; }
+            match virtio_gpu::version_vulkan_banc(mot(&buf, 0)) {
+                Ok(version) if user_write(sortie, &version.to_le_bytes()) => 0,
                 Ok(_) => -errno::EFAULT,
                 Err(e) => erreur(e),
             }

@@ -6,7 +6,16 @@ const CFG_SHARED_MEMORY: u8 = 8;
 const SHM_ID_HOST_VISIBLE: u8 = 1;
 const RESP_OK_MAP_INFO: u32 = 0x1106;
 
-pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<usize> {
+// Le blob de réponse est distinct des allocations Vulkan VkDeviceMemory.
+const MAX_BLOB_REPONSE: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) struct Fenetre {
+    adresse: usize,
+    octets: u64,
+}
+
+pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
     let mut liste = [pci::Capacite { identifiant: 0, decalage: 0 }; 16];
     let n = pci::capacites_de(dev, &mut liste);
     for cap in &liste[..n] {
@@ -34,33 +43,46 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<usize> {
         }
         let v = memory::mappe_mmio(base, PAGE as u64).ok()?;
         crate::serial_println!("P10_VENUS_HOSTMEM_OK octets={} page={}", taille, PAGE);
-        return Some(v as usize);
+        return Some(Fenetre { adresse: v as usize, octets: taille });
     }
     None
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum Canal {
-    Nouveau(usize),
-    Mappe(usize),
+    Nouveau(Fenetre),
+    Mappe(Fenetre, u32),
 }
 
-pub fn version_vulkan_banc() -> Result<u32, ErreurRendu> {
+pub fn version_vulkan_banc(octets: u32) -> Result<u32, ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    // Une seule page de transport par périphérique, sans accès utilisateur.
-    // Les requêtes partagent la fenêtre sous le verrou de la controlq.
-    // Si une commande échoue, elle ne sera jamais réutilisée dans ce démarrage.
-    let canal = p.hostmem_venus.take().ok_or(ErreurRendu::Indisponible)?;
-    let resultat = unsafe {
-        let aperture = match canal {
-            Canal::Nouveau(aperture) => ouvre(&mut p.file).map(|()| aperture),
-            Canal::Mappe(aperture) => Ok(aperture),
-        };
-        aperture.and_then(|v| lit_version(&mut p.file, v).map(|version| (v, version)))
+    let canal = p.hostmem_venus.ok_or(ErreurRendu::Indisponible)?;
+    let fenetre = match canal {
+        Canal::Nouveau(fenetre) | Canal::Mappe(fenetre, _) => fenetre,
     };
-    match resultat {
-        Ok((aperture, version)) => {
-            p.hostmem_venus = Some(Canal::Mappe(aperture));
+    let taille = u64::from(octets);
+    if taille < PAGE as u64 || taille % PAGE as u64 != 0
+        || taille > fenetre.octets.min(MAX_BLOB_REPONSE)
+        || matches!(canal, Canal::Mappe(_, existants) if existants != octets)
+    {
+        return Err(ErreurRendu::Invalide);
+    }
+
+    // Une seule ressource de transport et un seul intervalle hostmem.
+    // Une issue incertaine retire le canal jusqu'au reset du périphérique.
+    p.hostmem_venus = None;
+    if matches!(canal, Canal::Nouveau(_)) {
+        let mut restaure = false;
+        if let Err(etape) = unsafe { ouvre(&mut p.file, octets, &mut restaure) } {
+            if restaure { p.hostmem_venus = Some(canal); }
+            crate::serial_println!("P10_VENUS_OUVERTURE_ECHEC etape={} restaure={}", etape, restaure);
+            return Err(ErreurRendu::Commande);
+        }
+    }
+    match unsafe { lit_version(&mut p.file, fenetre.adresse) } {
+        Ok(version) => {
+            p.hostmem_venus = Some(Canal::Mappe(fenetre, octets));
             Ok(version)
         }
         Err(etape) => {
@@ -73,36 +95,40 @@ pub fn version_vulkan_banc() -> Result<u32, ErreurRendu> {
 pub fn ferme_vulkan_banc() -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let Some(canal) = p.hostmem_venus.take() else { return Err(ErreurRendu::Indisponible); };
-    let aperture = match canal {
-        Canal::Nouveau(aperture) => aperture,
-        Canal::Mappe(aperture) => match unsafe { ferme(&mut p.file) } {
-            Ok(()) => aperture,
+    let canal = p.hostmem_venus.take().ok_or(ErreurRendu::Indisponible)?;
+    let fenetre = match canal {
+        Canal::Nouveau(fenetre) => fenetre,
+        Canal::Mappe(fenetre, _) => match unsafe { ferme(&mut p.file) } {
+            Ok(()) => fenetre,
             Err(etape) => {
                 crate::serial_println!("P10_VENUS_DEMAPPE_ECHEC etape={}", etape);
                 return Err(ErreurRendu::Commande);
             }
         },
     };
-    p.hostmem_venus = Some(Canal::Nouveau(aperture));
+    p.hostmem_venus = Some(Canal::Nouveau(fenetre));
     Ok(())
 }
 
-unsafe fn ouvre(f: &mut FileControle) -> Result<(), &'static str> {
+unsafe fn ouvre(f: &mut FileControle, octets: u32, restaure: &mut bool) -> Result<(), &'static str> {
     let (q, n) = gpu3d::contexte_venus(true);
-    if f.commande(&q[..n], ENTETE) != Ok(RESP_OK_NODATA) { return Err("ctx-create"); }
-    if f.commande(&gpu3d::blob_reponse_venus(PAGE as u32), ENTETE) != Ok(RESP_OK_NODATA) {
-        // La ressource n'a pas été mappée. Essayer de fermer le contexte
-        // seulement si la file peut toujours recevoir une commande.
-        if !f.cassee {
-            let (q, n) = gpu3d::contexte_venus(false);
-            let _ = f.commande(&q[..n], ENTETE);
-        }
-        return Err("blob-host3d");
+    let contexte = f.commande(&q[..n], ENTETE)?;
+    if contexte != RESP_OK_NODATA {
+        *restaure = true;
+        return Err("ctx-create-refuse");
+    }
+    let blob = f.commande(&gpu3d::blob_reponse_venus(octets), ENTETE)?;
+    if blob != RESP_OK_NODATA {
+        *restaure = ferme_contexte(f, false).is_ok();
+        return Err("blob-host3d-refuse");
     }
     let (q, n) = gpu3d::mappe_reponse_venus(true);
-    if f.commande(&q[..n], 32) != Ok(RESP_OK_MAP_INFO) { return Err("map-blob"); }
-    if f.derniere_reponse_len < 32 { return Err("map-info-tronquee"); }
+    let carte = f.commande(&q[..n], 32)?;
+    if carte != RESP_OK_MAP_INFO {
+        // Refus confirmé : il n'y a aucun mappage à retirer.
+        *restaure = ferme_contexte(f, true).is_ok();
+        return Err("map-blob-refuse");
+    }
     Ok(())
 }
 
@@ -130,10 +156,18 @@ unsafe fn lit_version(f: &mut FileControle, aperture: usize) -> Result<u32, &'st
 
 unsafe fn ferme(f: &mut FileControle) -> Result<(), &'static str> {
     let (q, n) = gpu3d::mappe_reponse_venus(false);
-    if f.commande(&q[..n], ENTETE) != Ok(RESP_OK_NODATA) { return Err("unmap-blob"); }
+    let debut = crate::kernel::timer::monotonic_ns();
+    let reponse = f.commande(&q[..n], ENTETE);
+    crate::serial_println!("P10_VENUS_UNMAP reponse={:?} us={}", reponse,
+        crate::kernel::timer::monotonic_ns().saturating_sub(debut) / 1000);
+    if reponse? != RESP_OK_NODATA { return Err("unmap-blob-refuse"); }
+    ferme_contexte(f, true)
+}
+
+unsafe fn ferme_contexte(f: &mut FileControle, blob: bool) -> Result<(), &'static str> {
     let (q, n) = gpu3d::contexte_venus(false);
     if f.commande(&q[..n], ENTETE) != Ok(RESP_OK_NODATA) { return Err("ctx-destroy"); }
-    if libere(f, gpu3d::RESSOURCE_REPONSE_VENUS) != Ok(RESP_OK_NODATA) {
+    if blob && libere(f, gpu3d::RESSOURCE_REPONSE_VENUS) != Ok(RESP_OK_NODATA) {
         return Err("blob-unref");
     }
     Ok(())
