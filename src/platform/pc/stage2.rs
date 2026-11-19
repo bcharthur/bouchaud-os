@@ -236,6 +236,8 @@ pub fn run(boot: &'static BootInfo) -> ! {
     // proprement par le driver e1000.
     crate::arch::x86_64::pci::init();
     point_de_controle("pci");
+    #[cfg(feature = "p10-virgl-experimental")]
+    crate::drivers::virtio_gpu::sonde();
 
     // BOUCHAUD_LOADER_AB_V1 : candidats de banc (jamais livres).
     #[cfg(feature = "banc-ab-panique")]

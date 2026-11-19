@@ -804,6 +804,19 @@ fn enter_verrouille() {
             USERLAND_OWNS_DISPLAY.store(false, Ordering::Release);
             HD_ACTIVE.store(true, Ordering::Release);
         }
+        // Le profil experimental conserve le GOP primaire en secours.
+        // Le scanout VirtIO secondaire n'est choisi qu'apres preuve 3D.
+        if cfg!(feature = "p10-virgl-experimental") && crate::drivers::virtio_gpu::composition_gpu_etalonnee() {
+            if let Some((memoire, physique)) = crate::drivers::virtio_gpu::active_scanout(canvas_width, canvas_height) {
+                unsafe { LFB = memoire; }
+                LFB_PHYS.store(physique, Ordering::Release);
+                VIRTIO_SCANOUT.store(true, Ordering::Release);
+                crate::drivers::gpu::activate_virtio_2d(canvas_width, canvas_height, 32, physique);
+                reset_clip();
+                crate::serial_println!("[gfx] UEFI scanout=virtio GOP=secours");
+                return;
+            }
+        }
         reset_clip();
         FIRMWARE_PRESENT_OK.store(0, Ordering::Release);
         crate::serial_println!(
@@ -917,6 +930,11 @@ fn presente_virtio(x: usize, y: usize, largeur: usize, hauteur: usize) -> bool {
 /// avoir desactive BGA et recharge la police texte (detruite par le graphique).
 pub fn leave() {
     if firmware_backend_installed() {
+        if VIRTIO_SCANOUT.swap(false, Ordering::AcqRel) {
+            crate::drivers::virtio_gpu::desactive_scanout();
+            crate::drivers::gpu::deactivate();
+            LFB_PHYS.store(0, Ordering::Release);
+        }
         unsafe {
             BACK = None;
             LFB = core::ptr::null_mut();
@@ -1269,6 +1287,12 @@ fn quitte_memoire_scanout() {
         }
         LFB = core::ptr::null_mut();
     }
+    if firmware_backend_installed() {
+        LFB_PHYS.store(0, Ordering::Release);
+        crate::drivers::gpu::deactivate();
+        crate::serial_println!("[gfx] UEFI scanout=gop raison=perte-virtio");
+        present_firmware_full();
+    }
 }
 
 pub fn clear(color: u8) {
@@ -1315,7 +1339,7 @@ pub fn rect(x: usize, y: usize, w: usize, h: usize, color: u8) {
 /// Copie le double-buffer vers le framebuffer lineaire (sans effet si BGA off).
 pub fn present() {
     if userland_owns_display() { return; }
-    if firmware_backend_installed() {
+    if firmware_backend_installed() && !VIRTIO_SCANOUT.load(Ordering::Acquire) {
         present_firmware_full();
         return;
     }
@@ -1467,7 +1491,7 @@ pub fn ligne_affichee(x: usize, y: usize, dst: &mut [u32]) -> bool {
 fn presente_rect_juge(x: usize, y: usize, rect_width: usize, rect_height: usize, differable: bool)
     -> Result<(), &'static str> {
     PRESENTS_DEMANDES.fetch_add(1, Ordering::Relaxed);
-    if firmware_backend_installed() {
+    if firmware_backend_installed() && !VIRTIO_SCANOUT.load(Ordering::Acquire) {
         present_firmware_rect(x, y, rect_width, rect_height);
         return Ok(());
     }
