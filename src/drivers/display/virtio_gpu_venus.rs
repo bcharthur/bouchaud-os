@@ -209,13 +209,10 @@ pub const OCTETS_REPONSE_VENUS: usize = 512;
 
 fn aperture_possedee(p: &Peripherique, session: &Arc<()>) -> Result<usize, ErreurRendu> {
     match p.hostmem_venus.as_ref() {
-        Some(Canal::Ouvert(fenetre, Some(_), proprietaire)) => {
-            if proprietaire.ptr_eq(&Arc::downgrade(session)) {
-                Ok(fenetre.adresse)
-            } else {
-                Err(ErreurRendu::Occupe)
-            }
+        Some(Canal::Ouvert(_, _, proprietaire)) if !proprietaire.ptr_eq(&Arc::downgrade(session)) => {
+            Err(ErreurRendu::Occupe)
         }
+        Some(Canal::Ouvert(fenetre, Some(_), _)) => Ok(fenetre.adresse),
         _ => Err(ErreurRendu::Invalide),
     }
 }

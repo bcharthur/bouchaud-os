@@ -73,3 +73,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Non-regression Gate vert sur 70eb14c8 (44625407328). GPU composition 44625407341 était en cours au contrôle.
 - Relecture expérimentale. QEMU confirme CREATE_BLOB et MAP_BLOB du blob 0xb108 associé à VkDeviceMemory 0x401. UNMAP_BLOB entre dans le chemin asynchrone (mapping_state 0) puis ne répond pas. Même résultat sans accès CPU et avec TCG monothread. Le blob de commande du chemin MAP_FIXED se démonte. Le prototype est conservé hors branche dans `/workspace/work/p10/venus-readback-repro.patch`.
 - Reprise précise. Inspecter la dernière référence à la MemoryRegion de 0xb108 et le rappel `virtio_gpu_virgl_hostmem_region_finalize` dans QEMU 11.2 RC, puis relancer `cargo bootimage --features banc-gpu-venus` et `DISPLAY=:N BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`. La qualification de la relecture exige deux motifs sur tous les 4 096 octets et le démappage confirmé.
+
+## Reprise du contexte avant création de blob
+
+- Le contrôle de propriétaire renvoie désormais EBUSY dès CONTEXT_INIT, y compris avant la création de la fenêtre de réponse. Le banc tue les deux formes de propriétaire (avec et sans blob) et valide que la prochaine ouverture recrée et démonte le canal.
+- Banc Venus complet vert sous QEMU 11.2 RC / TCG / Lavapipe. Les deux marqueurs de récupération sont présents. Les 216 garde-fous d'architecture passent sur le lot précédent.

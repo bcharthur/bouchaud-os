@@ -254,7 +254,7 @@ static int verifie_instances(int fd)
     return 0;
 }
 
-static int verifie_proprietaire(int fd, uint32_t reference)
+static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
 {
     int notification[2];
     if (pipe(notification)) return 1;
@@ -265,7 +265,11 @@ static int verifie_proprietaire(int fd, uint32_t reference)
         close(notification[0]);
         int rendu = open("/dev/dri/renderD128", O_RDWR);
         struct requete q = {65536, 0};
-        if (rendu < 0 || ioctl(rendu, VERSION_TAILLE, &q) || q.version != reference)
+        struct drm_context_param param = {1, 4};
+        struct drm_context_init init = {1, 0, (uintptr_t)&param};
+        if (rendu < 0 || ioctl(rendu, DRM_CONTEXT_INIT, &init))
+            _exit(1);
+        if (avec_blob && (ioctl(rendu, VERSION_TAILLE, &q) || q.version != reference))
             _exit(1);
         if (write(notification[1], "!", 1) != 1) _exit(2);
         for (;;) pause();
@@ -294,7 +298,7 @@ static int verifie_proprietaire(int fd, uint32_t reference)
         return 3;
     if (ioctl(fd, VERSION_TAILLE, &q) || q.version != reference || ioctl(fd, DEMAPPE))
         return 4;
-    puts("VIRTGPU_VENUS_PROPRIETAIRE_OK");
+    puts(avec_blob ? "VIRTGPU_VENUS_PROPRIETAIRE_OK" : "VIRTGPU_VENUS_CTX_ORPHELIN_OK");
     return 0;
 }
 
@@ -340,7 +344,8 @@ int main(int argc, char **argv)
             if (ioctl(fd, DEMAPPE)) return 14;
         }
         puts("VIRTGPU_VENUS_TAILLES_OK cycles=4");
-        if (verifie_proprietaire(fd, reference)) return 15;
+        if (verifie_proprietaire(fd, reference, 1)) return 15;
+        if (verifie_proprietaire(fd, reference, 0)) return 17;
         puts("VIRTGPU_VENUS_DEMAPPE_OK");
     }
     return close(fd) != 0;

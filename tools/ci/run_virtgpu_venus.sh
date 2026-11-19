@@ -40,6 +40,7 @@ if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     grep -aqF 'VIRTGPU_VENUS_DRM_INSTANCES_OK cycles=2' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_TAILLES_OK cycles=4' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_PROPRIETAIRE_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_CTX_ORPHELIN_OK' "$sortie/serie.log"
     grep -aqF 'P10_VENUS_ORPHELIN_RECUPERE' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DEMAPPE_OK' "$sortie/serie.log"
 fi
