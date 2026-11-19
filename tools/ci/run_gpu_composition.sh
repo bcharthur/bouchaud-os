@@ -52,8 +52,7 @@ if [ ! -x target/doom-bouchaud/doom-bouchaud ] || [ ! -f tools/doom/wads/freedoo
 fi
 musl-gcc -O2 -static-pie -fPIE -o "$SORTIE/mire-gpu" tools/userland/mire-gpu.c
 
-ECRAN=60
-demarre() {  # NOM DUREE DEVICE AUTORUN... ; capture a CAPTURE_A secondes si posee
+demarre() (  # NOM DUREE DEVICE AUTORUN... ; capture a CAPTURE_A secondes si posee
   local nom=$1 duree=$2 dev=$3; shift 3
   local d="$SORTIE/$nom"; mkdir -p "$d/scen"
   cp target/doom-bouchaud/doom-bouchaud "$d/scen/doom"
@@ -65,23 +64,37 @@ demarre() {  # NOM DUREE DEVICE AUTORUN... ; capture a CAPTURE_A secondes si pos
   echo desktop >> "$d/scen/autorun"
   (cd tools/userland && IMAGE="$d/disque.img" ./mkdisk.sh "$d/scen" >/dev/null)
   cp "$BOOT" "$d/boot.bin"
-  ECRAN=$((ECRAN + 1))
-  Xvfb ":$ECRAN" -screen 0 1920x1200x24 -nolisten tcp >/dev/null 2>&1 &
-  local xv=$!
-  sleep 1
+  local xv="" q="" ECRAN
+  trap 'if [[ -n $q ]]; then kill "$q" 2>/dev/null || true; wait "$q" 2>/dev/null || true; fi
+        if [[ -n $xv ]]; then kill "$xv" 2>/dev/null || true; wait "$xv" 2>/dev/null || true; fi' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  Xvfb -displayfd 3 -screen 0 1920x1200x24 -nolisten tcp \
+    3>"$d/x-display" >"$d/xvfb.log" 2>&1 &
+  xv=$!
+  for ((i = 0; i < 50; i++)); do
+    [[ -s "$d/x-display" ]] && break
+    kill -0 "$xv" 2>/dev/null || break
+    sleep 0.1
+  done
+  if ! read -r ECRAN < "$d/x-display" || [[ ! $ECRAN =~ ^[0-9]+$ ]]; then
+    echo "GPU_COMPOSITION_ECHEC Xvfb $nom" >&2
+    cat "$d/xvfb.log" >&2
+    return 1
+  fi
   DISPLAY=":$ECRAN" timeout --kill-after=5 "$duree" qemu-system-x86_64 $ACCEL \
     -drive format=raw,file="$d/boot.bin" -drive format=raw,file="$d/disque.img" \
     -m 2048 -smp 2 -serial file:"$d/serie.log" -vga none -device "$dev" \
     -display sdl,gl=on -no-reboot > "$d/qemu.log" 2>&1 &
-  local q=$!
+  q=$!
   if [ -n "${CAPTURE_A:-}" ]; then
     sleep "$CAPTURE_A"
     DISPLAY=":$ECRAN" import -window root "$d/capture.png" || true
   fi
   wait "$q" || true
-  kill "$xv" 2>/dev/null || true
+  q=""
   echo "GPU_COMPOSITION_DEMARRAGE $nom fini ($dev)"
-}
+)
 
 echec=0
 CAPTURE_A=50 demarre mire 70 virtio-gpu-gl-pci 'export BO_AUTOSTART_APP=/mire-gpu'

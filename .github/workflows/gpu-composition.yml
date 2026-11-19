@@ -142,6 +142,8 @@ jobs:
           path: |
             gpu-composition.log
             gpu-composition/*/serie.log
+            gpu-composition/*/qemu.log
+            gpu-composition/*/xvfb.log
             gpu-composition/*/capture.png
             virtgpu-ring3/*/serie.log
             virtgpu-ring3/*/qemu.log

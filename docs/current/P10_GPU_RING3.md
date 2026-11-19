@@ -202,8 +202,11 @@ de la série reste à isoler.
 
 Le banc plafonne le délai de sortie de QEMU après SIGTERM et conserve
 le même noyau pour tous les bras, même si un build réécrit le fichier
-source entre deux démarrages. Les délais de capture et critères
-d’acceptation restent ceux du banc.
+source entre deux démarrages. Un second échec a montré une
+collision entre deux bancs utilisant le même écran Xvfb. Le banc
+réserve désormais un écran distinct pour chaque scénario et
+archive les journaux QEMU et Xvfb. Les délais de capture et
+critères d’acceptation restent ceux du banc.
 
 La sortie du scanout annule le pointeur VirtIO avant de présenter
 vers le GOP, en passant par le tampon arrière. Elle est déclenchée
