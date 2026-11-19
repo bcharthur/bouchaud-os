@@ -29,6 +29,7 @@ param(
     [ValidateSet('usb','ps2','none')][string]$InputMode = 'usb',
     [ValidateSet('mouse','tablet')][string]$Pointer = 'mouse',
     [ValidateSet('auto','gtk','sdl','none')][string]$Display = 'auto',
+    [switch]$Virgl,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -39,15 +40,19 @@ Set-Location $RepoRoot
 if ($DryRun -and (-not $SkipBuild -or -not $SkipPrepare)) {
     throw '-DryRun requiert -SkipBuild -SkipPrepare : aucune fabrication autorisee.'
 }
+$QemuExe = Get-BouchaudQemuExe
+$GraphicsArgs = @(Get-BouchaudGraphicsArguments -QemuExe $QemuExe -Virgl:$Virgl)
+$DisplayArgs = @(Get-BouchaudDisplayArguments -QemuExe $QemuExe -Display $Display -Fullscreen:$Fullscreen -Virgl:$Virgl)
 if (-not $SkipPrepare) {
     & (Join-Path $PSScriptRoot 'prepare-reference-ladybird.ps1')
     if ($LASTEXITCODE -ne 0) { throw "Preparation Ladybird echouee : $LASTEXITCODE" }
 }
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build-reference-stage2.ps1')
+    & (Join-Path $PSScriptRoot 'build-reference-stage2.ps1') -Virgl:$Virgl
     if ($LASTEXITCODE -ne 0) { throw "Build Stage 2 echoue : $LASTEXITCODE" }
 }
-$Image = Join-Path $RepoRoot 'target\reference\bouchaud-reference-stage2.img'
+$ImageName = if ($Virgl) { 'bouchaud-reference-stage2-virgl.img' } else { 'bouchaud-reference-stage2.img' }
+$Image = Join-Path $RepoRoot "target\reference\$ImageName"
 $LadybirdImage = Join-Path $RepoRoot 'ladybird-browser.img'
 foreach ($p in @($Image,$LadybirdImage)) {
     if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw "Image absente : $p" }
@@ -65,9 +70,9 @@ if ($Mimalloc -ne 'actuelle') {
     }
     $LadybirdImage = $Derivee
 }
-$QemuExe = Get-BouchaudQemuExe
 $Ovmf = Get-BouchaudOvmf -QemuExe $QemuExe
-$Serial = New-BouchaudQemuSerialPath -RepoRoot $RepoRoot -Profile 'stage2-ladybird' -DryRun:$DryRun
+$Profile = if ($Virgl) { 'stage2-ladybird-virgl' } else { 'stage2-ladybird' }
+$Serial = New-BouchaudQemuSerialPath -RepoRoot $RepoRoot -Profile $Profile -DryRun:$DryRun
 $ArgsQemu = @(
     '-machine','pc', '-m',"$RamMiB", '-smp',"$Smp",
     '-drive',"if=pflash,format=raw,unit=0,file=$($Ovmf.Code),readonly=on",
@@ -75,11 +80,12 @@ $ArgsQemu = @(
     '-drive',"if=ide,index=0,media=disk,format=raw,file=$Image,snapshot=on",
     '-drive',"if=ide,index=1,media=disk,format=raw,file=$LadybirdImage,snapshot=on",
     '-netdev','user,id=net0', '-device','e1000,netdev=net0',
-    '-vga','std', '-serial',"file:$Serial", '-monitor','stdio',
+    '-serial',"file:$Serial", '-monitor','stdio',
     '-boot','order=c', '-no-reboot', '-no-shutdown'
 )
 $ArgsQemu += @(Get-BouchaudInputArguments -InputMode $InputMode -Pointer $Pointer)
-$ArgsQemu += @(Get-BouchaudDisplayArguments -QemuExe $QemuExe -Display $Display -Fullscreen:$Fullscreen)
+$ArgsQemu += $GraphicsArgs
+$ArgsQemu += $DisplayArgs
 if ($Accel -eq 'tcg') { $ArgsQemu += @('-accel','tcg','-cpu','max') }
 else { $ArgsQemu += @('-accel',"whpx,kernel-irqchip=$Irqchip") }
 Write-Host '=== BOUCHAUD STAGE2 / LADYBIRD / TWO-DISK LEGACY ===' -ForegroundColor Cyan
