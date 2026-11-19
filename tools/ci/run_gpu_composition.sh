@@ -66,7 +66,7 @@ demarre() {  # NOM DUREE DEVICE AUTORUN... ; capture a CAPTURE_A secondes si pos
   Xvfb ":$ECRAN" -screen 0 1920x1200x24 -nolisten tcp >/dev/null 2>&1 &
   local xv=$!
   sleep 1
-  DISPLAY=":$ECRAN" timeout "$duree" qemu-system-x86_64 $ACCEL \
+  DISPLAY=":$ECRAN" timeout --kill-after=5 "$duree" qemu-system-x86_64 $ACCEL \
     -drive format=raw,file="$d/boot.bin" -drive format=raw,file="$d/disque.img" \
     -m 2048 -smp 2 -serial file:"$d/serie.log" -vga none -device "$dev" \
     -display sdl,gl=on -no-reboot > "$d/qemu.log" 2>&1 &
