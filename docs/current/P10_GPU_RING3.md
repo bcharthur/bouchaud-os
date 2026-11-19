@@ -1,4 +1,4 @@
-# P10 : scanout Stage 2 et découverte GPU en anneau 3
+# P10 : scanout Stage 2 et textures GPU en anneau 3
 
 Base 12c69eac. Les essais Linux émulent le CPU avec QEMU 10.0.13 TCG.
 Le rendu OpenGL est effectué par virglrenderer avec Mesa logiciel,
@@ -37,6 +37,23 @@ Le profil journalise RENDERER_HOST=non-verifie. Pour qualifier la RTX
 GPU pendant la charge via les outils Windows/NVIDIA. Une RTX détectée
 dans l’hôte ou un périphérique VirtIO négocié ne suffit pas.
 
+Pour qualifier la session, conserver le même exécutable QEMU, la même
+image Ladybird, un instantané disque par lancement, la même résolution,
+le même nombre de vCPU et la même séquence d’actions. Alterner les
+profils avec et sans `-Virgl`, trois essais minimum par profil.
+Enregistrer la série et le renderer hôte pour chaque essai. Ouvrir
+Ladybird, charger la même URL, fermer puis rouvrir la fenêtre, répéter
+l’action, et éteindre l’invité. Comparer les trames présentées, le P95
+de présentation et le temps de dessin. Vérifier séparément le repli
+vers le GOP primaire lors d’une perte du périphérique, avec capture
+des deux affichages avant et après le repli.
+
+Sur un hôte Linux avec accès à KVM et à un GPU, laisser Mesa sélectionner
+le pilote matériel et vérifier le renderer GL du processus QEMU.
+Lancer le banc avec `BO_QEMU_KVM=1` et sans `LIBGL_ALWAYS_SOFTWARE`.
+Si QEMU WHPX ne peut initialiser le contexte GL, conserver la commande,
+la version et le message de refus avec les résultats Linux.
+
 ## Interface ring 3
 
 /dev/dri/renderD128 est synthétique et disponible après lecture d’un
@@ -55,6 +72,29 @@ VIRGL. Le pilote garde la synchronisation et la règle de restitution
 des buffers seulement lorsque leur détachement est confirmé.
 Les ioctls DRM d’allocation et de soumission restent à implémenter.
 
+Les commandes privées suivantes opèrent sur des textures 8 × 8 BGRX
+choisies par l’appelant. Les champs sont alignés et encodés en little
+endian.
+
+| Commande | Numéro ioctl | Argument |
+|---|---|---|
+| Créer | `0x800442a1` | Retour d’un identifiant `u32` |
+| Détruire | `0x400442a2` | Identifiant `u32` |
+| Charger | `0x401042a3` | `{u32 id, u32 réservé=0, u64 pixels}`, entrée de 256 octets |
+| Relire | `0x401042a4` | Même structure, sortie de 256 octets |
+| Copier | `0x400842a5` | `{u32 source, u32 cible}` |
+
+Chaque descripteur ouvert possède jusqu’à deux textures, dans une limite
+globale de huit. Un descripteur dupliqué ou hérité conserve le même
+propriétaire. Une ouverture indépendante reçoit un autre propriétaire.
+Les transferts et les BLIT attendent la clôture VirtIO avant de rendre
+la main. Le canal X est ignoré. Toute texture fermée sans destruction
+reste dans le quota jusqu’à la prochaine allocation, qui récupère les
+ressources orphelines. Après une réponse incertaine, toute page
+potentiellement tenue par le périphérique reste réservée. Les ioctls
+font passer des identifiants et des pixels par copie utilisateur,
+avec les commandes VIRGL et les adresses DMA construites dans le noyau.
+
 ~~~bash
 cargo bootimage --features p10-virgl-experimental
 DISPLAY=:77 LIBGL_ALWAYS_SOFTWARE=1 tools/ci/run_virtgpu_ring3.sh \
@@ -65,7 +105,12 @@ Préparer un affichage X libre et QEMU SDL avec les modules OpenGL/VIRGL,
 ImageMagick, Pillow et musl-gcc. Le banc exige les 64 pixels lus depuis
 ring 3, les capsets, la mire de fenêtre et l’absence du nœud 3D sur le
 bras 2D. Il vérifie aussi pointeur invalide, version inconnue, requête
-de soumission indisponible et limite d’un BLIT. Le capset VIRGL2 v2
+de soumission DRM indisponible et limite d’un BLIT de sonde.
+Deux processus effectuent chacun quatre cycles de création, chargement,
+BLIT, relecture et destruction avec des motifs distincts. Le test vérifie
+aussi le refus d’une ressource appartenant à l’autre ouverture, la
+relecture avant initialisation, la réutilisation d’un identifiant
+détruit, le quota et la récupération après fermeture. Le capset VIRGL2 v2
 obtenu en TCG faisait 1 384 octets. La mire a donné 254 934 pixels exacts,
 1 066 blancs attendus et zéro pixel erroné.
 
@@ -90,17 +135,26 @@ utilisateur sous WHPX n’ont pas été mesurés par ce banc.
 
 ## Vulkan, Skia et GPU physique
 
-Le QEMU de la VM liste venus, blob et hostmem. Avec
-virtio-gpu-gl-pci,blob=on,hostmem=256M,venus=on, l’invité a reçu
-l’offre 0x000001013000001b et retenu 0x0000000100000001. La négociation
-s’arrête donc à VERSION_1 et VIRGL. L’essai n’a pas produit de
-GET_CAPSET Venus abouti. Le processus QEMU est resté bloqué après l'initialisation
-de la file et a dû être arrêté par SIGKILL sur cette configuration logicielle.
-Le test sans périphérique VirtIO a sélectionné le GOP avec la même image UEFI.
-Il manque notamment la négociation BLOB et
-CONTEXT_INIT, le mappage hostmem, les ressources par processus et la
-soumission avec clôtures exposées à l’ABI. Un loader et l’ICD Mesa
-Venus doivent ensuite être validés dans l’invité.
+Un essai contrôlé avec QEMU 10.0.13, TCG SMP2, SDL/GL sous Xvfb
+et Lavapipe déclaré comme ICD Vulkan hôte compare quatre lancements
+avec `-trace 'enable=virtio_gpu_cmd_*'`.
+
+| Périphérique | Bits retenus | Résultat |
+|---|---|---|
+| `virtio-gpu-gl-pci` | `0x0000000100000001` | Autotest 2D et capsets VIRGL lus |
+| `virtio-gpu-gl-pci,blob=on,hostmem=256M` | `0x0000000100000001` | Autotest 2D et capsets VIRGL lus |
+| Même périphérique avec `venus=on` | `0x0000000100000001` | QEMU bloqué sur `GET_DISPLAY_INFO` |
+| Même périphérique, image expérimentale acceptant BLOB et CONTEXT_INIT | `0x0000000100000019` | Même blocage, suivi d’une assertion XCB lors de l’arrêt |
+
+Les deux essais Venus ont nécessité SIGKILL. Ils ont bloqué avant la
+lecture du capset Venus, donc avant la création d’un contexte et du
+premier blob. L’image expérimentale reste hors de la branche, où
+la négociation demeure limitée à VERSION_1 et VIRGL. Les essais
+isolent l’option hôte `venus=on` dans ce montage SDL/GL. Un pilote
+Vulkan invité exige encore le mappage hostmem, les ressources blob,
+la soumission clôturée et une validation de bout en bout avec Mesa
+Venus. Le test UEFI sans périphérique VirtIO a sélectionné le GOP
+avec la même image de démarrage.
 
 La sonde autonome tools/userland/vulkan-transfert-probe.c fait un
 vkCmdFillBuffer puis vérifie une relecture de 4 096 octets après fence.
@@ -133,3 +187,27 @@ reprise avec 876 trames VIRGL dans le relevé suivant et la même mire
 exacte. Cela exerce le refus avec file de contrôle intacte. La
 perte physique du périphérique et le retour au GOP sur Windows
 restent à tester.
+
+## Fiabilité du scanout
+
+La première suite TCG a produit une capture Xvfb 1920 × 1200
+entièrement noire à 50 s. L’invité avait déjà activé le scanout,
+présenté une couche GPU et produit 600 trames de mire. La série
+s’est arrêtée avant le premier relevé GPU de 30 s. Trois QEMU
+d’essais antérieurs étaient encore actifs dans un quota de deux
+cœurs. Une reprise isolée, puis la nouvelle capture au même délai
+ont donné 254 934 pixels exacts, 1 066 blancs attendus et aucun
+pixel faux. La saturation est une hypothèse et la cause de l’arrêt
+de la série reste à isoler.
+
+Le banc plafonne le délai de sortie de QEMU après SIGTERM et conserve
+le même noyau pour tous les bras, même si un build réécrit le fichier
+source entre deux démarrages. Les délais de capture et critères
+d’acceptation restent ceux du banc.
+
+La sortie du scanout annule le pointeur VirtIO avant de présenter
+vers le GOP, en passant par le tampon arrière. Elle est déclenchée
+aussi quand une trame n’a que des régions de fenêtres GPU et que
+son plan de transfert 2D est vide. Ce cas de sortie est distinct
+du noir intermittent. Les garde-fous DMA et VirtIO-PCI passent
+avec leurs 13 et 25 cas négatifs.
