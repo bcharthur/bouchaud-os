@@ -89,15 +89,19 @@ def analyse(texte: str) -> dict:
     # Par image, le DERNIER releve (cumuls) de chaque pid ; puis la somme des
     # pid d'une meme image (un WebContent par onglet).
     derniers: dict[str, list] = {}
+    # Le PIC de RSS sur TOUS les releves : le dernier releve d'un pid ne dit
+    # pas ce qu'il a atteint avant de rendre de la memoire (revue #342).
+    pic_rss: dict[str, int] = {}
     for m in R_PERF_PROC.finditer(texte):
         derniers[m.group(2)] = m.groups()
+        pic_rss[m.group(2)] = max(pic_rss.get(m.group(2), 0), int(m.group(4)))
     images: dict[str, dict] = {}
     for g in derniers.values():
         im = images.setdefault(g[2], {"pids": 0, "rss_kio_max": 0, "fautes": 0, "fautes_us": 0, "zero": 0,
                                       "zero_us": 0, "fichier": 0, "copie": 0, "attente_us": 0,
                                       "user_ms": 0, "sys_ms": 0})
         im["pids"] += 1
-        im["rss_kio_max"] = max(im["rss_kio_max"], int(g[3]))
+        im["rss_kio_max"] = max(im["rss_kio_max"], pic_rss[g[1]])
         im["fautes"] += int(g[6])
         im["fautes_us"] += int(g[7])
         im["zero"] += int(g[9])

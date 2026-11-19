@@ -47,6 +47,15 @@ class Analyse(unittest.TestCase):
         self.assertEqual(s["parseur_html_timeouts"], 2)
         self.assertEqual(s["cpu_pct_pic"]["WebContent"], 97)
 
+    def test_pic_de_rss_sur_tous_les_releves(self):
+        j = ("[PERF-PROC] t=1 pid=9 image=WebContent rss_kio=900000 vss_kio=1 taches=1 fautes=1 total_us=1 pire_us=1 "
+             "zero=0/0us fichier=0/0us partage=0/0us copie=0/0us attente=0/0us echec=0 user_ms=1 sys_ms=1\n"
+             "[PERF-PROC] t=2 pid=9 image=WebContent rss_kio=100000 vss_kio=1 taches=1 fautes=2 total_us=1 pire_us=1 "
+             "zero=0/0us fichier=0/0us partage=0/0us copie=0/0us attente=0/0us echec=0 user_ms=2 sys_ms=2")
+        wc = a.analyse(j)["processus"]["WebContent"]
+        self.assertEqual(wc["rss_kio_max"], 900000)  # le pic, pas le dernier releve
+        self.assertEqual(wc["fautes"], 2)            # les cumuls, du dernier
+
     def test_horloge_incoherente_refusee(self):
         h = a.horloge("BOUCHAUD_TSC_CONTROLE hz=1000000000 source=pit2 hz_selon_ticks=4000000000 rapport_pour_mille=4000 cycles_par_ms=1")
         self.assertEqual(h["verdict"], "incoherente")

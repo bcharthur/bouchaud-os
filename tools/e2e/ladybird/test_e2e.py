@@ -48,6 +48,22 @@ class Definition(unittest.TestCase):
                 if "couleur" in e:
                     self.assertIn(e["couleur"], fixture.COULEURS)
 
+    def test_toute_saisie_est_tapable(self):
+        # Une saisie qu'aucune touche AZERTY ne produit leve ValueError en
+        # plein parcours (revue #342 : `?` dans l'URL de la page lourde).
+        for s in self.d["scenarios"]:
+            for e in s.get("etapes", []):
+                if "tape" in e:
+                    texte = e["tape"].replace("${FIXTURE_TLS}", "https://10.0.2.2:18301")
+                    texte = texte.replace("${FIXTURE}", "http://10.0.2.2:18300")
+                    e2e.touches_de(texte)
+
+    def test_attend_couleur_vise_une_couleur_du_site(self):
+        for s in self.d["scenarios"]:
+            for e in s.get("etapes", []):
+                if "attend_couleur" in e:
+                    self.assertIn(e["attend_couleur"], fixture.COULEURS)
+
     def test_metriques_citent_des_etapes_nommees(self):
         for s in self.d["scenarios"]:
             noms = {e["nom"] for e in s.get("etapes", []) if "nom" in e} | {"lancement_qemu"}
