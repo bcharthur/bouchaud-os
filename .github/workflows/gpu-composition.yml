@@ -14,6 +14,9 @@ on:
       - 'src/drivers/display/**'
       - 'src/gui/**'
       - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/run_virtgpu_ring3.sh'
+      - 'tools/userland/virtgpu-caps-probe.c'
+      - 'src/compat/linux/virtgpu.rs'
       - 'tools/ci/ladybird_provenance.py'
       - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/analyse_gpu_composition.py'
@@ -30,6 +33,9 @@ on:
       - 'src/drivers/display/**'
       - 'src/gui/**'
       - 'tools/ci/run_gpu_composition.sh'
+      - 'tools/ci/run_virtgpu_ring3.sh'
+      - 'tools/userland/virtgpu-caps-probe.c'
+      - 'src/compat/linux/virtgpu.rs'
       - 'tools/ci/ladybird_provenance.py'
       - 'tools/ci/ladybird_empreinte.py'
       - 'tools/ci/analyse_gpu_composition.py'
@@ -79,6 +85,15 @@ jobs:
             cargo-${{ runner.os }}-
       - name: Bootimage
         run: tools/ci/build_kernel.sh
+      - name: Virtgpu ring 3, BLIT relu au pixel et profil 2D (TCG)
+        if: matrix.accel == 'tcg'
+        run: |
+          Xvfb :77 -screen 0 1600x1000x24 -nolisten tcp >virtgpu-xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          sleep 1
+          DISPLAY=:77 LIBGL_ALWAYS_SOFTWARE=1 tools/ci/run_virtgpu_ring3.sh \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin virtgpu-ring3
       - name: DOOM (Doomgeneric epingle, Freedoom verifie)
         run: tools/doom/build-linux.sh
       - name: Acces a /dev/kvm
@@ -128,6 +143,10 @@ jobs:
             gpu-composition.log
             gpu-composition/*/serie.log
             gpu-composition/*/capture.png
+            virtgpu-ring3/*/serie.log
+            virtgpu-ring3/*/qemu.log
+            virtgpu-ring3/*/capture.png
+            virtgpu-xvfb.log
           if-no-files-found: warn
 
   # Ladybird REEL (artefact canonique, provenance verifiee contre ce SHA)
