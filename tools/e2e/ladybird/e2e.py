@@ -662,7 +662,7 @@ def main(argv: list[str]) -> int:
     accel_ok = manifeste["environnement"]["accel_reel"] == attendu
     panique = [p for p in PANIQUES if p in texte]
     disque_intact = sha256(o.disque) == empreinte_disque
-    session = _session.analyse(texte)
+    session = _session.analyse(texte, duree_hote_s=banc.maintenant_ms() / 1000)
     for ligne in _session.resume(session).splitlines():
         print("E2E_SESSION " + ligne, flush=True)
 

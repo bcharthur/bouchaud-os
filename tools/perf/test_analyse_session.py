@@ -18,7 +18,13 @@ JOURNAL = "\n".join([
     "pire_us=900 zero=1136932/7000000us fichier=1/5us partage=0/0us copie=1/5us attente=0/0us echec=0 user_ms=9000 sys_ms=21000",
     "[PERF-PROC] t=2000 pid=31 image=WebContent rss_kio=200000 vss_kio=9000 taches=9 fautes=5 total_us=1 "
     "pire_us=1 zero=2/1us fichier=1/0us partage=0/0us copie=1/0us attente=0/0us echec=0 user_ms=10 sys_ms=5",
-    "[PROC-SAMPLE] v=1 t_ns=5 pid=20 name=WebContent cpu_pct=97 cpu_map=1 ctx_delta=4 mig_delta=0 runnable_threads=1 threads=9 rss=1 vss=1",
+    "[PROC-SAMPLE] v=1 t_ns=5 pid=20 name=/usr/libexec/ladybird/WebContent cpu_pct=97 cpu_map=[60,37] ctx_delta=4 mig_delta=0 runnable_threads=1 threads=9 rss=1 vss=1",
+    "[PROC-SAMPLE] v=1 t_ns=6 pid=20 name=/usr/libexec/ladybird/WebContent cpu_pct=50 cpu_map=[50,0] ctx_delta=4 mig_delta=0 runnable_threads=1 threads=9 rss=1 vss=1",
+    "[PERF-RIP] t=5000 pid=20 tid=99 image=/usr/libexec/ladybird/WebContent user=30 noyau=70 base=0x400000400000 top=- topn=0x88f30f:6,0x88817a:5",
+    "[PERF-RIP] t=10000 pid=20 tid=99 image=/usr/libexec/ladybird/WebContent user=10 noyau=20 base=0x400000400000 top=- topn=0x88f30f:4",
+    "[SMP-IPI] t=60000 c0=100/0ms/0x1/u0 c1=200/0ms/0x1/u0 c2=0/0ms/0x0/u0 c3=0/0ms/0x0/u0",
+    "[PROC-STAT] capacite_ms=1 occupe_ms=1 depassements=0 pire_depassement_ms=0 compta_relues=1 replis_apic=1 ticks_ms=140000 mono_ms=150000 index_coeur=rdpid",
+    "BOUCHAUD_CONSOLE_BILAN active=1 repli_securite=0 lignes=115 emises=114 pleines=0 replis_differes=0 vidanges_aidees=0 reentrees=0 differees_pendant_vidange=0 reveils=2 jeton_occupe=0 ligne_pire_us=1 morceau_pire_us=1 retard_pire_us=1 ajout_pire_us=1 occupation_pire=1 synchrones=7 synchrone_pire_us=900 verrou_abandons=0",
     "[SYSCALL-TOP] window_ns=1000000000 appels=500 distincts=2 cumul=9 madvise=300/eagain=0 clock_gettime=200/eagain=0",
     "[SYSCALL-TOP] window_ns=1000000000 appels=50 distincts=1 cumul=9 clock_gettime=50/eagain=0",
     "[GPU-COMPOSITION] disponible=0 periode_ms=1000 trames_bureau=76 trames_clients=3 trames_gpu=0 blits=1",
@@ -55,6 +61,27 @@ class Analyse(unittest.TestCase):
         wc = a.analyse(j)["processus"]["WebContent"]
         self.assertEqual(wc["rss_kio_max"], 900000)  # le pic, pas le dernier releve
         self.assertEqual(wc["fautes"], 2)            # les cumuls, du dernier
+
+    def test_coeurs_rip_ipi_journal(self):
+        s = a.analyse(a.ANSI.sub("", JOURNAL), duree_hote_s=160.0)
+        # PROC-SAMPLE porte un CHEMIN : la cle est le nom de base.
+        self.assertEqual(s["cpu_pct_moyen"]["WebContent"], 74)
+        self.assertEqual(s["repartition_coeurs_pct"]["WebContent"], [55, 18])
+        self.assertEqual(s["echantillons_multicoeur"]["WebContent"], 1)
+        self.assertEqual(s["rip_user_noyau"]["WebContent"], [40, 90])
+        self.assertEqual(s["rip_noyau_chaudes"]["0x88f30f"], 10)
+        self.assertEqual((s["ipi_total"], s["ipi_par_s"]), (300, 5))
+        self.assertEqual(s["console"]["synchrones"], 7)
+        self.assertEqual(s["coherence"]["ticks_sur_mono_pour_mille"], 933)
+        self.assertEqual(s["coherence"]["invite_sur_hote_pour_mille"], 937)
+        self.assertEqual(a.verdict_final(s)[0], "coherente")
+
+    def test_controle_hote_prime_et_refuse_une_derive(self):
+        texte = "[PROC-STAT] capacite_ms=1 occupe_ms=1 depassements=0 ticks_ms=500 mono_ms=600000 index_coeur=x"
+        # Sans TSC_CONTROLE, l'horloge seule est « inconnue » ; l'hote tranche.
+        self.assertEqual(a.verdict_final(a.analyse(texte, 610.0))[0], "coherente")
+        self.assertEqual(a.verdict_final(a.analyse(texte, 150.0))[0], "incoherente")
+        self.assertEqual(a.verdict_final(a.analyse(texte))[0], "inconnue")
 
     def test_horloge_incoherente_refusee(self):
         h = a.horloge("BOUCHAUD_TSC_CONTROLE hz=1000000000 source=pit2 hz_selon_ticks=4000000000 rapport_pour_mille=4000 cycles_par_ms=1")

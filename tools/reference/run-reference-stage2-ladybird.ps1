@@ -10,6 +10,10 @@
 #                    reference = aucune purge (borne du gain). Hors `actuelle`,
 #                    une COPIE du disque Ladybird est derivee ; l'original
 #                    n'est jamais ouvert en ecriture.
+#   -Irqchip off|on  WHPX : APIC emule par QEMU en espace utilisateur (off,
+#                    reference) ou par Hyper-V (on). Avec `off`, chaque
+#                    programmation du minuteur APIC, chaque EOI et chaque IPI
+#                    est une sortie de VM traitee par QEMU.
 # A la fermeture de QEMU, tools\perf\analyse_session.py resume la session :
 # horloge (et sa coherence), coeurs en ligne, CPU et fautes par processus,
 # appels systeme, composition, pauses.
@@ -17,6 +21,7 @@ param(
     [ValidateRange(4096,16384)][int]$RamMiB = 12288,
     [ValidateSet(1,2,4)][int]$Smp = 1,
     [ValidateSet('actuelle','delai10','reference')][string]$Mimalloc = 'actuelle',
+    [ValidateSet('off','on')][string]$Irqchip = 'off',
     [ValidateSet('tcg','whpx')][string]$Accel = 'tcg',
     [switch]$Fullscreen,
     [switch]$SkipPrepare,
@@ -76,19 +81,21 @@ $ArgsQemu = @(
 $ArgsQemu += @(Get-BouchaudInputArguments -InputMode $InputMode -Pointer $Pointer)
 $ArgsQemu += @(Get-BouchaudDisplayArguments -QemuExe $QemuExe -Display $Display -Fullscreen:$Fullscreen)
 if ($Accel -eq 'tcg') { $ArgsQemu += @('-accel','tcg','-cpu','max') }
-else { $ArgsQemu += @('-accel','whpx,kernel-irqchip=off') }
+else { $ArgsQemu += @('-accel',"whpx,kernel-irqchip=$Irqchip") }
 Write-Host '=== BOUCHAUD STAGE2 / LADYBIRD / TWO-DISK LEGACY ===' -ForegroundColor Cyan
 Write-Host 'NOTE: ce profil n est PAS le test single-USB de Product M1.' -ForegroundColor Yellow
 Write-Host "BOOT_IMAGE=$Image LADYBIRD_IMAGE=$LadybirdImage"
-Write-Host "INPUT=$InputMode POINTER=$Pointer ACCEL=$Accel SMP=$Smp MIMALLOC=$Mimalloc"
+Write-Host "INPUT=$InputMode POINTER=$Pointer ACCEL=$Accel SMP=$Smp MIMALLOC=$Mimalloc IRQCHIP=$Irqchip"
+$Debut = Get-Date
 $rc = Invoke-BouchaudQemu -QemuExe $QemuExe -Arguments $ArgsQemu -SerialPath $Serial -DryRun:$DryRun
+$DureeHoteS = [math]::Round(((Get-Date) - $Debut).TotalSeconds, 1)
 if ($DryRun) { return }
 Write-Host "QEMU_EXIT_CODE=$rc"
 Write-Host "QEMU_SERIAL=$Serial"
 if (Test-Path -LiteralPath $Serial) {
     $Resume = [System.IO.Path]::ChangeExtension($Serial, '.perf.json')
-    Write-Host "=== RESUME DE SESSION (SMP=$Smp MIMALLOC=$Mimalloc ACCEL=$Accel) ===" -ForegroundColor Cyan
-    & python (Join-Path $RepoRoot 'tools\perf\analyse_session.py') $Serial --json $Resume
+    Write-Host "=== RESUME DE SESSION (SMP=$Smp MIMALLOC=$Mimalloc ACCEL=$Accel IRQCHIP=$Irqchip, $DureeHoteS s hote) ===" -ForegroundColor Cyan
+    & python (Join-Path $RepoRoot 'tools\perf\analyse_session.py') $Serial --json $Resume --duree-hote-s "$DureeHoteS"
     Write-Host "PERF_JSON=$Resume"
 }
 exit $rc

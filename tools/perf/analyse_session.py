@@ -44,7 +44,12 @@ R_PERF_PROC = re.compile(
     r"\[PERF-PROC\] t=(\d+) pid=(\d+) image=(\S+) rss_kio=(\d+) vss_kio=(\d+) taches=(\d+) "
     r"fautes=(\d+) total_us=(\d+) pire_us=(\d+) zero=(\d+)/(\d+)us fichier=(\d+)/(\d+)us "
     r"partage=(\d+)/(\d+)us copie=(\d+)/(\d+)us attente=(\d+)/(\d+)us echec=(\d+) user_ms=(\d+) sys_ms=(\d+)")
-R_PROC_SAMPLE = re.compile(r"\[PROC-SAMPLE\] v=1 t_ns=(\d+) pid=(\d+) name=(\S+) cpu_pct=(\d+)")
+R_PROC_SAMPLE = re.compile(r"\[PROC-SAMPLE\] v=1 t_ns=(\d+) pid=(\d+) name=(\S+) cpu_pct=(\d+) cpu_map=\[([0-9,]*)\]")
+R_PROC_STAT_TEMPS = re.compile(r"\[PROC-STAT\] capacite_ms=\d+ occupe_ms=\d+ .*?ticks_ms=(\d+) mono_ms=(\d+)")
+R_PERF_RIP = re.compile(r"\[PERF-RIP\] t=\d+ pid=\d+ tid=\d+ image=(\S*) user=(\d+) noyau=(\d+) base=\S+ top=\S* topn=(\S*)")
+R_IPI = re.compile(r"\[SMP-IPI\] t=(\d+) (.*)")
+R_IPI_COEUR = re.compile(r"c\d+=(\d+)/")
+R_CONSOLE = re.compile(r"BOUCHAUD_CONSOLE_BILAN active=\d+ repli_securite=\d+ lignes=(\d+) emises=(\d+) .*?synchrones=(\d+) synchrone_pire_us=(\d+)")
 R_SYSCALL_TOP = re.compile(r"\[SYSCALL-TOP\] window_ns=(\d+) appels=(\d+) distincts=\d+ cumul=(\d+)(.*)")
 R_APPEL = re.compile(r" ([a-z_0-9?]+)=(\d+)/eagain=(\d+)")
 R_GPU = re.compile(r"\[GPU-COMPOSITION\] disponible=(\d+) periode_ms=\d+ trames_bureau=(\d+) trames_clients=(\d+) trames_gpu=(\d+)")
@@ -84,7 +89,32 @@ def horloge(texte: str) -> dict:
             "qualite_noyau": qual.group(1) if qual else None, "verdict": verdict, "raison": raison}
 
 
-def analyse(texte: str) -> dict:
+def base(nom: str) -> str:
+    return nom.rsplit("/", 1)[-1]
+
+
+def coherence_hote(texte: str, duree_hote_s: float | None) -> dict:
+    """Deux controles independants de l'horloge de l'invite.
+
+    - ticks/mono : les ticks PIT (1 ms) contre l'horloge monotone (TSC), lus
+      dans `[PROC-STAT]`. Sous WHPX sans irqchip, des IRQ0 RETARDEES font
+      baisser ce rapport sans que le TSC soit faux : indicatif.
+    - hote : la duree de la session vue par l'invite (dernier `mono_ms`)
+      contre la duree mesuree par l'HOTE (lanceur ou banc). C'est le controle
+      qui decide : une horloge qui derive de plus de 15 % n'est pas une
+      horloge, et les durees de l'invite ne se comparent plus.
+    """
+    vus = R_PROC_STAT_TEMPS.findall(texte)
+    ticks, mono = (int(vus[-1][0]), int(vus[-1][1])) if vus else (None, None)
+    r = {"ticks_ms": ticks, "mono_ms": mono,
+         "ticks_sur_mono_pour_mille": (ticks * 1000 // mono) if ticks and mono else None,
+         "duree_hote_s": duree_hote_s, "invite_sur_hote_pour_mille": None}
+    if duree_hote_s and mono:
+        r["invite_sur_hote_pour_mille"] = int(mono / (duree_hote_s * 1000) * 1000)
+    return r
+
+
+def analyse(texte: str, duree_hote_s: float | None = None) -> dict:
     en_ligne = [int(x) for x in R_EN_LIGNE.findall(texte)]
     # Par image, le DERNIER releve (cumuls) de chaque pid ; puis la somme des
     # pid d'une meme image (un WebContent par onglet).
@@ -112,8 +142,39 @@ def analyse(texte: str) -> dict:
         im["user_ms"] += int(g[20])
         im["sys_ms"] += int(g[21])
     cpu: dict[str, list[int]] = {}
+    # Repartition sur les coeurs : pour chaque image, la part de son temps
+    # passee sur chaque coeur (cumul des echantillons), et le nombre
+    # d'echantillons ou il a REELLEMENT tourne sur plus d'un coeur.
+    coeurs: dict[str, list[int]] = {}
+    multi: dict[str, int] = {}
     for m in R_PROC_SAMPLE.finditer(texte):
-        cpu.setdefault(m.group(3), []).append(int(m.group(4)))
+        nom = base(m.group(3))
+        cpu.setdefault(nom, []).append(int(m.group(4)))
+        parts = [int(x) for x in m.group(5).split(",") if x != ""]
+        acc = coeurs.setdefault(nom, [0] * len(parts))
+        if len(acc) < len(parts):
+            acc.extend([0] * (len(parts) - len(acc)))
+        for i, p in enumerate(parts):
+            acc[i] += p
+        if sum(1 for p in parts if p >= 5) >= 2:
+            multi[nom] = multi.get(nom, 0) + 1
+    # PERF-RIP : echantillons de RIP par fil, noyau contre utilisateur, et
+    # les adresses NOYAU les plus chaudes (ou passe le temps systeme).
+    rip: dict[str, list[int]] = {}
+    chaudes: dict[str, int] = {}
+    for m in R_PERF_RIP.finditer(texte):
+        nom = base(m.group(1)) or "?"
+        u, n = rip.setdefault(nom, [0, 0])
+        rip[nom] = [u + int(m.group(2)), n + int(m.group(3))]
+        for paire in m.group(4).split(","):
+            if ":" in paire:
+                adr, nb = paire.rsplit(":", 1)
+                if nb.isdigit():
+                    chaudes[adr] = chaudes.get(adr, 0) + int(nb)
+    ipi = R_IPI.findall(texte)
+    ipi_total = sum(int(x) for x in R_IPI_COEUR.findall(ipi[-1][1])) if ipi else None
+    ipi_t_s = int(ipi[-1][0]) / 1000 if ipi else None
+    console = R_CONSOLE.findall(texte)
     appels: dict[str, int] = {}
     eagain: dict[str, int] = {}
     fenetres_ns = 0
@@ -126,6 +187,18 @@ def analyse(texte: str) -> dict:
     persist = [int(x) for x in R_PERSIST.findall(texte)]
     return {
         "horloge": horloge(texte),
+        "coherence": coherence_hote(texte, duree_hote_s),
+        "repartition_coeurs_pct": {k: [round(x / max(1, len(cpu.get(k, [1])))) for x in v] for k, v in coeurs.items()},
+        "echantillons_multicoeur": multi,
+        "rip_user_noyau": rip,
+        "rip_noyau_chaudes": dict(sorted(chaudes.items(), key=lambda kv: -kv[1])[:12]),
+        "ipi_total": ipi_total,
+        "ipi_par_s": round(ipi_total / ipi_t_s) if ipi_total is not None and ipi_t_s else None,
+        "journal_octets": len(texte.encode("utf-8", "replace")),
+        "journal_lignes": texte.count("\n"),
+        "console": ({"lignes": int(console[-1][0]), "emises": int(console[-1][1]),
+                     "synchrones": int(console[-1][2]), "synchrone_pire_us": int(console[-1][3])}
+                    if console else None),
         "coeurs_en_ligne": en_ligne[-1] if en_ligne else None,
         "processus": images,
         "cpu_pct_moyen": {k: round(sum(v) / len(v)) for k, v in cpu.items()},
@@ -144,10 +217,26 @@ def analyse(texte: str) -> dict:
     }
 
 
+def verdict_final(a: dict) -> tuple[str, str]:
+    """Le verdict qui decide de la comparaison : le controle HOTE prime."""
+    c, h = a["coherence"], a["horloge"]
+    r = c.get("invite_sur_hote_pour_mille")
+    if r is not None:
+        # La session vue par l'invite commence apres le demarrage de QEMU :
+        # elle est toujours un peu plus courte que la duree hote.
+        if 700 <= r <= 1050:
+            return "coherente", f"invite/hote = {r}/1000"
+        return "incoherente", f"invite/hote = {r}/1000 : l'horloge de l'invite derive"
+    return h["verdict"], h["raison"]
+
+
 def resume(a: dict) -> str:
     h = a["horloge"]
-    l = [f"horloge          : {h['verdict']} (source={h['source']} hz={h['hz']} rapport={h['rapport_pour_mille']}/1000)"
-         + (f" -- {h['raison']}" if h["raison"] else ""),
+    v, raison = verdict_final(a)
+    c = a["coherence"]
+    l = [f"horloge          : {v} (source={h['source']} hz={h['hz']}"
+         f" ticks/mono={c['ticks_sur_mono_pour_mille']}/1000 invite/hote={c['invite_sur_hote_pour_mille']}/1000)"
+         + (f" -- {raison}" if raison else ""),
          f"coeurs en ligne  : {a['coeurs_en_ligne']}"]
     for nom, p in sorted(a["processus"].items(), key=lambda kv: -(kv[1]["user_ms"] + kv[1]["sys_ms"])):
         if p["user_ms"] + p["sys_ms"] == 0 and p["fautes"] == 0:
@@ -158,6 +247,19 @@ def resume(a: dict) -> str:
     if a["appels"]:
         l.append("appels systeme   : " + " ".join(f"{k}={v}" for k, v in a["appels"].items())
                  + f" (sur {a['appels_fenetre_s']} s releves)")
+    for nom in ("WebContent", "Compositor", "RequestServer", "bo-navigateur"):
+        if nom in a["repartition_coeurs_pct"]:
+            l.append(f"coeurs {nom:<10}: part par coeur={a['repartition_coeurs_pct'][nom]}% "
+                     f"echantillons_multicoeur={a['echantillons_multicoeur'].get(nom, 0)}")
+    if a["rip_user_noyau"]:
+        l.append("echantillons RIP : " + " ".join(
+            f"{k}=u{u}/n{n}" for k, (u, n) in sorted(a["rip_user_noyau"].items(), key=lambda kv: -sum(kv[1]))[:6]))
+        l.append("RIP noyau chauds : " + " ".join(f"{k}:{v}" for k, v in list(a["rip_noyau_chaudes"].items())[:8]))
+    l.append(f"IPI              : total={a['ipi_total']} par_s={a['ipi_par_s']}")
+    cons = a["console"]
+    l.append(f"journal serie    : {a['journal_octets'] // 1024} Kio, {a['journal_lignes']} lignes"
+             + (f" ; console emises={cons['emises']} synchrones={cons['synchrones']} (pire {cons['synchrone_pire_us']} us)"
+                if cons else ""))
     l.append(f"composition GPU  : disponible={a['gpu_disponible']} trames_gpu={a['trames_gpu']}")
     l.append(f"pauses           : persist>1s={a['persist_lent']['n']} (pire {a['persist_lent']['pire_ms']} ms) "
              f"timeouts_parseur_html={a['parseur_html_timeouts']}")
@@ -186,7 +288,7 @@ def lit_run(dossier: Path) -> dict:
     resultats = json.loads((dossier / "results.json").read_text())
     liste = resultats if isinstance(resultats, list) else resultats.get("resultats", [])
     par_id = {r["id"]: r for r in liste}
-    session = analyse(lit(dossier / "serial.log"))
+    session = json.loads((dossier / "performance.json").read_text()).get("session") or analyse(lit(dossier / "serial.log"))
     return {"dossier": str(dossier), "manifeste": manifeste, "par_id": par_id, "session": session}
 
 
@@ -197,10 +299,10 @@ def etiquette(run: dict) -> str:
 
 def compare(dossiers: list[Path]) -> int:
     runs = [lit_run(d) for d in dossiers]
-    refus = [(etiquette(r), r["session"]["horloge"]) for r in runs if r["session"]["horloge"]["verdict"] != "coherente"]
+    refus = [(etiquette(r), verdict_final(r["session"])) for r in runs if verdict_final(r["session"])[0] != "coherente"]
     if refus:
-        for nom, h in refus:
-            print(f"PERF_AB_REFUS run={nom} horloge={h['verdict']} raison={h['raison']}")
+        for nom, (v, raison) in refus:
+            print(f"PERF_AB_REFUS run={nom} horloge={v} raison={raison}")
         print("PERF_AB_REFUS comparaison non publiee : une horloge non coherente rend les durees incomparables")
         return 3
     for r in runs:
@@ -235,16 +337,18 @@ def main(argv: list[str]) -> int:
     p.add_argument("journal", nargs="?", type=Path)
     p.add_argument("--json", type=Path)
     p.add_argument("--compare", nargs="+", type=Path)
+    p.add_argument("--duree-hote-s", dest="duree_hote_s", type=float,
+                   help="duree de la session mesuree par l'HOTE (lanceur) : controle de l'horloge de l'invite")
     o = p.parse_args(argv[1:])
     if o.compare:
         return compare(o.compare)
     if not o.journal:
         p.error("JOURNAL ou --compare")
-    a = analyse(lit(o.journal))
+    a = analyse(lit(o.journal), o.duree_hote_s)
     print(resume(a))
     if o.json:
         o.json.write_text(json.dumps(a, indent=1, ensure_ascii=False))
-    return 0 if a["horloge"]["verdict"] == "coherente" else 3
+    return 0 if verdict_final(a)[0] == "coherente" else 3
 
 
 if __name__ == "__main__":
