@@ -1,6 +1,7 @@
 //! Banc Venus. La fenêtre PCI n'est accessible qu'au noyau. Un ioctl ne
 //! choisit ni le blob, ni le décalage, ni les commandes de la soumission.
 use super::*;
+use alloc::sync::{Arc, Weak};
 
 const CFG_SHARED_MEMORY: u8 = 8;
 const SHM_ID_HOST_VISIBLE: u8 = 1;
@@ -48,41 +49,59 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
     None
 }
 
-#[derive(Clone, Copy)]
 pub(super) enum Canal {
     Nouveau(Fenetre),
-    Mappe(Fenetre, u32),
+    Mappe(Fenetre, u32, Weak<()>),
 }
 
-pub fn version_vulkan_banc(octets: u32) -> Result<u32, ErreurRendu> {
+pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let canal = p.hostmem_venus.ok_or(ErreurRendu::Indisponible)?;
+    let proprietaire = Arc::downgrade(session);
+    let canal = p.hostmem_venus.as_ref().ok_or(ErreurRendu::Indisponible)?;
     let fenetre = match canal {
-        Canal::Nouveau(fenetre) | Canal::Mappe(fenetre, _) => fenetre,
+        Canal::Nouveau(fenetre) | Canal::Mappe(fenetre, _, _) => *fenetre,
     };
     let taille = u64::from(octets);
     if taille < PAGE as u64 || taille % PAGE as u64 != 0
         || taille > fenetre.octets.min(MAX_BLOB_REPONSE)
-        || matches!(canal, Canal::Mappe(_, existants) if existants != octets)
     {
         return Err(ErreurRendu::Invalide);
     }
+    let mut ouvrir = true;
+    let mut orphelin = false;
+    if let Canal::Mappe(_, existants, ancien) = canal {
+        if ancien.ptr_eq(&proprietaire) {
+            if *existants != octets { return Err(ErreurRendu::Invalide); }
+            ouvrir = false;
+        } else if ancien.strong_count() != 0 {
+            return Err(ErreurRendu::Occupe);
+        } else {
+            orphelin = true;
+        }
+    }
 
-    // Une seule ressource de transport et un seul intervalle hostmem.
-    // Une issue incertaine retire le canal jusqu'au reset du périphérique.
+    // Le dernier close ne dort pas dans le pilote. Une nouvelle ouverture
+    // reprend le canal seulement après confirmation du démontage orphelin.
     p.hostmem_venus = None;
-    if matches!(canal, Canal::Nouveau(_)) {
+    if orphelin {
+        if let Err(etape) = unsafe { ferme(&mut p.file) } {
+            crate::serial_println!("P10_VENUS_ORPHELIN_ECHEC etape={}", etape);
+            return Err(ErreurRendu::Commande);
+        }
+        crate::serial_println!("P10_VENUS_ORPHELIN_RECUPERE");
+    }
+    if ouvrir {
         let mut restaure = false;
         if let Err(etape) = unsafe { ouvre(&mut p.file, octets, &mut restaure) } {
-            if restaure { p.hostmem_venus = Some(canal); }
+            if restaure { p.hostmem_venus = Some(Canal::Nouveau(fenetre)); }
             crate::serial_println!("P10_VENUS_OUVERTURE_ECHEC etape={} restaure={}", etape, restaure);
             return Err(ErreurRendu::Commande);
         }
     }
     match unsafe { lit_version(&mut p.file, fenetre.adresse) } {
         Ok(version) => {
-            p.hostmem_venus = Some(Canal::Mappe(fenetre, octets));
+            p.hostmem_venus = Some(Canal::Mappe(fenetre, octets, proprietaire));
             Ok(version)
         }
         Err(etape) => {
@@ -92,13 +111,16 @@ pub fn version_vulkan_banc(octets: u32) -> Result<u32, ErreurRendu> {
     }
 }
 
-pub fn ferme_vulkan_banc() -> Result<(), ErreurRendu> {
+pub fn ferme_vulkan_banc(session: &Arc<()>) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    if let Some(Canal::Mappe(_, _, ancien)) = &p.hostmem_venus {
+        if !ancien.ptr_eq(&Arc::downgrade(session)) { return Err(ErreurRendu::Occupe); }
+    }
     let canal = p.hostmem_venus.take().ok_or(ErreurRendu::Indisponible)?;
     let fenetre = match canal {
         Canal::Nouveau(fenetre) => fenetre,
-        Canal::Mappe(fenetre, _) => match unsafe { ferme(&mut p.file) } {
+        Canal::Mappe(fenetre, _, _) => match unsafe { ferme(&mut p.file) } {
             Ok(()) => fenetre,
             Err(etape) => {
                 crate::serial_println!("P10_VENUS_DEMAPPE_ECHEC etape={}", etape);

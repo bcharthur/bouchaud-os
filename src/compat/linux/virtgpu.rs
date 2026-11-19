@@ -55,6 +55,8 @@ fn erreur(e: ErreurRendu) -> i64 {
     -(match e {
         ErreurRendu::Indisponible => errno::ENODEV,
         ErreurRendu::Plein => errno::ENOMEM,
+        #[cfg(feature = "banc-gpu-venus")]
+        ErreurRendu::Occupe => errno::EBUSY,
         ErreurRendu::Inconnue => errno::ENOENT,
         ErreurRendu::Invalide => errno::EINVAL,
         ErreurRendu::Commande => errno::EIO,
@@ -161,7 +163,7 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
         #[cfg(feature = "banc-gpu-venus")]
         0x8004_42aa => {
             if !super::fault_in_user_range(arg, 4, true) { return -errno::EFAULT; }
-            match virtio_gpu::version_vulkan_banc(4096) {
+            match virtio_gpu::version_vulkan_banc(session, 4096) {
                 Ok(version) if user_write(arg, &version.to_le_bytes()) => 0,
                 Ok(_) => -errno::EFAULT,
                 Err(e) => erreur(e),
@@ -174,14 +176,14 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             if mot(&buf, 4) != 0 { return -errno::EINVAL; }
             let Some(sortie) = arg.checked_add(4) else { return -errno::EFAULT; };
             if !super::fault_in_user_range(sortie, 4, true) { return -errno::EFAULT; }
-            match virtio_gpu::version_vulkan_banc(mot(&buf, 0)) {
+            match virtio_gpu::version_vulkan_banc(session, mot(&buf, 0)) {
                 Ok(version) if user_write(sortie, &version.to_le_bytes()) => 0,
                 Ok(_) => -errno::EFAULT,
                 Err(e) => erreur(e),
             }
         }
         #[cfg(feature = "banc-gpu-venus")]
-        0x42ab => virtio_gpu::ferme_vulkan_banc().map_or_else(erreur, |()| 0),
+        0x42ab => virtio_gpu::ferme_vulkan_banc(session).map_or_else(erreur, |()| 0),
         _ => -errno::ENOTTY,
     }
 }

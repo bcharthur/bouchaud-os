@@ -15,6 +15,8 @@ const PAR_OUVERTURE: usize = 2;
 pub enum ErreurRendu {
     Indisponible,
     Plein,
+    #[cfg(feature = "banc-gpu-venus")]
+    Occupe,
     Inconnue,
     Invalide,
     Commande,
