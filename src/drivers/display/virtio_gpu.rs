@@ -227,9 +227,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         commune.e8(DEVICE_STATUS, ACKNOWLEDGE);
         commune.e8(DEVICE_STATUS, ACKNOWLEDGE | DRIVER);
 
-        // Fonctionnalites : VERSION_1 seulement. Tout le reste est refuse,
-        // y compris ce que le peripherique propose (VIRGL, EDID, BLOB...) :
-        // un pilote n'accepte que ce qu'il sait servir.
+        // VERSION_1 et VIRGL si propose dans les images livrees.
+        // Seul le banc Venus exerce en plus BLOB et CONTEXT_INIT.
         commune.e32(DEVICE_FEATURE_SELECT, 0);
         let bas = commune.l32(DEVICE_FEATURE) as u64;
         commune.e32(DEVICE_FEATURE_SELECT, 1);
@@ -242,6 +241,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         // BOUCHAUD_P10_VIRGL_3D_20261109 : genuine VIRGL negotiation is
         // feature-gated and always conditional on host advertisement.
         let retenues = gpu3d::negotiated_features(proposees, true);
+        #[cfg(feature = "banc-gpu-venus")]
+        let retenues = retenues | gpu3d::fonctionnalites_venus(proposees);
         commune.e32(DRIVER_FEATURE_SELECT, 0);
         commune.e32(DRIVER_FEATURE, retenues as u32);
         commune.e32(DRIVER_FEATURE_SELECT, 1);
@@ -328,7 +329,13 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         let mut requete = [0u8; ENTETE];
         pose32(&mut requete, 0, CMD_GET_DISPLAY_INFO);
         let longueur_reponse = ENTETE + MAX_ECRANS * 24;
-        let genre = file.commande(&requete, longueur_reponse).map_err(|_| "display-info-sans-reponse")?;
+        let genre = match file.commande(&requete, longueur_reponse) {
+            Ok(genre) => genre,
+            Err(cause) => {
+                crate::serial_println!("VIRTIO_GPU_DISPLAY_INFO echec={}", cause);
+                return Err("display-info-sans-reponse");
+            }
+        };
         let delai_us = (crate::kernel::timer::monotonic_ns() - debut) / 1000;
         if genre != RESP_OK_DISPLAY_INFO {
             crate::serial_println!("VIRTIO_GPU_DISPLAY_INFO reponse={:#06x} attendue={:#06x}", genre, RESP_OK_DISPLAY_INFO);
@@ -422,6 +429,22 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 None
             }
         });
+        #[cfg(feature = "banc-gpu-venus")]
+        if retenues & gpu3d::F_VENUS == gpu3d::F_VENUS {
+            let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
+            match sonde_contexte_venus(&mut file, capsets) {
+                Ok(info) => {
+                    crate::serial_println!(
+                        "P10_VENUS_CONTEXTE_OK capset={} version={} octets={}", info.id, info.version, info.size
+                    );
+                    match sonde_blob_invite(&mut file) {
+                        Ok(()) => crate::serial_println!("P10_BLOB_INVITE_OK octets={}", PAGE),
+                        Err(etape) => crate::serial_println!("P10_BLOB_INVITE_ECHEC etape={}", etape),
+                    }
+                }
+                Err(cause) => crate::serial_println!("P10_VENUS_CONTEXTE_ECHEC etape={}", cause),
+            }
+        }
         if file.cassee { autotest_ok = false; }
         match verrou() {
             Some(mut garde) => {
@@ -464,6 +487,48 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 
 // BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
 // The display path is still software raster + virtio-gpu 2D.
+#[cfg(feature = "banc-gpu-venus")]
+unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
+    for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
+        if f.commande(&gpu3d::get_capset_info(idx), 40) != Ok(gpu3d::RESP_OK_CAPSET_INFO) {
+            return Err("get-capset-info");
+        }
+        if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
+        let raw = core::slice::from_raw_parts(f.reponse(), 40);
+        let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
+        if info.id != gpu3d::CAPSET_VENUS { continue; }
+        let _ = p10_lit_capset(f, info).map_err(|_| "get-capset-venus")?;
+        for (cree, etape) in [(true, "ctx-create-venus"), (false, "ctx-destroy-venus")] {
+            let (commande, len) = gpu3d::contexte_venus(cree);
+            if f.commande(&commande[..len], ENTETE) != Ok(RESP_OK_NODATA) {
+                return Err(etape);
+            }
+        }
+        return Ok(info);
+    }
+    Err("capset-venus-absent")
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+unsafe fn sonde_blob_invite(f: &mut FileControle) -> Result<(), &'static str> {
+    let (phys, virt) = memory::alloc_dma(PAGE).ok_or("dma-blob")?;
+    core::ptr::write_bytes(virt, 0, PAGE);
+    fence(Ordering::SeqCst);
+    let cree = f.commande(&gpu3d::blob_invite(phys, PAGE as u32), ENTETE);
+    let mut memoire = dma::apres_attache(Memoire::NonAttachee, dma::issue(cree));
+    // Le blob est la seule référence de la page côté hôte. UNREF retire
+    // cette référence en détruisant le blob. En cas de doute, on conserve.
+    let detruit = if cree == Ok(RESP_OK_NODATA) {
+        let r = libere(f, gpu3d::RESSOURCE_BLOB_BANC);
+        memoire = dma::apres_detache(memoire, dma::issue(r));
+        r == Ok(RESP_OK_NODATA)
+    } else {
+        false
+    };
+    rend_si_sur(f, 0, phys, PAGE, &mut memoire, "blob-invite-banc");
+    if detruit { Ok(()) } else { Err("cycle-create-unref") }
+}
+
 unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
     if count == 0 { return Err("aucun-capset"); }
     let mut selected: Option<gpu3d::CapsetInfo> = None;

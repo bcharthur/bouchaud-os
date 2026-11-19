@@ -7,7 +7,8 @@ Premier composant de P10 (docs/ladybird/P10_GPU_AUDIT.md). Regles :
      SEULEMENT si l'hote le propose (`gpu3d::negotiated_features`), parce que
      le pilote le SERT (contexte 3D, autotest de BLIT, compositeur GPU,
      BOUCHAUD_GPU_COMPOSITION_V2) ; accepter BLOB, EDID ou EVENT_IDX sans les
-     servir serait mentir au peripherique ;
+     servir serait mentir au peripherique. Le banc Venus a une liste
+     distincte et bornee a BLOB + CONTEXT_INIT, hors des options livrees ;
   2. FEATURES_OK est RELU apres ecriture (le peripherique peut refuser) ;
   3. chaque attente est bornee : `attente_bornee` (reset) et
      `attente_reponse` (controlq), seule `loop` autorisee, qui porte la borne
@@ -50,6 +51,10 @@ README = RACINE / "README.md"
 BANC = RACINE / "tools/ci/run_virtio_gpu.sh"
 CARGO = RACINE / "Cargo.toml"
 FLUX = RACINE / ".github/workflows/os-primitives.yml"
+OPTION_VENUS = "banc-gpu-venus"
+NEGOCIATION = "let retenues = gpu3d::negotiated_features(proposees, true);"
+NEGOCIATION_VENUS = ('#[cfg(feature = "' + OPTION_VENUS + '")]\n'
+                     '        let retenues = retenues | gpu3d::fonctionnalites_venus(proposees);')
 OPTION = "banc-virtio-gpu-sans-reponse"
 GARDE_INJECTION = '#[cfg(feature = "' + OPTION + '")]\n        if lit32(requete, 0) == CMD_RESOURCE_ATTACH_BACKING'
 OPTION_ETRANGERE = "banc-virtio-gpu-reponse-etrangere"
@@ -84,9 +89,28 @@ def corps(texte: str, nom: str) -> str:
 
 def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "", trois_d: str = "") -> list:
     fautes = []
-    if not re.search(r"let retenues = gpu3d::negotiated_features\(proposees, true\);", s) \
-            or len(re.findall(r"let retenues\b", s)) != 1:
-        fautes.append("virtio_gpu.rs : les fonctionnalites retenues ne sont plus VERSION_1 (+ VIRGL propose et servi).")
+    sans_banc_venus = s.replace(NEGOCIATION_VENUS, "", 1)
+    if s.count(NEGOCIATION_VENUS) != 1 or sans_banc_venus.count(NEGOCIATION) != 1 \
+            or len(re.findall(r"let retenues\b", sans_banc_venus)) != 1:
+        fautes.append("virtio_gpu.rs : la negociation livree et le banc Venus ne sont plus isoles.")
+    for moitie in ("retenues as u32", "(retenues >> 32) as u32"):
+        if s.count("commune.e32(DRIVER_FEATURE, " + moitie + ");") != 1:
+            fautes.append("virtio_gpu.rs : ecriture des bits GPU hors de la negociation verifiee.")
+    if len(re.findall(r"\.e32\(DRIVER_FEATURE,", s)) != 2:
+        fautes.append("virtio_gpu.rs : ecriture supplementaire des bits GPU.")
+    options_defaut = re.search(r"(?m)^default\s*=\s*\[[^]]*\]", cargo)
+    if options_defaut and OPTION_VENUS in options_defaut.group(0):
+        fautes.append("Cargo.toml : le banc Venus est active par defaut.")
+    if trois_d and ("pub const F_VENUS: u64 = (1 << 3) | (1 << 4);" not in trois_d
+                    or "let requises = F_VERSION_1 | F_VIRGL | F_VENUS;" not in trois_d
+                    or "if offertes & requises == requises { F_VENUS } else { 0 }" not in trois_d):
+        fautes.append("virtio_gpu_3d.rs : le banc Venus doit retenir ensemble les seuls bits offerts et servis.")
+    blob = corps(s, "sonde_blob_invite")
+    if ('#[cfg(feature = "' + OPTION_VENUS + '")]\nunsafe fn sonde_blob_invite' not in s
+            or "dma::apres_attache(Memoire::NonAttachee, dma::issue(cree))" not in blob
+            or "dma::apres_detache(memoire, dma::issue(r))" not in blob
+            or 'rend_si_sur(f, 0, phys, PAGE, &mut memoire, "blob-invite-banc");' not in blob):
+        fautes.append("virtio_gpu.rs : le blob du banc ne protege plus la duree de vie de sa page DMA.")
     if trois_d and not re.search(r"F_VERSION_1 \| if opt_in && offered & F_VIRGL != 0 \{ F_VIRGL \} else \{ 0 \}", trois_d):
         fautes.append("virtio_gpu_3d.rs : negotiated_features retient autre chose que VERSION_1 et VIRGL propose.")
     if "l8(DEVICE_STATUS) & FEATURES_OK == 0" not in s:
@@ -208,6 +232,11 @@ def main() -> int:
         # une seconde negociation qui retiendrait autre chose
         ("let retenues = gpu3d::negotiated_features(proposees, true);",
          "let retenues = gpu3d::negotiated_features(proposees, true);\n        let retenues = proposees;"),
+        (NEGOCIATION_VENUS, NEGOCIATION_VENUS.split("\n")[1]),
+        ("commune.e32(DRIVER_FEATURE, retenues as u32);",
+         "commune.e32(DRIVER_FEATURE, proposees as u32);"),
+        ("dma::apres_attache(Memoire::NonAttachee, dma::issue(cree))", "Memoire::NonAttachee"),
+        ("dma::apres_detache(memoire, dma::issue(r))", "Memoire::NonAttachee"),
         # rendre la memoire sur le seul « jamais attachee » (le defaut)
         ("if dma::peut_rendre(*m) {", "if *m != Memoire::Attachee {"),
         # retirer la borne datee de l'attente de reponse
@@ -265,6 +294,12 @@ def main() -> int:
         ("virtio_gpu_3d.rs (BLOB retenu)", lambda: verifie(s, readme, banc, cargo, flux, trois_d.replace(
             "F_VERSION_1 | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }",
             "F_VERSION_1 | (offered & (1 << 3)) | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }", 1))),
+        ("virtio_gpu_3d.rs (Venus ajoute EDID)", lambda: verifie(s, readme, banc, cargo, flux,
+            trois_d.replace("pub const F_VENUS: u64 = (1 << 3) | (1 << 4);",
+                            "pub const F_VENUS: u64 = (1 << 1) | (1 << 3) | (1 << 4);", 1))),
+        ("Cargo.toml (Venus par defaut)", lambda: verifie(s, readme, banc,
+            cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION_VENUS + '"]', 1),
+            flux, trois_d)),
         ("Cargo.toml", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION + '"]', 1), flux, trois_d)),
         ("os-primitives.yml", lambda: verifie(s, readme, banc, cargo, flux.replace("BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh", "true", 1), trois_d)),
         ("Cargo.toml (etrangere)", lambda: verifie(s, readme, banc, cargo.replace('default = ["legacy-boot"]', 'default = ["legacy-boot", "' + OPTION_ETRANGERE + '"]', 1), flux, trois_d)),

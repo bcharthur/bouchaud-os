@@ -8,6 +8,14 @@
 
 pub const F_VIRGL: u64 = 1;
 pub const F_VERSION_1: u64 = 1 << 32;
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub const F_VENUS: u64 = (1 << 3) | (1 << 4); // RESOURCE_BLOB et CONTEXT_INIT
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub const CAPSET_VENUS: u32 = 4;
+#[cfg(any(feature = "banc-gpu-venus", test))]
+const CONTEXTE_VENUS: u32 = 0xB105;
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub const RESSOURCE_BLOB_BANC: u32 = 0xB106;
 pub const CMD_GET_CAPSET_INFO: u32 = 0x0108;
 pub const CMD_GET_CAPSET: u32 = 0x0109;
 pub const CMD_CTX_CREATE: u32 = 0x0200;
@@ -46,6 +54,40 @@ fn get32(buf: &[u8], offset: usize) -> u32 {
 /// Never negotiate VIRGL unless explicitly opted in AND offered by the host.
 pub fn negotiated_features(offered: u64, opt_in: bool) -> u64 {
     F_VERSION_1 | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }
+}
+
+// Réserver le profil aux périphériques proposant les deux fonctionnalités et VIRGL.
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn fonctionnalites_venus(offertes: u64) -> u64 {
+    let requises = F_VERSION_1 | F_VIRGL | F_VENUS;
+    if offertes & requises == requises { F_VENUS } else { 0 }
+}
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn contexte_venus(cree: bool) -> ([u8; 96], usize) {
+    let mut q = [0u8; 96];
+    put32(&mut q, 0, if cree { CMD_CTX_CREATE } else { CMD_CTX_DESTROY });
+    put32(&mut q, 16, CONTEXTE_VENUS);
+    if !cree { return (q, 24); }
+    let nom = b"bouchaud-venus";
+    put32(&mut q, 24, nom.len() as u32);
+    put32(&mut q, 28, CAPSET_VENUS);
+    q[32..32 + nom.len()].copy_from_slice(nom);
+    (q, 96)
+}
+
+// Un blob GUEST sans mappage hôte, adossé à une page du noyau.
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn blob_invite(physique: u64, octets: u32) -> [u8; 72] {
+    let mut q = [0u8; 72];
+    put32(&mut q, 0, 0x010c); // RESOURCE_CREATE_BLOB
+    put32(&mut q, 24, RESSOURCE_BLOB_BANC);
+    put32(&mut q, 28, 1); // BLOB_MEM_GUEST
+    put32(&mut q, 36, 1); // nr_entries
+    q[48..56].copy_from_slice(&(octets as u64).to_le_bytes());
+    q[56..64].copy_from_slice(&physique.to_le_bytes());
+    put32(&mut q, 64, octets);
+    q
 }
 
 /// 32-byte virtio_gpu_get_capset_info (24-byte common header + 8-byte body).
@@ -178,6 +220,33 @@ mod tests {
         assert_eq!(negotiated_features(F_VERSION_1 | F_VIRGL, false), F_VERSION_1);
         assert_eq!(negotiated_features(F_VERSION_1, true), F_VERSION_1);
         assert_eq!(negotiated_features(F_VERSION_1 | F_VIRGL, true), F_VERSION_1 | F_VIRGL);
+    }
+    #[test]
+    fn venus_exige_les_deux_bits_et_utilise_un_contexte_separe() {
+        let offre = F_VERSION_1 | F_VIRGL | F_VENUS;
+        assert_eq!(fonctionnalites_venus(offre), F_VENUS);
+        for bit in [F_VERSION_1, F_VIRGL, 1 << 3, 1 << 4] {
+            assert_eq!(fonctionnalites_venus(offre & !bit), 0);
+        }
+        let (creation, len) = contexte_venus(true);
+        assert_eq!(len, 96);
+        assert_eq!(get32(&creation, 28), CAPSET_VENUS);
+        let (destruction, len) = contexte_venus(false);
+        assert_eq!(len, 24);
+        assert_eq!(get32(&destruction, 16), get32(&creation, 16));
+        assert_ne!(get32(&creation, 16), CONTEXT_ID);
+    }
+    #[test]
+    fn blob_invite_a_une_entree_et_aucun_drapeau_de_mappage() {
+        let blob = blob_invite(0x100000, 4096);
+        assert_eq!(get32(&blob, 0), 0x010c);
+        assert_eq!(get32(&blob, 24), RESSOURCE_BLOB_BANC);
+        assert_eq!(get32(&blob, 28), 1);
+        assert_eq!(get32(&blob, 32), 0);
+        assert_eq!(get32(&blob, 36), 1);
+        assert_eq!(get32(&blob, 48), 4096);
+        assert_eq!(get32(&blob, 56), 0x100000);
+        assert_eq!(get32(&blob, 64), 4096);
     }
     #[test]
     fn capset_info_strict() {

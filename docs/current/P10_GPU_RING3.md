@@ -146,15 +146,32 @@ avec `-trace 'enable=virtio_gpu_cmd_*'`.
 | Même périphérique avec `venus=on` | `0x0000000100000001` | QEMU bloqué sur `GET_DISPLAY_INFO` |
 | Même périphérique, image expérimentale acceptant BLOB et CONTEXT_INIT | `0x0000000100000019` | Même blocage, suivi d’une assertion XCB lors de l’arrêt |
 
-Les deux essais Venus ont nécessité SIGKILL. Ils ont bloqué avant la
-lecture du capset Venus, donc avant la création d’un contexte et du
-premier blob. L’image expérimentale reste hors de la branche, où
-la négociation demeure limitée à VERSION_1 et VIRGL. Les essais
-isolent l’option hôte `venus=on` dans ce montage SDL/GL. Un pilote
-Vulkan invité exige encore le mappage hostmem, les ressources blob,
-la soumission clôturée et une validation de bout en bout avec Mesa
-Venus. Le test UEFI sans périphérique VirtIO a sélectionné le GOP
-avec la même image de démarrage.
+Les deux essais SDL/GL avec Venus ont nécessité SIGKILL.
+En changeant uniquement le frontal par GTK/GL, l’image de banc
+`banc-gpu-venus` a retenu les mêmes bits et lu le capset Venus
+`id=4 version=0` de 160 octets. QEMU a confirmé l’ouverture
+puis la destruction du contexte Venus. Le banc a ensuite créé
+puis détruit un blob `BLOB_MEM_GUEST` de 4 096 octets. La page
+DMA est conservée si une réponse est absente ou incertaine.
+
+~~~bash
+cargo bootimage --features banc-gpu-venus
+# Sous un affichage X disponible et avec un QEMU/Virglrenderer compatible Venus.
+timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 \
+  -vga none -device virtio-gpu-gl-pci,blob=on,hostmem=256M,venus=on \
+  -display gtk,gl=on -no-reboot -serial file:venus-serie.log \
+  -trace 'enable=virtio_gpu_cmd_*' \
+  -drive format=raw,file=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin,snapshot=on
+grep -E 'P10_VENUS_CONTEXTE_OK|P10_BLOB_INVITE_OK' venus-serie.log
+~~~
+
+Les deux marqueurs doivent apparaître. L’essai local utilise
+Mesa logiciel pour GL et Lavapipe comme ICD Vulkan hôte.
+Les images livrées continuent de négocier VERSION_1 et VIRGL.
+Un pilote Vulkan invité exige encore le mappage hostmem,
+les ressources `HOST3D`, la soumission de commandes Venus et
+une validation avec Mesa Venus dans l’invité. Le test UEFI sans
+périphérique VirtIO a sélectionné le GOP avec la même image.
 
 La sonde autonome tools/userland/vulkan-transfert-probe.c fait un
 vkCmdFillBuffer puis vérifie une relecture de 4 096 octets après fence.
@@ -213,4 +230,6 @@ vers le GOP, en passant par le tampon arrière. Elle est déclenchée
 aussi quand une trame n’a que des régions de fenêtres GPU et que
 son plan de transfert 2D est vide. Ce cas de sortie est distinct
 du noir intermittent. Les garde-fous DMA et VirtIO-PCI passent
-avec leurs 13 et 25 cas négatifs.
+avec 13 cas négatifs DMA et 31 cas VirtIO-PCI, dont les 25
+existants. Les nouveaux cas vérifient l’isolement du banc Venus,
+les bits écrits et la restitution de sa page DMA.
