@@ -26,7 +26,8 @@ sys.path.insert(0, str(ICI))
 import e2e  # noqa: E402
 import fixture  # noqa: E402
 
-ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client", "fixture_jamais"}
+ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client", "fixture_jamais",
+           "survole_client", "molette", "attend_couleur"}
 
 
 class Definition(unittest.TestCase):

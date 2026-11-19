@@ -32,6 +32,7 @@ on:
     paths:
       - 'tools/ladybird/**'
       - 'tools/e2e/**'
+      - 'tools/perf/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
@@ -112,6 +113,7 @@ on:
     paths:
       - 'tools/ladybird/**'
       - 'tools/e2e/**'
+      - 'tools/perf/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
@@ -1320,6 +1322,150 @@ jobs:
         with:
           name: ladybird-e2e-${{ matrix.accel }}
           path: e2e-${{ matrix.accel }}
+          if-no-files-found: warn
+
+  # BOUCHAUD_PERF_SESSION_V1 -- A/B de PERFORMANCE de Ladybird, une variable a
+  # la fois : coeurs (SMP 1 = reference, 2, 4) x purge mimalloc (actuelle =
+  # profil produit, delai10 = defaut mimalloc, reference = aucune purge). Les
+  # parcours mesurent ce que l'utilisateur subit : premiere trame, resultats,
+  # page lourde (image utile, clic, retour, molette). Diagnostic, jamais
+  # bloquant ; joue seulement sur les branches de perf (claude/perf-*) pour ne
+  # pas multiplier par neuf le cout de chaque PR.
+  ab-perf:
+    name: ladybird / ab perf (kvm smp${{ matrix.smp }}, ${{ matrix.mimalloc }})
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        smp: [1, 2, 4]
+        mimalloc: [actuelle, delai10, reference]
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: tools/ci/apt-installe.sh qemu-system-x86 file
+      - name: Tests de l'orchestrateur et de l'analyseur (sans QEMU)
+        run: |
+          python3 -m unittest discover -s tools/e2e/ladybird -p 'test_e2e.py'
+          python3 -m unittest discover -s tools/perf -p 'test_analyse_session.py'
+      - name: Cache Cargo noyau
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Disque E2E (politique ${{ matrix.mimalloc }})
+        run: |
+          python3 -I tools/e2e/ladybird/prepare_disque.py --artefact native-browser \
+            --certs /etc/ssl/certs/ca-certificates.crt \
+            --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img --mimalloc ${{ matrix.mimalloc }}
+      - name: Parcours (demarrage, ouverture, recherche, page lourde)
+        run: |
+          python3 tools/e2e/ladybird/e2e.py --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --disque disque-e2e.img --accel kvm --smp ${{ matrix.smp }} --memoire 8192 \
+            --sortie ab-smp${{ matrix.smp }}-${{ matrix.mimalloc }} --port-fixture 18300 \
+            --scenarios E2E-01,E2E-02,E2E-04,E2E-11 --exige E2E-01,E2E-02 \
+            --politique-mimalloc ${{ matrix.mimalloc }}
+      - name: Rapport
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-ab-smp${{ matrix.smp }}-${{ matrix.mimalloc }}
+          path: ab-smp${{ matrix.smp }}-${{ matrix.mimalloc }}
+          if-no-files-found: warn
+
+  ab-perf-bilan:
+    name: ladybird / ab perf (bilan)
+    needs: [dedoublonne, ab-perf]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.ab-perf.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ladybird-ab-smp*
+          path: ab
+      - name: Tableau A/B (refuse si une horloge n'est pas coherente)
+        run: |
+          set -u
+          runs=$(ls -d ab/ladybird-ab-smp* | sort -V)
+          python3 tools/perf/analyse_session.py --compare $runs
+
+  # BOUCHAUD_PERF_SESSION_V1 -- la memoire reste-t-elle bornee si la purge de
+  # mimalloc attend 10 ms au lieu de 0 ? MEME banc C22, MEMES seuils, 6 essais.
+  # Diagnostic des branches de perf ; le C22 contractuel ne change pas.
+  memoire-c22-delai10:
+    name: ladybird / C22 memoire 6x6 sous purge 10 ms (diagnostic)
+    needs: [dedoublonne, artefact]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 48
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + outils
+        run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
+      - name: Bootimage
+        run: tools/ci/build_kernel.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: bouchaud-ladybird-native-browser
+          path: native-browser
+      - name: Verifier le manifeste de l'artefact telecharge
+        run: tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser
+      - name: Acces a /dev/kvm
+        run: |
+          test -w /dev/kvm || sudo chmod 666 /dev/kvm
+          test -w /dev/kvm
+      - name: C22 -- 6 essais, purge 10 ms
+        env:
+          BO_QEMU_KVM: "1"
+          BO_C22_MIMALLOC_DELAI: "10"
+        run: |
+          set -uo pipefail
+          verts=0
+          for essai in 1 2 3 4 5 6; do
+            rc=0
+            BO_C22_TEMOIN=0 tools/ci/run_ladybird_memoire.sh \
+              target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+              native-browser 10 > "memoire-delai10-$essai.sortie" 2>&1 || rc=$?
+            grep -E 'MEMOIRE_PROCESSUS .*image=WebContent|MEMOIRE_BORNEE|MEMOIRE_CROISSANCE|LADYBIRD_MEMOIRE_(OK|ECHEC)' "memoire-delai10-$essai.sortie" || true
+            [ -s serie-memoire.log ] && cp serie-memoire.log "serie-memoire-delai10-$essai.log"
+            if [ "$rc" -eq 0 ] && grep -q 'MEMOIRE_PROCESSUS .*image=WebContent .*verdict=borne' "memoire-delai10-$essai.sortie"; then
+              verts=$((verts + 1))
+            fi
+            echo "C22_DELAI10_ESSAI essai=$essai rc=$rc"
+          done
+          echo "C22_DELAI10_VERDICT verts=$verts/6"
+          test "$verts" -eq 6
+      - name: Journaux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-memoire-delai10
+          path: |
+            serie-memoire-delai10-*.log
+            memoire-delai10-*.sortie
           if-no-files-found: warn
 
   # BOUCHAUD_VIRTIO_GPU_2D_V1 : le MEME smoke, ecran virtio-gpu (-vga none).

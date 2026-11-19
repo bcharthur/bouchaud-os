@@ -178,6 +178,50 @@
     {"id": "E2E-07", "titre": "Multitache DOOM + Ladybird", "non_implemente": "scenario non ecrit dans cette version du banc"},
     {"id": "E2E-08", "titre": "Endurance (cycles d'ouverture, de navigation et d'onglets)", "non_implemente": "scenario non ecrit dans cette version du banc ; les endurances existantes restent dans ladybird-native-browser.yml"},
     {"id": "E2E-09", "titre": "Persistance (favoris apres relance et apres redemarrage)", "non_implemente": "scenario non ecrit dans cette version du banc"},
-    {"id": "E2E-10", "titre": "Resilience (arret d'un WebContent)", "non_implemente": "scenario non ecrit dans cette version du banc ; couvert hors E2E par le job crash-rendu"}
+    {"id": "E2E-10", "titre": "Resilience (arret d'un WebContent)", "non_implemente": "scenario non ecrit dans cette version du banc ; couvert hors E2E par le job crash-rendu"},
+    {
+      "id": "E2E-11",
+      "titre": "Page lourde (gabarit d'une page de resultats video) : image utile, clic, retour, defilement",
+      "requiert": ["E2E-02"],
+      "bloquant": false,
+      "note": "BOUCHAUD_E2E_PAGE_LOURDE_V1 -- 120 cartes construites par JavaScript, une vignette PNG chacune, une minuterie par seconde ; deterministe (site de reference). Diagnostic tant qu'aucun seuil n'est fixe : il MESURE les delais que l'utilisateur subit, il ne les juge pas encore.",
+      "etapes": [
+        {"touches": ["ctrl-l"]},
+        {"tape": "${FIXTURE}/lourde.html?n=120", "entree": true, "nom": "saisie"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/lourde\\.html\\?n=120", "delai_s": 180, "nom": "document"},
+        {"attend_couleur": "lourde", "min_px": 20000, "delai_s": 180, "nom": "image_utile"},
+        {"pause_s": 3},
+        {"capture": "11-lourde", "couleur": "lourde", "min_px": 20000},
+        {"clic_client": "Ladybird", "dy": 166, "nom": "clic_carte"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/video\\.html\\?i=1", "delai_s": 180, "nom": "video_document"},
+        {"attend_couleur": "video", "min_px": 20000, "delai_s": 180, "nom": "video_visible"},
+        {"pause_s": 2},
+        {"touches": ["alt-left"], "nom": "retour"},
+        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/lourde\\.html\\?n=120", "delai_s": 180, "nom": "revenu_document"},
+        {"attend_couleur": "lourde", "min_px": 20000, "delai_s": 180, "nom": "revenu_visible"},
+        {"pause_s": 3},
+        {"survole_client": "Ladybird"},
+        {"capture": "11b-avant-molette"},
+        {"molette": -3, "nom": "molette_1"},
+        {"attend": "\\[LB:FRAME\\] onglet=1 seq=\\d+ t=\\d+ apres_molette=1", "delai_s": 60, "nom": "trame_1"},
+        {"pause_s": 1},
+        {"molette": -3, "nom": "molette_2"},
+        {"attend": "\\[LB:FRAME\\] onglet=1 seq=\\d+ t=\\d+ apres_molette=1", "delai_s": 60, "nom": "trame_2"},
+        {"pause_s": 1},
+        {"molette": -3, "nom": "molette_3"},
+        {"attend": "\\[LB:FRAME\\] onglet=1 seq=\\d+ t=\\d+ apres_molette=1", "delai_s": 60, "nom": "trame_3"},
+        {"pause_s": 1},
+        {"capture": "11c-apres-molette", "different_de": "11b-avant-molette"}
+      ],
+      "metriques": [
+        {"nom": "saisie_jusqu_au_document_lourd_ms", "de": "saisie", "a": "document"},
+        {"nom": "saisie_jusqu_a_l_image_utile_ms", "de": "saisie", "a": "image_utile"},
+        {"nom": "clic_carte_jusqu_a_la_video_ms", "de": "clic_carte", "a": "video_visible"},
+        {"nom": "retour_jusqu_a_l_image_utile_ms", "de": "retour", "a": "revenu_visible"},
+        {"nom": "molette_1_jusqu_a_la_trame_ms", "de": "molette_1", "a": "trame_1"},
+        {"nom": "molette_2_jusqu_a_la_trame_ms", "de": "molette_2", "a": "trame_2"},
+        {"nom": "molette_3_jusqu_a_la_trame_ms", "de": "molette_3", "a": "trame_3"}
+      ]
+    }
   ]
 }

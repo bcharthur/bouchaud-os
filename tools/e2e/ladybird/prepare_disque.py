@@ -18,6 +18,13 @@ de reference du banc (URL).
                l'URL d'accueil change, l'autostart eventuel est retire. La
                SOURCE n'est jamais ouverte en ecriture.
 
+  --mimalloc : BOUCHAUD_PERF_SESSION_V1 -- politique de purge de mimalloc
+               du navigateur, pour l'A/B (POLITIQUES). `actuelle` ne touche
+               rien : c'est le profil produit (src/gui/client.rs, C22).
+  --conserve-session : avec --image, garder l'autorun tel quel (autostart,
+               URL) et n'y ajouter que la politique : c'est le disque du
+               lanceur interactif (run-reference-stage2-ladybird.ps1).
+
 Portable (Python seul) : meme commande sous Linux et sous Windows.
 """
 import argparse
@@ -28,6 +35,23 @@ import tarfile
 from pathlib import Path
 
 BINAIRES = ["BouchaudBrowserHost", "WebContent", "RequestServer", "ImageDecoder", "WebWorker", "Compositor", "WebDriver"]
+
+
+# Les exports places AVANT `desktop` : une valeur exportee explicitement a la
+# priorite sur le profil produit (src/gui/client.rs, BOUCHAUD_C22_PURGE_PRODUIT_V1).
+POLITIQUES = {
+    "actuelle": [],                                     # produit : delai 0, decommit
+    "delai10": ["export MIMALLOC_PURGE_DELAY=10"],      # defaut de mimalloc
+    "reference": ["export MIMALLOC_PURGE_DELAY=-1"],    # aucune purge : borne du gain
+}
+
+
+def avec_politique(lignes: list[str], politique: str) -> list[str]:
+    if "desktop" not in lignes:
+        raise SystemExit("E2E_DISQUE_REFUS autorun sans ligne desktop")
+    lignes = [l for l in lignes if not l.startswith("export MIMALLOC_PURGE_DELAY=")]
+    i = lignes.index("desktop")
+    return lignes[:i] + POLITIQUES[politique] + lignes[i:]
 
 
 def autorun_session(url: str) -> str:
@@ -73,7 +97,7 @@ def dossier(tar: tarfile.TarFile, nom: str) -> None:
     tar.addfile(info)
 
 
-def depuis_artefact(artefact: Path, certs: Path, url: str, tar: tarfile.TarFile) -> None:
+def depuis_artefact(artefact: Path, certs: Path, url: str, tar: tarfile.TarFile, politique: str = "actuelle") -> None:
     for b in BINAIRES:
         if not (artefact / b).is_file():
             raise SystemExit(f"E2E_DISQUE_REFUS binaire absent de l'artefact : {b}")
@@ -92,21 +116,23 @@ def depuis_artefact(artefact: Path, certs: Path, url: str, tar: tarfile.TarFile)
             else:
                 ajoute(tar, f"./usr/share/ladybird/{rel}", p.read_bytes(), 0o644)
     ajoute(tar, "./etc/ssl/certs/ca-certificates.crt", avec_ca_de_test(certs.read_bytes()), 0o644)
-    ajoute(tar, "./autorun", autorun_session(url).encode(), 0o644)
+    ajoute(tar, "./autorun", "\n".join(avec_politique(autorun_session(url).split("\n"), politique)).encode(), 0o644)
 
 
-def depuis_image(image: Path, url: str, tar: tarfile.TarFile) -> None:
+def depuis_image(image: Path, url: str | None, tar: tarfile.TarFile, politique: str = "actuelle") -> None:
     with tarfile.open(image, mode="r:") as src:
         vu = False
         for m in src.getmembers():
             if m.name in ("./autorun", "autorun") and m.isfile():
-                lignes = [l for l in src.extractfile(m).read().decode("utf-8").split("\n")
-                          if l.strip() != "export BO_AUTOSTART_BROWSER=1"]
-                lignes = [l for l in lignes if not l.startswith("export BOUCHAUD_M9_URL=")]
-                if "desktop" not in lignes:
-                    raise SystemExit("E2E_DISQUE_REFUS autorun sans ligne desktop")
-                i = lignes.index("desktop")
-                lignes.insert(i, f"export BOUCHAUD_M9_URL='{url}'")
+                lignes = src.extractfile(m).read().decode("utf-8").split("\n")
+                if url is not None:
+                    lignes = [l for l in lignes if l.strip() != "export BO_AUTOSTART_BROWSER=1"]
+                    lignes = [l for l in lignes if not l.startswith("export BOUCHAUD_M9_URL=")]
+                    if "desktop" not in lignes:
+                        raise SystemExit("E2E_DISQUE_REFUS autorun sans ligne desktop")
+                    i = lignes.index("desktop")
+                    lignes.insert(i, f"export BOUCHAUD_M9_URL='{url}'")
+                lignes = avec_politique(lignes, politique)
                 ajoute(tar, m.name, "\n".join(lignes).encode(), m.mode)
                 vu = True
             elif m.name in MAGASIN and m.isfile():
@@ -146,12 +172,19 @@ def main(argv):
     p.add_argument("--certs", type=Path)
     p.add_argument("--ca-test", dest="ca_test", type=Path, help="tls/genere_tls.py DOSSIER -> DOSSIER/ca.pem")
     p.add_argument("--image", type=Path)
-    p.add_argument("--url", required=True)
+    p.add_argument("--url")
     p.add_argument("--sortie", required=True, type=Path)
+    p.add_argument("--mimalloc", choices=sorted(POLITIQUES), default="actuelle")
+    p.add_argument("--conserve-session", dest="conserve", action="store_true")
     o = p.parse_args(argv[1:])
+    if o.conserve:
+        if not o.image or o.url:
+            p.error("--conserve-session : avec --image, sans --url")
+    elif not o.url:
+        p.error("--url requis (sauf --conserve-session)")
     if bool(o.artefact) == bool(o.image):
         p.error("une source : --artefact (avec --certs) OU --image")
-    if not re.fullmatch(r"https?://[A-Za-z0-9.:/_-]+", o.url):
+    if o.url and not re.fullmatch(r"https?://[A-Za-z0-9.:/_-]+", o.url):
         p.error("URL refusee (caracteres hors de l'autorun)")
     if o.image and o.image.resolve() == o.sortie.resolve():
         p.error("la sortie ne peut pas etre la source")
@@ -163,12 +196,12 @@ def main(argv):
         if o.artefact:
             if not o.certs or not o.certs.is_file():
                 p.error("--certs requis avec --artefact")
-            depuis_artefact(o.artefact, o.certs, o.url, tar)
+            depuis_artefact(o.artefact, o.certs, o.url, tar, o.mimalloc)
         else:
-            depuis_image(o.image, o.url, tar)
+            depuis_image(o.image, o.url, tar, o.mimalloc)
     ajoute_zone_persistante(tmp)
     tmp.replace(o.sortie)
-    print(f"E2E_DISQUE_OK sortie={o.sortie} octets={o.sortie.stat().st_size} url={o.url}")
+    print(f"E2E_DISQUE_OK sortie={o.sortie} octets={o.sortie.stat().st_size} url={o.url or 'inchangee'} mimalloc={o.mimalloc}")
     return 0
 
 

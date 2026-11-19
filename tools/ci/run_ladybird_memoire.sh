@@ -61,6 +61,16 @@ if [ "${BO_C22_MIMALLOC_PURGE:-0}" = 1 ] && [ "${BO_C22_TEMOIN:-0}" != 1 ]; then
   C22_PURGE_GUEST_EXPORT='export MIMALLOC_PURGE_DELAY=0
 export MIMALLOC_PURGE_DECOMMITS=1'
 fi
+# BOUCHAUD_PERF_SESSION_V1 : A/B de PERFORMANCE de la purge mimalloc. Le
+# delai exporte remplace celui du profil produit (src/gui/client.rs) ; le
+# banc et ses seuils sont INCHANGES -- c'est la question posee : la memoire
+# reste-t-elle bornee avec ce delai ? Interdit cote temoin historique.
+if [ -n "${BO_C22_MIMALLOC_DELAI:-}" ] && [ "${BO_C22_TEMOIN:-0}" != 1 ]; then
+  case "$BO_C22_MIMALLOC_DELAI" in
+    ''|*[!0-9-]*) echo "BO_C22_MIMALLOC_DELAI invalide : $BO_C22_MIMALLOC_DELAI" >&2; exit 2 ;;
+  esac
+  C22_PURGE_GUEST_EXPORT="export MIMALLOC_PURGE_DELAY=$BO_C22_MIMALLOC_DELAI"
+fi
 C22_GC_LOG_LEVEL=1
 C22_AZ_NATIVE_EXPORT=""
 if [ "${BO_C22_AZ_DIAGNOSTIC:-0}" = 1 ] && [ "${BO_C22_TEMOIN:-0}" != 1 ]; then

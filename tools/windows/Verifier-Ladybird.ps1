@@ -26,12 +26,16 @@
     melangent jamais aux mesures TCG/KVM de la CI.
 
 .EXAMPLE
+    .\tools\windows\Verifier-Ladybird.ps1 -Profil perf -Accel whpx -CpuCount 1 -Mimalloc actuelle
     .\tools\windows\Verifier-Ladybird.ps1 -Profil complet -Accel whpx -CpuCount 4
     .\tools\windows\Verifier-Ladybird.ps1 -Profil rapide -Accel whpx -CpuCount 1
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('rapide', 'complet')][string]$Profil = 'complet',
+    # perf : demarrage, ouverture, page lourde (image utile, clic, retour,
+    # molette) -- BOUCHAUD_PERF_SESSION_V1.
+    [ValidateSet('rapide', 'complet', 'perf')][string]$Profil = 'complet',
+    [ValidateSet('actuelle', 'delai10', 'reference')][string]$Mimalloc = 'actuelle',
     [ValidateSet('whpx', 'tcg')][string]$Accel = 'whpx',
     [int]$CpuCount = 4,
     [int]$RamMiB = 8192,
@@ -63,7 +67,7 @@ $empreinte = (Get-FileHash -LiteralPath $Boot -Algorithm SHA256).Hash.ToLower()
 Write-Host "noyau      : $Boot sha256=$empreinte"
 
 $Horodatage = Get-Date -Format 'yyyyMMdd-HHmmss'
-$Sortie = Join-Path $Racine "target\e2e\$Horodatage-$Accel-smp$CpuCount"
+$Sortie = Join-Path $Racine "target\e2e\$Horodatage-$Accel-smp$CpuCount-$Mimalloc"
 New-Item -ItemType Directory -Force -Path $Sortie | Out-Null
 $port = 18300
 $disqueE2E = Join-Path $Sortie 'disque-e2e.img'
@@ -73,7 +77,7 @@ $tls = Join-Path $Sortie 'tls'
 & $py.Source -I (Join-Path $Racine 'tools\e2e\ladybird\tls\genere_tls.py') $tls
 $avecTls = ($LASTEXITCODE -eq 0)
 $argsDisque = @((Join-Path $Racine 'tools\e2e\ladybird\prepare_disque.py'), '--image', $Disque,
-    '--url', "http://10.0.2.2:$port/accueil.html", '--sortie', $disqueE2E)
+    '--url', "http://10.0.2.2:$port/accueil.html", '--sortie', $disqueE2E, '--mimalloc', $Mimalloc)
 if ($avecTls) { $argsDisque += @('--ca-test', (Join-Path $tls 'ca.pem')) }
 & $py.Source -I @argsDisque
 if ($LASTEXITCODE -ne 0) { Echec 'preparation du disque E2E impossible' }
@@ -83,10 +87,13 @@ if ($LASTEXITCODE -ne 0) { Echec 'preparation du disque E2E impossible' }
 # facultatives ne sont donc ajoutees que si elles ont une valeur.
 $arguments = @((Join-Path $Racine 'tools\e2e\ladybird\e2e.py'), '--boot', $Boot, '--disque', $disqueE2E,
     '--accel', $Accel, '--whpx-irqchip', $WhpxIrqchip, '--smp', "$CpuCount", '--memoire', "$RamMiB",
-    '--qemu', $Qemu, '--sortie', $Sortie, '--port-fixture', "$port")
+    '--qemu', $Qemu, '--sortie', $Sortie, '--port-fixture', "$port", '--politique-mimalloc', $Mimalloc)
 if ($avecTls) { $arguments += @('--tls-dir', $tls) }
 if ($Profil -eq 'rapide') {
     $arguments += @('--scenarios', 'E2E-01,E2E-02', '--exige', 'E2E-01,E2E-02')
+}
+elseif ($Profil -eq 'perf') {
+    $arguments += @('--scenarios', 'E2E-01,E2E-02,E2E-04,E2E-11', '--exige', 'E2E-01,E2E-02')
 }
 else {
     # E2E-03 (refus d'un certificat expire) n'est exige que si le materiel
