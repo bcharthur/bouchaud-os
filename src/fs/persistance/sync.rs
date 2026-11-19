@@ -42,10 +42,16 @@ pub fn synchronise() -> i64 {
 
     let snapshot_start = crate::kernel::timer::monotonic_ns();
     let snapshot = rassemble_snapshot();
-    TX_SNAPSHOT_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(snapshot_start), Ordering::Relaxed);
+    let snapshot_ns = crate::kernel::timer::monotonic_ns().saturating_sub(snapshot_start);
+    TX_SNAPSHOT_NS.fetch_add(snapshot_ns, Ordering::Relaxed);
+    let io_avant = TX_IO_NS.load(Ordering::Relaxed);
+    let barrier_avant = TX_BARRIER_NS.load(Ordering::Relaxed);
 
-    let result = synchronise_snapshot(&snapshot);
-    let elapsed_ns = crate::kernel::timer::monotonic_ns().saturating_sub(total_start);
+    let result = synchronise_snapshot(snapshot);
+    let fin_ns = crate::kernel::timer::monotonic_ns();
+    let elapsed_ns = fin_ns.saturating_sub(total_start);
+    let io_ns = TX_IO_NS.load(Ordering::Relaxed).saturating_sub(io_avant);
+    let barrier_ns = TX_BARRIER_NS.load(Ordering::Relaxed).saturating_sub(barrier_avant);
     tx_max(elapsed_ns);
     drop(_transaction);
     // P13_FSYNC_PHASE_V6: avoid serial logging while transaction held.
@@ -53,12 +59,15 @@ pub fn synchronise() -> i64 {
         let n = TX_SLOW_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
         if n <= 32 {
             crate::serial_println!(
-                "[PERSIST-SLOW] n={} total_ns={} lock_ns={} result={} snapshot_total_ns={} hash_total_ns={} io_total_ns={} barrier_total_ns={}",
+                "[PERSIST-SLOW] n={} total_ns={} lock_ns={} result={} snapshot_total_ns={} hash_total_ns={} io_total_ns={} barrier_total_ns={} t_ms={} pid={} snapshot_ns={} io_ns={} barrier_ns={}",
                 n, elapsed_ns, lock_ns, result,
                 TX_SNAPSHOT_NS.load(Ordering::Relaxed),
                 TX_HASH_NS.load(Ordering::Relaxed),
                 TX_IO_NS.load(Ordering::Relaxed),
                 TX_BARRIER_NS.load(Ordering::Relaxed),
+                fin_ns / 1_000_000,
+                crate::kernel::task::current_process_local().map_or(0, |p| p.pid),
+                snapshot_ns, io_ns, barrier_ns,
             );
         }
     }
