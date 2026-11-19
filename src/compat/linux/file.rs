@@ -307,12 +307,18 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
         // erreur le ferait renoncer.
         FdKind::Audio => 0,
         FdKind::Zero => {
-            let zeros = alloc::vec![0u8; count];
-            if user_write(buffer, &zeros) {
-                count as i64
-            } else {
-                -errno::EFAULT
+            // BOUCHAUD_COPIE_BORNEE_V1 : par tranches, jamais `count` octets
+            // de tas noyau d'un coup.
+            let zeros = alloc::vec![0u8; count.min(TRANCHE_COPIE)];
+            let mut ecrits = 0usize;
+            while ecrits < count {
+                let n = (count - ecrits).min(zeros.len());
+                if !user_write(buffer + ecrits as u64, &zeros[..n]) {
+                    return if ecrits > 0 { ecrits as i64 } else { -errno::EFAULT };
+                }
+                ecrits += n;
             }
+            count as i64
         }
         FdKind::Random => {
             let mut data = alloc::vec![0u8; count.min(4096)];
@@ -335,12 +341,10 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
                 return 0;
             }
             let wanted = core::cmp::min(count, total - offset);
-            let mut data = alloc::vec![0u8; wanted];
-            let got = backing::read_at(node, offset, &mut data);
-            data.truncate(got);
-            if !user_write(buffer, &data) {
-                return -errno::EFAULT;
-            }
+            let got = match lit_fichier_par_tranches(node, offset, buffer, wanted) {
+                Ok(got) => got,
+                Err(code) => return code,
+            };
             if let Some(desc) = process.files.lock().get_mut(fd) {
                 desc.offset = offset + got;
             }
@@ -533,11 +537,78 @@ pub fn sys_write(fd: i32, buffer: u64, count: usize) -> i64 {
     if count == 0 {
         return 0;
     }
-    let data = match user_read(buffer, count) {
-        Some(data) => data,
-        None => return -errno::EFAULT,
-    };
-    ecrit_octets(fd, &data)
+    // BOUCHAUD_COPIE_BORNEE_V1 : par tranches. Un seul `write` de 200 Mio
+    // allouait 200 Mio de tas noyau contigu, et l'echec d'allocation est une
+    // panique : n'importe quel programme arretait la machine. On enchaine les
+    // tranches tant que chacune passe ENTIERE ; une ecriture partielle ou une
+    // erreur s'arrete la, exactement comme un appel unique.
+    //
+    // Exception : un FICHIER ordinaire s'ecrit en UN seul appel, sous un seul
+    // verrou du systeme de fichiers, comme avant -- sinon deux `O_APPEND` de
+    // plus d'une tranche pouvaient s'entrelacer (revue #340). La copie y reste
+    // bornee : jamais plus que la taille maximale d'un fichier RAMFS, au-dela
+    // de laquelle l'ecriture serait refusee de toute facon.
+    let est_fichier = matches!(
+        task::current_process().files.lock().get(fd).map(|d| &d.kind),
+        Some(FdKind::File(_))
+    );
+    if est_fichier {
+        let n = count.min(crate::fs::ramfs::MAX_FILE_SIZE);
+        return match user_read(buffer, n) {
+            Some(data) => ecrit_octets(fd, &data),
+            None => -errno::EFAULT,
+        };
+    }
+    let mut ecrits = 0usize;
+    while ecrits < count {
+        let n = (count - ecrits).min(TRANCHE_COPIE);
+        let data = match user_read(buffer + ecrits as u64, n) {
+            Some(data) => data,
+            None => return if ecrits > 0 { ecrits as i64 } else { -errno::EFAULT },
+        };
+        let r = ecrit_octets(fd, &data);
+        if r < 0 {
+            return if ecrits > 0 { ecrits as i64 } else { r };
+        }
+        ecrits += r as usize;
+        if (r as usize) < n {
+            break;
+        }
+    }
+    ecrits as i64
+}
+
+/// Taille d'une tranche de copie entre espace utilisateur et noyau.
+///
+/// BOUCHAUD_COPIE_BORNEE_V1 : un `read`/`write` ne tient jamais plus que cela
+/// de tas noyau, quelle que soit la taille demandee par le programme.
+pub(crate) const TRANCHE_COPIE: usize = 256 * 1024;
+
+/// Lit `wanted` octets de `node` a `offset` vers `buffer`, par tranches.
+///
+/// Rend le nombre d'octets copies (moins que `wanted` seulement en fin de
+/// fichier), ou `-EFAULT` si rien n'a pu etre ecrit chez l'appelant.
+fn lit_fichier_par_tranches(node: usize, offset: usize, buffer: u64, wanted: usize) -> Result<usize, i64> {
+    let mut tampon = alloc::vec![0u8; wanted.min(TRANCHE_COPIE)];
+    let mut copies = 0usize;
+    while copies < wanted {
+        let n = (wanted - copies).min(tampon.len());
+        let got = backing::read_at(node, offset + copies, &mut tampon[..n]);
+        if got == 0 {
+            break;
+        }
+        if !user_write(buffer + copies as u64, &tampon[..got]) {
+            return if copies > 0 { Ok(copies) } else { Err(-errno::EFAULT) };
+        }
+        copies += got;
+        // PAS d'arret sur une lecture courte : `backing::read_at` s'arrete a
+        // la frontiere d'une etendue du disque paresseux (64 Kio), sans que ce
+        // soit la fin du fichier. Rendre ce morceau a l'appelant donnait des
+        // `read`/`pread` courts au milieu d'un fichier ordinaire -- ce
+        // qu'aucun lecteur n'attend : la JVM lisait des classes tronquees
+        // dans `lib/modules` (ClassFormatError). Seul `got == 0` est la fin.
+    }
+    Ok(copies)
 }
 
 /// `write`, une fois les octets deja en memoire noyau.
@@ -1022,13 +1093,10 @@ pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
                 return 0;
             }
             let wanted = core::cmp::min(count, total - offset);
-            let mut data = alloc::vec![0u8; wanted];
-            let got = backing::read_at(node, offset, &mut data);
-            data.truncate(got);
-            if !user_write(buffer, &data) {
-                return -errno::EFAULT;
+            match lit_fichier_par_tranches(node, offset, buffer, wanted) {
+                Ok(got) => got as i64,
+                Err(code) => code,
             }
-            got as i64
         }
         FdKind::Instantane(ref contenu) => {
             if offset >= contenu.len() {
