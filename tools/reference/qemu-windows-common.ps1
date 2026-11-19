@@ -164,7 +164,7 @@ function Invoke-BouchaudQemu {
     }
     if ($StderrPath) {
         # Windows PowerShell 5 peut convertir stderr en ErrorRecord.
-        # Le verdict réel est celui de QEMU et son journal reste disponible.
+        # Le verdict reel est celui de QEMU et son journal reste disponible.
         $ErrorActionPreference = 'Continue'
         & $QemuExe @Arguments 2> $StderrPath
     } else {

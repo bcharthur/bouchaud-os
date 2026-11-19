@@ -1,4 +1,4 @@
-# Campagne Stage 2 GPU à disques en snapshot. Les interactions sont humaines.
+# Campagne Stage 2 GPU a disques en snapshot. Les interactions sont humaines.
 param(
     [Parameter(Mandatory = $true)][uri]$Url,
     [Parameter(Mandatory = $true)][string]$Sortie,
