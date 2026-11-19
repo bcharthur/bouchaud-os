@@ -831,6 +831,14 @@ impl FileControle {
             );
             return Err(dma::REPONSE_INVALIDE);
         }
+        if !file::corps_valide(lit_genre(requete), genre, utilise.len, longueur_reponse as u32) {
+            self.cassee = true;
+            crate::serial_println!(
+                "VIRTIO_GPU_FILE violation=corps-incompatible commande={:#x} genre={:#x} len={}",
+                lit_genre(requete), genre, utilise.len
+            );
+            return Err(dma::REPONSE_INVALIDE);
+        }
         { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
         // BOUCHAUD_GPU_ATTRIBUTION_V1 : duree de l'aller-retour, par genre.
