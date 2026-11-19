@@ -391,7 +391,9 @@ impl Client {
         }
         canal.octets.extend_from_slice(&message);
         drop(canal);
-        crate::kernel::fd::notify_readiness();
+        // BOUCHAUD_REVEIL_CIBLE_V1 : le client de CE canal seulement (entrees,
+        // trame presentee) -- pas toutes les boucles d'evenements du systeme.
+        crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&self.vers_client));
         self.evenements_envoyes += 1;
         if matches!(genre, Genre::Key | Genre::Pointer | Genre::Wheel) {
             // Ce qui distingue un chargement d'un defilement. Voir `gui::jauge`.
