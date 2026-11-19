@@ -155,3 +155,16 @@ fn chaque_violation_porte_un_nom_distinct() {
         }
     }
 }
+
+
+#[test]
+fn le_type_et_la_longueur_doivent_correspondre_a_la_commande() {
+    assert!(file::corps_valide(0x0106, 0x1100, ENTETE, ENTETE));
+    assert!(file::corps_valide(0x0106, 0x1200, ENTETE, ENTETE));
+    assert!(!file::corps_valide(0x0106, 0x1102, ENTETE, ENTETE));
+    assert!(!file::corps_valide(0x0106, 0x12ff, ENTETE, ENTETE));
+    assert!(file::corps_valide(0x0208, 0x1106, 32, 32));
+    assert!(!file::corps_valide(0x0208, 0x1106, ENTETE, 32));
+    assert!(!file::corps_valide(0x0100, 0x1101, 40, 408));
+    assert!(file::corps_valide(0x0109, 0x1205, ENTETE, 80));
+}
