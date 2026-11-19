@@ -220,6 +220,8 @@ else:
         errors.append(f"p13-primitives-noyau.yml: {_c} ne declenche pas P13")
 
 # BOUCHAUD_RUNNER_EPINGLE_V1 : aucun job Linux sur une etiquette MOUVANTE.
+# Stabilisation TEMPORAIRE : voir docs/ci/RUNNER_EPINGLE_UBUNTU_2404.md (preuve,
+# cause noyau -- pas de XSAVE/XCR0 -- et resolution definitive).
 # `ubuntu-latest` est passe a Ubuntu 26.04 `amd64v3` le 19/11 : glibc et musl
 # statiques du runner y sont compilees pour x86-64-v3 (AVX2), que le CPU
 # invite `qemu64` n'a pas et que le noyau n'active pas (pas de XSAVE/XCR0).
