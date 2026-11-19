@@ -60,3 +60,16 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 
 - Le programme vérifie la capacité de transfert de la queue 0, crée VkDevice puis VkBuffer de 4 096 octets et vérifie les besoins mémoire. Deux cycles réussis sur QEMU 11.2 RC avec Lavapipe.
 - Suite immédiate. Allouer et lier la mémoire, enregistrer et soumettre vkCmdFillBuffer, puis attendre une vraie VkFence. Pour la comparaison des octets, ajouter un second blob HOST3D lié à VkDeviceMemory sans perturber le blob de réponse.
+
+## `70eb14c8` — vkCmdFillBuffer et VkFence
+
+- L'application choisit un type de mémoire cohérent et visible par l'hôte, lie VkDeviceMemory, enregistre vkCmdFillBuffer, soumet avec VkFence et vérifie VK_SUCCESS à vkWaitForFences. Deux cycles sous QEMU 11.2 RC avec Lavapipe.
+- vkGetDeviceQueue est rejeté par Venus. Le chemin qualifié utilise vkGetDeviceQueue2 et VkDeviceQueueTimelineInfoMESA.
+- Suite immédiate. Exporter la VkDeviceMemory vers une seconde fenêtre hostmem, relire et comparer les 4 096 octets avant de détruire les objets.
+
+## Isolation EXECBUFFER et réponse
+
+- Le banc vérifie qu'une autre ouverture reçoit EBUSY à EXECBUFFER et LIT_REPONSE, avec une réponse de 512 octets intacte, avant le SIGKILL et la récupération du canal. Banc complet vert sous QEMU 11.2 RC / TCG / Lavapipe, y compris les deux clôtures Vulkan.
+- Non-regression Gate vert sur 70eb14c8 (44625407328). GPU composition 44625407341 était en cours au contrôle.
+- Relecture expérimentale. QEMU confirme CREATE_BLOB et MAP_BLOB du blob 0xb108 associé à VkDeviceMemory 0x401. UNMAP_BLOB entre dans le chemin asynchrone (mapping_state 0) puis ne répond pas. Même résultat sans accès CPU et avec TCG monothread. Le blob de commande du chemin MAP_FIXED se démonte. Le prototype est conservé hors branche dans `/workspace/work/p10/venus-readback-repro.patch`.
+- Reprise précise. Inspecter la dernière référence à la MemoryRegion de 0xb108 et le rappel `virtio_gpu_virgl_hostmem_region_finalize` dans QEMU 11.2 RC, puis relancer `cargo bootimage --features banc-gpu-venus` et `DISPLAY=:N BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`. La qualification de la relecture exige deux motifs sur tous les 4 096 octets et le démappage confirmé.

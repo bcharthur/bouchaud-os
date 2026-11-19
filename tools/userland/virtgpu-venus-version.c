@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
+#include <string.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <stdio.h>
@@ -274,8 +275,19 @@ static int verifie_proprietaire(int fd, uint32_t reference)
     ssize_t lu = read(notification[0], &octet, 1);
     close(notification[0]);
     struct requete q = {4096, 0};
+    uint32_t flux_invalide = UINT32_MAX;
+    struct drm_execbuffer commande = {
+        .flags = 4, .taille = sizeof(flux_invalide),
+        .commande = (uintptr_t)&flux_invalide, .fence = -1,
+    };
+    reponse_venus reponse;
+    memset(reponse, 0x5a, sizeof(reponse));
     int isole = lu == 1 && ioctl(fd, VERSION_TAILLE, &q) == -1 && errno == EBUSY
-                          && ioctl(fd, DEMAPPE) == -1 && errno == EBUSY;
+                          && ioctl(fd, DEMAPPE) == -1 && errno == EBUSY
+                          && ioctl(fd, DRM_EXECBUFFER, &commande) == -1 && errno == EBUSY
+                          && ioctl(fd, LIT_REPONSE, reponse) == -1 && errno == EBUSY;
+    for (size_t i = 0; i < sizeof(reponse) / sizeof(reponse[0]); i++)
+        isole &= reponse[i] == 0x5a5a5a5a;
     int statut;
     if (kill(enfant, SIGKILL) || waitpid(enfant, &statut, 0) != enfant
         || !WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL || !isole)
