@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
-"""L'ecriture incrementale de `/persist` ne peut pas sauter une ecriture reelle.
-
-# Ce que ce garde-fou protege
-
-`synchronise` ne reecrit plus la zone entiere a chaque `fsync` : il garde
-l'empreinte de ce que le dernier `sync` REUSSI a laisse sur le disque, et saute
-les fichiers dont le chemin, le secteur, la longueur et le sceau coincident.
-
-Cette optimisation repose sur UNE regle : l'empreinte doit etre oubliee des
-qu'une ecriture echoue. Sinon le `sync` suivant croirait sur le disque des
-octets qui n'y sont jamais arrives, et les sauterait -- une perte de donnees
-silencieuse, que rien dans le journal ne signalerait.
-
-Le compilateur ne peut pas la verifier : `return -1` est un chemin ordinaire.
-Ce script le fait, en exigeant que chaque sortie en erreur de `synchronise`
-soit precedee de `oublie_le_disque()`.
-
-# Et la deuxieme regle
-
-L'empreinte vit dans un `static mut`. Elle n'est sure que parce que `fsync`,
-`fdatasync` et `sync` s'executent sous le gros verrou du noyau. Les liberer
-sans reprendre ce probleme les ferait courir en parallele sur quatre coeurs.
-"""
+"""Controle l'invalidation de l'index apres erreur et son adoption apres commit."""
 
 import re
 import sys
@@ -30,7 +8,7 @@ from pathlib import Path
 RACINE = Path(__file__).resolve().parent.parent
 
 # La ligne qui adopte l'empreinte, une fois le disque entierement ecrit.
-ADOPTION = "*DISQUE.lock() = nouveau;"
+ADOPTION = "DISQUE.lock()[demi as usize] = nouveau;"
 PERSISTANCE = RACINE / "src" / "fs" / "persistance.rs"
 PERSISTANCE_TREE = RACINE / "src" / "fs" / "persistance"
 
@@ -95,13 +73,13 @@ def corps(source: str, signature: str) -> tuple[int, list[str]]:
 
 def verifie_oublis() -> list[str]:
     source = source_de(PERSISTANCE, PERSISTANCE_TREE)
-    premiere, lignes = corps(source, "pub fn synchronise()")
+    premiere, lignes = corps(source, "fn synchronise_snapshot(")
     fautes = []
     for decalage, ligne in enumerate(lignes):
-        if ligne.strip() != "return -1;":
+        if "return -1;" not in ligne:
             continue
-        avant = lignes[max(0, decalage - PORTEE) : decalage]
-        if not any("oublie_le_disque()" in l for l in avant):
+        avant = lignes[max(0, decalage - PORTEE) : decalage] + [ligne.split("return -1;", 1)[0]]
+        if not any("oublie_le_disque()" in l for l in avant[-2:]):
             fautes.append(
                 f"  persistance.rs:{premiere + decalage}  `return -1` sans "
                 f"`oublie_le_disque()` : l'empreinte survivrait a un echec "
@@ -121,6 +99,8 @@ def verifie_oublis() -> list[str]:
             f"  persistance  l'empreinte est adoptee {adoptions} fois ; elle "
             f"ne doit l'etre qu'apres un sync completement reussi"
         )
+    if "if contenu_durable && commit_durable {\n        " + ADOPTION not in source:
+        fautes.append("  adoption sans deux barrieres confirmees")
     return fautes
 
 
