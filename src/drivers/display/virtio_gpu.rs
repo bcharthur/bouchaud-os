@@ -438,10 +438,15 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         #[cfg(feature = "banc-gpu-venus")]
         let mut hostmem_venus = None;
         #[cfg(feature = "banc-gpu-venus")]
+        let mut capset_venus = None;
+        #[cfg(feature = "banc-gpu-venus")]
         if retenues & gpu3d::F_VENUS == gpu3d::F_VENUS {
             let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
             match sonde_contexte_venus(&mut file, capsets) {
-                Ok((info, support_hostmem)) => {
+                Ok((info, octets)) => {
+                    let support_hostmem = octets.get(..4) == Some(&1u32.to_le_bytes())
+                        && octets.get(16..20) == Some(&1u32.to_le_bytes());
+                    capset_venus = Some((info, octets));
                     if support_hostmem { hostmem_venus = venus::mappe_fenetre(dev).map(venus::Canal::Nouveau); }
                     crate::serial_println!(
                         "P10_VENUS_CONTEXTE_OK capset={} version={} octets={}", info.id, info.version, info.size
@@ -467,6 +472,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     capset,
                     #[cfg(feature = "banc-gpu-venus")]
                     hostmem_venus,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    capset_venus,
                     textures_rendu: rendu::TexturesRendu::neuf(),
                     textures: [None; cg::TEXTURES_MAX],
                     bureau_attache: false,
@@ -499,7 +506,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 // BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
 // The display path is still software raster + virtio-gpu 2D.
 #[cfg(feature = "banc-gpu-venus")]
-unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<(gpu3d::CapsetInfo, bool), &'static str> {
+unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>), &'static str> {
     for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
         if f.commande(&gpu3d::get_capset_info(idx), 40) != Ok(gpu3d::RESP_OK_CAPSET_INFO) {
             return Err("get-capset-info");
@@ -509,15 +516,13 @@ unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<(gpu3
         let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
         if info.id != gpu3d::CAPSET_VENUS { continue; }
         let octets = p10_lit_capset(f, info).map_err(|_| "get-capset-venus")?;
-        let support_hostmem = octets.get(..4) == Some(&1u32.to_le_bytes())
-            && octets.get(16..20) == Some(&1u32.to_le_bytes());
         for (cree, etape) in [(true, "ctx-create-venus"), (false, "ctx-destroy-venus")] {
             let (commande, len) = gpu3d::contexte_venus(cree);
             if f.commande(&commande[..len], ENTETE) != Ok(RESP_OK_NODATA) {
                 return Err(etape);
             }
         }
-        return Ok((info, support_hostmem));
+        return Ok((info, octets));
     }
     Err("capset-venus-absent")
 }
@@ -606,11 +611,24 @@ unsafe fn p10_lit_capset(f: &mut FileControle, info: gpu3d::CapsetInfo)
 pub fn copie_capset(id: u32, version: u32, sortie: &mut [u8]) -> Option<usize> {
     let garde = verrou()?;
     let p = garde.as_ref().filter(|p| !p.file.cassee)?;
-    let (info, octets) = p.capset.as_ref()?;
-    if info.id != id || info.version != version { return None; }
+    let choisi = p.capset.as_ref().filter(|(info, _)| info.id == id);
+    #[cfg(feature = "banc-gpu-venus")]
+    let choisi = choisi.or_else(|| p.capset_venus.as_ref().filter(|(info, _)| info.id == id));
+    let (info, octets) = choisi?;
+    if info.version != version { return None; }
     let n = sortie.len().min(octets.len());
     sortie[..n].copy_from_slice(&octets[..n]);
     Some(n)
+}
+
+/// Capsets dont GET_CAPS peut effectivement copier le contenu.
+pub fn masque_capsets_rendu() -> Option<u64> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    let masque = 1u64 << p.capset.as_ref()?.0.id;
+    #[cfg(feature = "banc-gpu-venus")]
+    let masque = masque | p.capset_venus.as_ref().map_or(0, |(info, _)| 1u64 << info.id);
+    Some(masque)
 }
 
 pub fn capset_render_id() -> Option<u32> {
@@ -1124,6 +1142,8 @@ struct Peripherique {
     capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     #[cfg(feature = "banc-gpu-venus")]
     hostmem_venus: Option<venus::Canal>,
+    #[cfg(feature = "banc-gpu-venus")]
+    capset_venus: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     textures_rendu: rendu::TexturesRendu,
     // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
     // scanout attachee au contexte, liste DMA des pages (une fois).

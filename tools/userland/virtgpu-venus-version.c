@@ -13,6 +13,28 @@
 struct requete { uint32_t octets, version; };
 #define VERSION_TAILLE _IOWR('B', 0xac, struct requete)
 
+// Linux uapi drm/virtgpu_drm.h, ioctl GETPARAM et GET_CAPS.
+struct drm_param { uint64_t param, valeur; };
+struct drm_caps { uint32_t id, version; uint64_t adr; uint32_t taille, pad; };
+#define DRM_GETPARAM _IOWR('d', 0x43, struct drm_param)
+#define DRM_GET_CAPS _IOWR('d', 0x49, struct drm_caps)
+
+static int verifie_capset(int fd)
+{
+    uint64_t masque = 0;
+    struct drm_param p = {7, (uintptr_t)&masque};
+    if (ioctl(fd, DRM_GETPARAM, &p) || !(masque & (1ull << 4))) return 1;
+    uint32_t octets[40] = {0};
+    struct drm_caps c = {4, 1, (uintptr_t)octets, sizeof(octets), 0};
+    if (!ioctl(fd, DRM_GET_CAPS, &c) || errno != EINVAL) return 2;
+    c.version = 0;
+    if (ioctl(fd, DRM_GET_CAPS, &c) || octets[0] != 1 || octets[4] != 1) return 3;
+    p.param = 6;
+    if (ioctl(fd, DRM_GETPARAM, &p) || masque != 0) return 4;
+    puts("VIRTGPU_VENUS_DRM_CAPS_OK");
+    return 0;
+}
+
 static int verifie_proprietaire(int fd, uint32_t reference)
 {
     int notification[2];
@@ -50,7 +72,7 @@ int main(int argc, char **argv)
 {
     (void)argv;
     int fd = open("/dev/dri/renderD128", O_RDWR);
-    if (fd < 0) return 1;
+    if (fd < 0 || verifie_capset(fd)) return 1;
     if (!ioctl(fd, VERSION_VENUS, (void *)1) || errno != EFAULT) return 2;
     uint32_t reference = 0;
     for (unsigned i = 0; i < 3; ++i) {

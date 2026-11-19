@@ -69,11 +69,11 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT };
             let param = u64::from_le_bytes(buf[..8].try_into().unwrap());
             let adresse = u64::from_le_bytes(buf[8..].try_into().unwrap());
-            let Some(id) = virtio_gpu::capset_render_id() else { return -errno::ENODEV };
+            let Some(masque) = virtio_gpu::masque_capsets_rendu() else { return -errno::ENODEV };
             let valeur = match param {
                 1 | 2 => 1u64, // matériel virtuel 3D et interrogation des capsets
                 3..=6 | 8 => 0, // blob, host-visible, cross-device, context-init, nom
-                7 => 1u64 << id, // les seuls capsets lisibles par cette interface
+                7 => masque, // les seuls capsets lisibles par cette interface
                 _ => return -errno::EINVAL,
             };
             if user_write(adresse, &valeur.to_le_bytes()) { 0 } else { -errno::EFAULT }

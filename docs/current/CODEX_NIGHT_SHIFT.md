@@ -20,3 +20,10 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 ```
 
 `vkCmdFillBuffer`, l'ABI DRM générale, Mesa et Skia restent ouverts.
+
+## `d8869f91` — isolation du canal et récupération
+
+- Le canal est lié à une description de fichier ouverte. Une autre ouverture ne peut ni soumettre ni fermer le canal actif.
+- QEMU 11.2 RC sous TCG. Le parent obtient EBUSY sur les deux opérations pendant que l'enfant est vivant. Après SIGKILL et waitpid, il récupère le blob orphelin, ouvre un canal neuf et vérifie la version. L'expiration sur le backend lent continue à condamner le canal.
+- CI de la PR à vérifier par SHA. Reste à exercer la mort pendant une commande effectivement en vol.
+- Suite immédiate. Servir le capset Venus via les requêtes DRM standard GETPARAM et GET_CAPS.
