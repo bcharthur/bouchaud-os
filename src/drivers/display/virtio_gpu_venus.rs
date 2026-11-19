@@ -51,16 +51,15 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
 
 pub(super) enum Canal {
     Nouveau(Fenetre),
-    Mappe(Fenetre, u32, Weak<()>),
+    Ouvert(Fenetre, Option<u32>, Weak<()>),
 }
 
 pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let proprietaire = Arc::downgrade(session);
     let canal = p.hostmem_venus.as_ref().ok_or(ErreurRendu::Indisponible)?;
     let fenetre = match canal {
-        Canal::Nouveau(fenetre) | Canal::Mappe(fenetre, _, _) => *fenetre,
+        Canal::Nouveau(fenetre) | Canal::Ouvert(fenetre, _, _) => *fenetre,
     };
     let taille = u64::from(octets);
     if taille < PAGE as u64 || taille % PAGE as u64 != 0
@@ -68,32 +67,17 @@ pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, Erreur
     {
         return Err(ErreurRendu::Invalide);
     }
-    let mut ouvrir = true;
-    let mut orphelin = false;
-    if let Canal::Mappe(_, existants, ancien) = canal {
-        if ancien.ptr_eq(&proprietaire) {
-            if *existants != octets { return Err(ErreurRendu::Invalide); }
-            ouvrir = false;
-        } else if ancien.strong_count() != 0 {
-            return Err(ErreurRendu::Occupe);
-        } else {
-            orphelin = true;
-        }
+    let proprietaire = Arc::downgrade(session);
+    let (existe, precedent) = prepare_canal(p, &proprietaire)?;
+    if precedent.is_some_and(|existant| existant != octets) {
+        return Err(ErreurRendu::Invalide);
     }
 
-    // Le dernier close ne dort pas dans le pilote. Une nouvelle ouverture
-    // reprend le canal seulement après confirmation du démontage orphelin.
+    // Une issue incertaine retire le canal jusqu'au reset du périphérique.
     p.hostmem_venus = None;
-    if orphelin {
-        if let Err(etape) = unsafe { ferme(&mut p.file) } {
-            crate::serial_println!("P10_VENUS_ORPHELIN_ECHEC etape={}", etape);
-            return Err(ErreurRendu::Commande);
-        }
-        crate::serial_println!("P10_VENUS_ORPHELIN_RECUPERE");
-    }
-    if ouvrir {
+    if precedent.is_none() {
         let mut restaure = false;
-        if let Err(etape) = unsafe { ouvre(&mut p.file, octets, &mut restaure) } {
+        if let Err(etape) = unsafe { ouvre(&mut p.file, octets, existe, &mut restaure) } {
             if restaure { p.hostmem_venus = Some(Canal::Nouveau(fenetre)); }
             crate::serial_println!("P10_VENUS_OUVERTURE_ECHEC etape={} restaure={}", etape, restaure);
             return Err(ErreurRendu::Commande);
@@ -101,7 +85,7 @@ pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, Erreur
     }
     match unsafe { lit_version(&mut p.file, fenetre.adresse) } {
         Ok(version) => {
-            p.hostmem_venus = Some(Canal::Mappe(fenetre, octets, proprietaire));
+            p.hostmem_venus = Some(Canal::Ouvert(fenetre, Some(octets), proprietaire));
             Ok(version)
         }
         Err(etape) => {
@@ -111,16 +95,60 @@ pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, Erreur
     }
 }
 
+/// Revient à Nouveau si le précédent propriétaire est mort et tous ses
+/// objets ont été libérés. Aucun handle n'est prêté avant les accusés.
+fn prepare_canal(p: &mut Peripherique, proprietaire: &Weak<()>) -> Result<(bool, Option<u32>), ErreurRendu> {
+    let canal = p.hostmem_venus.as_ref().ok_or(ErreurRendu::Indisponible)?;
+    let Canal::Ouvert(fenetre, blob, ancien) = canal else { return Ok((false, None)); };
+    if ancien.ptr_eq(proprietaire) { return Ok((true, *blob)); }
+    if ancien.strong_count() != 0 { return Err(ErreurRendu::Occupe); }
+    let (fenetre, blob) = (*fenetre, *blob);
+    p.hostmem_venus = None;
+    if let Err(etape) = unsafe { ferme_objets(&mut p.file, blob.is_some()) } {
+        crate::serial_println!("P10_VENUS_ORPHELIN_ECHEC etape={}", etape);
+        return Err(ErreurRendu::Commande);
+    }
+    p.hostmem_venus = Some(Canal::Nouveau(fenetre));
+    crate::serial_println!("P10_VENUS_ORPHELIN_RECUPERE");
+    Ok((false, None))
+}
+
+pub fn initialise_contexte_venus(session: &Arc<()>) -> Result<(), ErreurRendu> {
+    let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
+    let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    let proprietaire = Arc::downgrade(session);
+    if prepare_canal(p, &proprietaire)?.0 { return Err(ErreurRendu::Existe); }
+    let Some(Canal::Nouveau(fenetre)) = p.hostmem_venus.take() else {
+        return Err(ErreurRendu::Indisponible);
+    };
+    let (q, n) = gpu3d::contexte_venus(true);
+    match unsafe { p.file.commande(&q[..n], ENTETE) } {
+        Ok(RESP_OK_NODATA) => {
+            p.hostmem_venus = Some(Canal::Ouvert(fenetre, None, proprietaire));
+            Ok(())
+        }
+        Ok(_) => {
+            p.hostmem_venus = Some(Canal::Nouveau(fenetre));
+            Err(ErreurRendu::Commande)
+        }
+        Err(_) => Err(ErreurRendu::Commande),
+    }
+}
+
+pub fn contexte_venus_disponible() -> bool {
+    verrou().is_some_and(|garde| garde.as_ref().is_some_and(|p| !p.file.cassee && p.hostmem_venus.is_some()))
+}
+
 pub fn ferme_vulkan_banc(session: &Arc<()>) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    if let Some(Canal::Mappe(_, _, ancien)) = &p.hostmem_venus {
+    if let Some(Canal::Ouvert(_, _, ancien)) = &p.hostmem_venus {
         if !ancien.ptr_eq(&Arc::downgrade(session)) { return Err(ErreurRendu::Occupe); }
     }
     let canal = p.hostmem_venus.take().ok_or(ErreurRendu::Indisponible)?;
     let fenetre = match canal {
         Canal::Nouveau(fenetre) => fenetre,
-        Canal::Mappe(fenetre, _, _) => match unsafe { ferme(&mut p.file) } {
+        Canal::Ouvert(fenetre, blob, _) => match unsafe { ferme_objets(&mut p.file, blob.is_some()) } {
             Ok(()) => fenetre,
             Err(etape) => {
                 crate::serial_println!("P10_VENUS_DEMAPPE_ECHEC etape={}", etape);
@@ -132,12 +160,13 @@ pub fn ferme_vulkan_banc(session: &Arc<()>) -> Result<(), ErreurRendu> {
     Ok(())
 }
 
-unsafe fn ouvre(f: &mut FileControle, octets: u32, restaure: &mut bool) -> Result<(), &'static str> {
-    let (q, n) = gpu3d::contexte_venus(true);
-    let contexte = f.commande(&q[..n], ENTETE)?;
-    if contexte != RESP_OK_NODATA {
-        *restaure = true;
-        return Err("ctx-create-refuse");
+unsafe fn ouvre(f: &mut FileControle, octets: u32, contexte_existe: bool, restaure: &mut bool) -> Result<(), &'static str> {
+    if !contexte_existe {
+        let (q, n) = gpu3d::contexte_venus(true);
+        if f.commande(&q[..n], ENTETE)? != RESP_OK_NODATA {
+            *restaure = true;
+            return Err("ctx-create-refuse");
+        }
     }
     let blob = f.commande(&gpu3d::blob_reponse_venus(octets), ENTETE)?;
     if blob != RESP_OK_NODATA {
@@ -176,7 +205,8 @@ unsafe fn lit_version(f: &mut FileControle, aperture: usize) -> Result<u32, &'st
     gpu3d::lit_version_venus(&reponse).ok_or("reponse-vulkan")
 }
 
-unsafe fn ferme(f: &mut FileControle) -> Result<(), &'static str> {
+unsafe fn ferme_objets(f: &mut FileControle, blob: bool) -> Result<(), &'static str> {
+    if !blob { return ferme_contexte(f, false); }
     let (q, n) = gpu3d::mappe_reponse_venus(false);
     let debut = crate::kernel::timer::monotonic_ns();
     let reponse = f.commande(&q[..n], ENTETE);

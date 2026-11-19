@@ -31,6 +31,7 @@ timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 
 grep -aqF 'P10_VENUS_HOSTMEM_OK' "$sortie/serie.log"
 grep -aqF 'P10_BLOB_INVITE_OK' "$sortie/serie.log"
 grep -aqF 'VIRTGPU_VENUS_DRM_CAPS_OK' "$sortie/serie.log"
+grep -aqF 'VIRTGPU_VENUS_DRM_CONTEXT_OK' "$sortie/serie.log"
 grep -aoE 'VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=[0-9.]+' "$sortie/serie.log"
 if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     grep -aqF 'VIRTGPU_VENUS_TAILLES_OK cycles=4' "$sortie/serie.log"

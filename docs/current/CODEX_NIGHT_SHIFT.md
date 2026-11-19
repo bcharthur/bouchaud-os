@@ -27,3 +27,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - QEMU 11.2 RC sous TCG. Le parent obtient EBUSY sur les deux opérations pendant que l'enfant est vivant. Après SIGKILL et waitpid, il récupère le blob orphelin, ouvre un canal neuf et vérifie la version. L'expiration sur le backend lent continue à condamner le canal.
 - CI de la PR à vérifier par SHA. Reste à exercer la mort pendant une commande effectivement en vol.
 - Suite immédiate. Servir le capset Venus via les requêtes DRM standard GETPARAM et GET_CAPS.
+
+## `979836d9ea80d70343af083e357edf7dd802927b` — découverte DRM
+
+- QEMU 11.2 RC TCG. GETPARAM identifie le capset Venus et GET_CAPS en lit le contenu. Le banc rejette une version de capset incorrecte. La découverte VIRGL conserve son chemin normal.
+- Ce commit expose les requêtes de découverte. Suite immédiate. Créer un contexte détenu par l'ouverture via CONTEXT_INIT et valider le refus de réinitialisation.

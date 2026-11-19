@@ -17,6 +17,8 @@ pub enum ErreurRendu {
     Plein,
     #[cfg(feature = "banc-gpu-venus")]
     Occupe,
+    #[cfg(feature = "banc-gpu-venus")]
+    Existe,
     Inconnue,
     Invalide,
     Commande,

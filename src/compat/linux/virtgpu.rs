@@ -57,6 +57,8 @@ fn erreur(e: ErreurRendu) -> i64 {
         ErreurRendu::Plein => errno::ENOMEM,
         #[cfg(feature = "banc-gpu-venus")]
         ErreurRendu::Occupe => errno::EBUSY,
+        #[cfg(feature = "banc-gpu-venus")]
+        ErreurRendu::Existe => errno::EEXIST,
         ErreurRendu::Inconnue => errno::ENOENT,
         ErreurRendu::Invalide => errno::EINVAL,
         ErreurRendu::Commande => errno::EIO,
@@ -72,7 +74,11 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             let Some(masque) = virtio_gpu::masque_capsets_rendu() else { return -errno::ENODEV };
             let valeur = match param {
                 1 | 2 => 1u64, // matériel virtuel 3D et interrogation des capsets
-                3..=6 | 8 => 0, // blob, host-visible, cross-device, context-init, nom
+                #[cfg(feature = "banc-gpu-venus")]
+                6 => virtio_gpu::contexte_venus_disponible() as u64,
+                3..=5 | 8 => 0,
+                #[cfg(not(feature = "banc-gpu-venus"))]
+                6 => 0, // blob, host-visible, cross-device, context-init, nom
                 7 => masque, // les seuls capsets lisibles par cette interface
                 _ => return -errno::EINVAL,
             };
@@ -158,6 +164,28 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             };
             virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
                 .map_or_else(erreur, |()| 0)
+        }
+        // DRM_IOCTL_VIRTGPU_CONTEXT_INIT, sous-ensemble Venus à un anneau.
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc010_644b => {
+            let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT; };
+            let n = mot(&buf, 0) as usize;
+            if !(1..=2).contains(&n) || mot(&buf, 4) != 0 { return -errno::EINVAL; }
+            let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+            let Some(params) = user_read(adresse, n * 16) else { return -errno::EFAULT; };
+            let mut capset = false;
+            let mut anneaux = false;
+            for p in params.chunks_exact(16) {
+                let cle = u64::from_le_bytes(p[..8].try_into().unwrap());
+                let valeur = u64::from_le_bytes(p[8..16].try_into().unwrap());
+                match (cle, valeur) {
+                    (1, 4) if !capset => capset = true,
+                    (2, 1) if !anneaux => anneaux = true,
+                    _ => return -errno::EINVAL,
+                }
+            }
+            if !capset { return -errno::EINVAL; }
+            virtio_gpu::initialise_contexte_venus(session).map_or_else(erreur, |()| 0)
         }
         // Bouchaud expérimental : _IOR('B', 0xaa, uint32_t).
         #[cfg(feature = "banc-gpu-venus")]

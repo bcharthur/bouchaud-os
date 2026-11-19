@@ -18,6 +18,9 @@ struct drm_param { uint64_t param, valeur; };
 struct drm_caps { uint32_t id, version; uint64_t adr; uint32_t taille, pad; };
 #define DRM_GETPARAM _IOWR('d', 0x43, struct drm_param)
 #define DRM_GET_CAPS _IOWR('d', 0x49, struct drm_caps)
+struct drm_context_init { uint32_t n, pad; uint64_t adr; };
+struct drm_context_param { uint64_t cle, valeur; };
+#define DRM_CONTEXT_INIT _IOWR('d', 0x4b, struct drm_context_init)
 
 static int verifie_capset(int fd)
 {
@@ -30,8 +33,23 @@ static int verifie_capset(int fd)
     c.version = 0;
     if (ioctl(fd, DRM_GET_CAPS, &c) || octets[0] != 1 || octets[4] != 1) return 3;
     p.param = 6;
-    if (ioctl(fd, DRM_GETPARAM, &p) || masque != 0) return 4;
+    if (ioctl(fd, DRM_GETPARAM, &p) || masque != 1) return 4;
     puts("VIRTGPU_VENUS_DRM_CAPS_OK");
+    return 0;
+}
+
+static int verifie_contexte(int fd)
+{
+    struct drm_context_param params[] = {{1, 4}, {2, 2}};
+    struct drm_context_init init = {2, 0, (uintptr_t)params};
+    if (!ioctl(fd, DRM_CONTEXT_INIT, &init) || errno != EINVAL) return 1;
+    init.adr = 1;
+    if (!ioctl(fd, DRM_CONTEXT_INIT, &init) || errno != EFAULT) return 2;
+    init.adr = (uintptr_t)params;
+    params[1].valeur = 1;
+    if (ioctl(fd, DRM_CONTEXT_INIT, &init)) return 3;
+    if (!ioctl(fd, DRM_CONTEXT_INIT, &init) || errno != EEXIST) return 4;
+    puts("VIRTGPU_VENUS_DRM_CONTEXT_OK");
     return 0;
 }
 
@@ -72,7 +90,7 @@ int main(int argc, char **argv)
 {
     (void)argv;
     int fd = open("/dev/dri/renderD128", O_RDWR);
-    if (fd < 0 || verifie_capset(fd)) return 1;
+    if (fd < 0 || verifie_capset(fd) || verifie_contexte(fd)) return 1;
     if (!ioctl(fd, VERSION_VENUS, (void *)1) || errno != EFAULT) return 2;
     uint32_t reference = 0;
     for (unsigned i = 0; i < 3; ++i) {
