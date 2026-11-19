@@ -898,25 +898,13 @@ pub fn fault_retry_cumul() -> (u64, u64, u64, u64) {
 /// programme ne peut pas distinguer une attente qui dort d'une attente qui
 /// brule un cœur : les deux durent le meme temps au mur. C'est exactement la
 /// question que posait la reparation de la couche UDP.
-/// Temps processeur (utilisateur, noyau) en nanosecondes, cumule a la fin de
-/// chaque tranche par la comptabilite (`comptabilite::account_*`).
-///
-/// `pid` = Some : toutes les taches VIVANTES du processus ; None : la tache
-/// courante seule. Sert a `getrusage` -- HotSpot le lit pour ses statistiques
-/// de compilation et de GC.
-pub fn cpu_ns_utilisateur_noyau(pid: Option<u32>) -> (u64, u64) {
-    if pid.is_none() {
-        let tache = current();
-        return (tache.user_cpu_ns.charge(), tache.kernel_cpu_ns.charge());
-    }
-    let (mut utilisateur, mut noyau) = (0u64, 0u64);
-    for task in tasks().iter() {
-        if Some(task.process.pid) == pid {
-            utilisateur = utilisateur.saturating_add(task.user_cpu_ns.charge());
-            noyau = noyau.saturating_add(task.kernel_cpu_ns.charge());
-        }
-    }
-    (utilisateur, noyau)
+/// Temps processeur (utilisateur, noyau) en nanosecondes de la TACHE
+/// courante. Le total d'un PROCESSUS se lit par `proc_processus_cumul`, qui
+/// compte aussi les fils recycles et morts et la tranche en cours : une somme
+/// des seules taches vivantes reculerait (revue #341).
+pub fn cpu_ns_tache_courante() -> (u64, u64) {
+    let tache = current();
+    (tache.user_cpu_ns.charge(), tache.kernel_cpu_ns.charge())
 }
 
 pub fn cpu_time_ms(pid: u32) -> u64 {

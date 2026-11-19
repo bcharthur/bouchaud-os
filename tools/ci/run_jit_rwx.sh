@@ -17,6 +17,7 @@
 #              membre du groupe pourrait remplacer le binaire
 #   systeme    /jit-rwx-probe                 (root, 0755)  -> rien : pas un
 #              lanceur Java, meme pour root
+#   nonroot    le lanceur de confiance, execute par l'uid 1000 -> RWX anonyme
 #   ouvert     /usr/lib/jvm/ouvert/bin/java   (root, 0777)  -> exec refuse
 #   tmp        /tmp/usr/lib/jvm/x/bin/java                  -> exec refuse
 #
@@ -48,6 +49,7 @@ install -m 0755 "$S/jit-rwx-probe" "$S/tmp/usr/lib/jvm/x/bin/java"
   echo '/usr/lib/jvm/sonde/bin/java confiance /jit-rwx-probe'
   echo '/usr/lib/jvm/groupe/bin/java groupe /jit-rwx-probe'
   echo '/jit-rwx-probe systeme /jit-rwx-probe'
+  echo '/jit-rwx-probe devient-utilisateur /usr/lib/jvm/sonde/bin/java /jit-rwx-probe'
   echo '/usr/lib/jvm/ouvert/bin/java ouvert /jit-rwx-probe'
   echo '/tmp/usr/lib/jvm/x/bin/java tmp /jit-rwx-probe'
   echo '/jvm-syscalls-probe'
@@ -90,6 +92,8 @@ attendu() {
   grep -aqE "JIT_RWX_SONDE role=$role $valeurs\$" "$P" || echecs+=("sonde_$role")
 }
 attendu confiance 'anon=1 execute=1 partage=0 fichier=0 mprotect=1 mpfich=0 trou=0 fils=1'
+# Un utilisateur ordinaire (uid 1000) qui lance le meme java : meme exception.
+attendu nonroot 'anon=1 execute=1 partage=0 fichier=0 mprotect=1 mpfich=0 trou=0 fils=1'
 for role in groupe systeme; do
   attendu "$role" 'anon=0 execute=0 partage=0 fichier=0 mprotect=0 mpfich=0 trou=0 fils=0'
 done

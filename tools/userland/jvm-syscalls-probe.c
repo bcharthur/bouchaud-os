@@ -17,6 +17,8 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include <time.h>
 
 static volatile unsigned long puits;
 
@@ -30,6 +32,82 @@ static int rusage(void) {
     int invalide = getrusage(42, &t) == -1 && errno == EINVAL;
     printf("JVM_SYSCALLS rusage_utime_us=%ld\n", us);
     return us > 50000 && r.ru_utime.tv_usec < 1000000 && fil && invalide;
+}
+
+static void *brule(void *x) {
+    (void)x;
+    for (unsigned long i = 0; i < 200000000UL; i++) puits += i ^ (i >> 5);
+    return 0;
+}
+
+static long utime_us(void) {
+    struct rusage r;
+    getrusage(RUSAGE_SELF, &r);
+    return r.ru_utime.tv_sec * 1000000L + r.ru_utime.tv_usec;
+}
+
+// Le total du PROCESSUS garde le temps de ses fils morts : il ne recule
+// jamais (revue #341 : une somme des seuls fils vivants reculait).
+static int rusage_fils_morts(void) {
+    long avant = utime_us(), pire_recul = 0, precedent = avant;
+    for (int k = 0; k < 3; k++) {
+        pthread_t t;
+        if (pthread_create(&t, 0, brule, 0) != 0) return 0;
+        pthread_join(t, 0);
+        long maintenant = utime_us();
+        if (precedent - maintenant > pire_recul) pire_recul = precedent - maintenant;
+        precedent = maintenant;
+    }
+    printf("JVM_SYSCALLS rusage_fils_us=%ld recul_us=%ld\n", precedent - avant, pire_recul);
+    return pire_recul == 0 && precedent - avant > 100000;
+}
+
+// Deux processus tiennent LOCK_SH et convertissent en LOCK_EX : l'un des
+// deux doit l'obtenir (Linux retire d'abord l'ancien verrou). Sondage
+// non bloquant avec echeance : un interblocage se voit en echec, pas en
+// banc fige.
+static int essaie_ex(int fd, int ms) {
+    struct timespec pas = {0, 10 * 1000000};
+    for (int i = 0; i < ms / 10; i++) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return 1;
+        nanosleep(&pas, 0);
+    }
+    return 0;
+}
+
+static int flock_conversion(void) {
+    const char *chemin = "/tmp/verrou-conversion";
+    int fd = open(chemin, O_CREAT | O_RDWR, 0644);
+    int pret[2], go[2];
+    pipe(pret);
+    pipe(go);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int g = open(chemin, O_RDWR);
+        char c = 1;
+        if (flock(g, LOCK_SH) != 0) _exit(2);
+        write(pret[1], &c, 1);
+        read(go[0], &c, 1);
+        int ok = essaie_ex(g, 4000);
+        if (ok) flock(g, LOCK_UN);
+        _exit(ok ? 0 : 1);
+    }
+    char c;
+    flock(fd, LOCK_SH);
+    read(pret[0], &c, 1);
+    write(go[1], &c, 1);
+    int ok = essaie_ex(fd, 4000);
+    if (ok) {
+        struct timespec pause = {0, 100 * 1000000};
+        nanosleep(&pause, 0);
+        flock(fd, LOCK_UN);
+    }
+    int statut = 0;
+    waitpid(pid, &statut, 0);
+    close(fd);
+    int fils_ok = WIFEXITED(statut) && WEXITSTATUS(statut) == 0;
+    printf("JVM_SYSCALLS conversion pere=%d fils=%d\n", ok, fils_ok);
+    return ok && fils_ok;
 }
 
 static int fchdir_(void) {
@@ -84,7 +162,7 @@ static int flock_(void) {
 }
 
 int main(void) {
-    int a = rusage(), b = fchdir_(), c = flock_();
+    int a = rusage() && rusage_fils_morts(), b = fchdir_(), c = flock_() && flock_conversion();
     printf("JVM_SYSCALLS_FIN rusage=%d fchdir=%d flock=%d\n", a, b, c);
     fflush(stdout);
     return 0;

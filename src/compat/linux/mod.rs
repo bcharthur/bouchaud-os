@@ -1591,10 +1591,14 @@ fn sys_getrusage(who: i32, out: u64) -> i64 {
     const RUSAGE_CHILDREN: i32 = -1;
     const RUSAGE_THREAD: i32 = 1;
     let (utilisateur, noyau) = match who {
-        RUSAGE_SELF => crate::kernel::task::cpu_ns_utilisateur_noyau(Some(
+        // Le total du PROCESSUS : fils vivants, morts et recycles, tranche en
+        // cours comprise -- le meme que /proc/<pid>/stat. Il ne recule jamais.
+        RUSAGE_SELF => crate::kernel::task::proc_processus_cumul(
             crate::kernel::task::current_process().pid,
-        )),
-        RUSAGE_THREAD => crate::kernel::task::cpu_ns_utilisateur_noyau(None),
+        )
+        .map(|cumul| (cumul.user_ns, cumul.system_ns))
+        .unwrap_or((0, 0)),
+        RUSAGE_THREAD => crate::kernel::task::cpu_ns_tache_courante(),
         RUSAGE_CHILDREN => (0, 0),
         _ => return -errno::EINVAL,
     };

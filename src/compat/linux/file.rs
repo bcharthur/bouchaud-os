@@ -1739,6 +1739,14 @@ pub fn sys_flock(fd: i32, operation: u32) -> i64 {
         None => return -errno::EBADF,
     };
     let cle = verrous::cle_flock(noeud);
+    // Une CONVERSION (partage <-> exclusif) retire d'abord le verrou tenu,
+    // comme Linux (`flock_lock_inode`) : elle n'est pas atomique. Sinon deux
+    // processus qui tiennent LOCK_SH et demandent LOCK_EX s'attendraient
+    // l'un l'autre pour toujours (revue #341). Meme avec LOCK_NB, l'ancien
+    // verrou est perdu si le nouveau est refuse -- c'est aussi Linux.
+    if genre != verrous::F_UNLCK && verrous::tient_autre_genre(cle, process.pid, genre) {
+        verrous::pose(cle, process.pid, verrous::F_UNLCK, 0, 0);
+    }
     loop {
         match verrous::pose(cle, process.pid, genre, 0, 0) {
             verrous::Pose::Accorde => return 0,

@@ -100,7 +100,12 @@ fn accorde_jit_rwx(
             pid, image,
         ));
     }
-    capacites.union(Capabilities::JIT_RWX)
+    // `JIT_RWX` sans `JIT` ne servirait a rien : la regle ordinaire refuse
+    // toute memoire anonyme executable sans `JIT` (`AnonymousExecute`). Un
+    // utilisateur NON root qui lance `java` part du profil `User`, qui ne la
+    // porte pas (revue #341). Les memes conditions accordent donc les deux ;
+    // `JIT` est strictement moins que `JIT_RWX`.
+    capacites.union(Capabilities::JIT_RWX).union(Capabilities::JIT)
 }
 
 fn make_entry(pid: u32, image: &str, uid: u32, gid: u32, image_java_sure: bool) -> Entry {

@@ -105,6 +105,11 @@ pub const fn cle_flock(noeud: usize) -> usize {
     noeud | (1usize << (usize::BITS - 1))
 }
 
+/// `pid` tient-il sur `noeud` un verrou d'un AUTRE genre que `genre` ?
+pub fn tient_autre_genre(noeud: usize, pid: u32, genre: i16) -> bool {
+    VERROUS.lock().iter().any(|v| v.noeud == noeud && v.pid == pid && v.genre != genre)
+}
+
 pub fn libere_fichier(noeud: usize, pid: u32) {
     VERROUS.lock().retain(|v| !(v.noeud == noeud && v.pid == pid));
 }

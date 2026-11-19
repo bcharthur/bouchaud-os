@@ -18,6 +18,9 @@
 //   mpfich    mprotect(RWX) d'une projection de fichier -- jamais
 //   trou      mprotect(RWX) d'une plage anonyme trouee -- jamais
 //   fils      la voie `anon` dans un fils de fork() : il herite
+//
+// `nonroot` : le meme lanceur de confiance, execute par un utilisateur
+// ordinaire (uid 1000) -- il doit obtenir la meme exception.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -106,6 +109,19 @@ static int fils(void) {
 }
 
 int main(int argc, char **argv) {
+    // `devient-utilisateur JAVA CIBLE` : quitter root (uid 1000), puis
+    // executer JAVA. Un utilisateur ordinaire part du profil `User`, sans
+    // `JIT` : l'exception doit tout de meme fonctionner (revue #341).
+    if (argc > 3 && strcmp(argv[1], "devient-utilisateur") == 0) {
+        if (setgid(1000) != 0 || setuid(1000) != 0 || getuid() != 1000) {
+            printf("JIT_RWX_SONDE role=nonroot setuid_impossible\n");
+            return 1;
+        }
+        char *args[] = {argv[2], "nonroot", argv[3], 0};
+        execv(argv[2], args);
+        printf("JIT_RWX_SONDE role=nonroot exec_impossible\n");
+        return 1;
+    }
     const char *role = argc > 1 ? argv[1] : "?";
     // Un fichier ordinaire du disque : la sonde elle-meme.
     const char *cible = argc > 2 ? argv[2] : "/proc/self/exe";
