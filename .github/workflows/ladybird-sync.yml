@@ -27,7 +27,7 @@ concurrency:
 jobs:
   pinned:
     name: upstream / pinned sha
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
   upstream-head:
     name: upstream / head info
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     timeout-minutes: 8
     steps:

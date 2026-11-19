@@ -219,6 +219,17 @@ else:
     for _c in sorted(_attendus - set(_pr)):
         errors.append(f"p13-primitives-noyau.yml: {_c} ne declenche pas P13")
 
+# BOUCHAUD_RUNNER_EPINGLE_V1 : aucun job Linux sur une etiquette MOUVANTE.
+# `ubuntu-latest` est passe a Ubuntu 26.04 `amd64v3` le 19/11 : glibc et musl
+# statiques du runner y sont compilees pour x86-64-v3 (AVX2), que le CPU
+# invite `qemu64` n'a pas et que le noyau n'active pas (pas de XSAVE/XCR0).
+# Toutes les sondes ring 3 liees sur le runner mouraient en silence, sur main
+# comme sur les PR. Changer d'image est une decision, pas un effet de bord.
+for _wf in sorted(root.glob("*.yml")):
+    for _n, _l in enumerate(_wf.read_text(encoding="utf-8").splitlines(), 1):
+        if re.match(r"\s*runs-on:\s*ubuntu-latest\s*$", _l):
+            errors.append(f"{_wf.name}:{_n}: runs-on ubuntu-latest (etiquette mouvante ; epingler ubuntu-24.04)")
+
 # Automatic non-regression check: always triggered, never a docs-only skip.
 regression = need(root / "non-regression.yml",
                   ("name: Non-regression Gate", "non-regression-gate",

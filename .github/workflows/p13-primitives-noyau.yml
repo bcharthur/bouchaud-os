@@ -158,7 +158,7 @@ jobs:
     # rejouer ~45 min de sondes ; sinon il les execute. Le verdict n'est jamais
     # saute : il exige le succes final du run push et de son verdict nomme.
     name: dedoublonne push/PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
@@ -201,7 +201,7 @@ jobs:
     name: p13-primitives / verdict
     needs: [dedoublonne, primitives]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
