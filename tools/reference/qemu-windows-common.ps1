@@ -86,6 +86,25 @@ function Get-BouchaudGraphicsArguments {
     return @('-vga','std','-device','virtio-gpu-gl-pci')
 }
 
+function Get-BouchaudQemuGraphicsVerdict {
+    param([bool]$Virgl, [int]$ExitCode, [string]$Journal = '', [string]$Serie = '')
+    if ($ExitCode -ne 0) {
+        if ($Virgl -and $Journal -match '(?i)(failed|unable|cannot|could not|not available|not supported|does not support).{0,100}(OpenGL|GL context|EGL|GLX)|(OpenGL|GL context|EGL|GLX).{0,100}(failed|not available|not supported)') {
+            return 'contexte-opengl-refuse'
+        }
+        if ($Virgl -and $Journal -match '(?i)virtio-gpu-gl-pci.*(not found|not supported|not a valid|failed)|virglrenderer.*(failed|unavailable)') {
+            return 'peripherique-3d-refuse'
+        }
+        return 'qemu-echec'
+    }
+    if (-not $Virgl) { return 'profil-cpu' }
+    if ($Serie -match 'UEFI scanout=gop raison=perte-virtio') { return 'repli-gop' }
+    if ($Serie -match 'BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK' -and $Serie -match 'UEFI scanout=virtio') {
+        return 'virgl-invite-confirme'
+    }
+    return 'virgl-invite-non-confirme'
+}
+
 function Get-BouchaudInputArguments {
     param(
         [ValidateSet('usb','ps2','none')][string]$InputMode = 'usb',
@@ -124,6 +143,7 @@ function Invoke-BouchaudQemu {
         [Parameter(Mandatory = $true)][string]$QemuExe,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$SerialPath,
+        [string]$StderrPath = '',
         [switch]$DryRun
     )
     $writable = @($Arguments | Where-Object {
@@ -142,6 +162,13 @@ function Invoke-BouchaudQemu {
         }
         return 0
     }
-    & $QemuExe @Arguments
+    if ($StderrPath) {
+        # Windows PowerShell 5 peut convertir stderr en ErrorRecord.
+        # Le verdict réel est celui de QEMU et son journal reste disponible.
+        $ErrorActionPreference = 'Continue'
+        & $QemuExe @Arguments 2> $StderrPath
+    } else {
+        & $QemuExe @Arguments
+    }
     return $LASTEXITCODE
 }

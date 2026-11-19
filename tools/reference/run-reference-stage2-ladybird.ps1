@@ -30,6 +30,7 @@ param(
     [ValidateSet('mouse','tablet')][string]$Pointer = 'mouse',
     [ValidateSet('auto','gtk','sdl','none')][string]$Display = 'auto',
     [switch]$Virgl,
+    [string]$QualificationJson = '',
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -92,16 +93,41 @@ Write-Host '=== BOUCHAUD STAGE2 / LADYBIRD / TWO-DISK LEGACY ===' -ForegroundCol
 Write-Host 'NOTE: ce profil n est PAS le test single-USB de Product M1.' -ForegroundColor Yellow
 Write-Host "BOOT_IMAGE=$Image LADYBIRD_IMAGE=$LadybirdImage"
 Write-Host "INPUT=$InputMode POINTER=$Pointer ACCEL=$Accel SMP=$Smp MIMALLOC=$Mimalloc IRQCHIP=$Irqchip"
+$JournalQemu = [System.IO.Path]::ChangeExtension($Serial, '.qemu.stderr.log')
+if ($QualificationJson -and -not $DryRun) {
+    $QemuVersion = (& $QemuExe -version | Select-Object -First 1)
+    $NoyauHash = (Get-FileHash -LiteralPath $Image -Algorithm SHA256).Hash
+    $LadybirdHash = (Get-FileHash -LiteralPath $LadybirdImage -Algorithm SHA256).Hash
+}
 $Debut = Get-Date
-$rc = Invoke-BouchaudQemu -QemuExe $QemuExe -Arguments $ArgsQemu -SerialPath $Serial -DryRun:$DryRun
+$rc = Invoke-BouchaudQemu -QemuExe $QemuExe -Arguments $ArgsQemu -SerialPath $Serial -StderrPath $JournalQemu -DryRun:$DryRun
 $DureeHoteS = [math]::Round(((Get-Date) - $Debut).TotalSeconds, 1)
 if ($DryRun) { return }
 Write-Host "QEMU_EXIT_CODE=$rc"
 Write-Host "QEMU_SERIAL=$Serial"
-if (Test-Path -LiteralPath $Serial) {
+Write-Host "QEMU_STDERR=$JournalQemu"
+$SerieExiste = Test-Path -LiteralPath $Serial -PathType Leaf
+$LogsQemu = if (Test-Path -LiteralPath $JournalQemu -PathType Leaf) { Get-Content -LiteralPath $JournalQemu -Raw } else { '' }
+$IndicesGpu = if ($SerieExiste) {
+    (Select-String -LiteralPath $Serial -Pattern 'AUTOTEST_OK|UEFI scanout=' | ForEach-Object { $_.Line }) -join ' '
+} else { '' }
+$VerdictGpu = Get-BouchaudQemuGraphicsVerdict -Virgl ([bool]$Virgl) -ExitCode $rc -Journal "$LogsQemu" -Serie "$IndicesGpu"
+Write-Host "QEMU_GPU_VERDICT=$VerdictGpu"
+if ($rc -ne 0 -and $LogsQemu) { Write-Host $LogsQemu }
+$Resume = $null
+if ($SerieExiste) {
     $Resume = [System.IO.Path]::ChangeExtension($Serial, '.perf.json')
     Write-Host "=== RESUME DE SESSION (SMP=$Smp MIMALLOC=$Mimalloc ACCEL=$Accel IRQCHIP=$Irqchip, $DureeHoteS s hote) ===" -ForegroundColor Cyan
     & python (Join-Path $RepoRoot 'tools\perf\analyse_session.py') $Serial --json $Resume --duree-hote-s "$DureeHoteS"
     Write-Host "PERF_JSON=$Resume"
+}
+if ($QualificationJson) {
+    [ordered]@{
+        verdict = $VerdictGpu; code_sortie = $rc; renderer_hote = 'non-verifie'
+        qemu = $QemuExe; version_qemu = $QemuVersion; arguments = $ArgsQemu
+        noyau_sha256 = $NoyauHash; ladybird_sha256 = $LadybirdHash
+        serie = $Serial; stderr = $JournalQemu; mesures = $Resume
+        duree_hote_s = $DureeHoteS
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $QualificationJson -Encoding UTF8
 }
 exit $rc
