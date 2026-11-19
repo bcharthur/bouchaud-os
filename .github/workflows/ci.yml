@@ -26,7 +26,7 @@ concurrency:
 jobs:
   changes:
     name: classify-changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       workflow: ${{ steps.classify.outputs.workflow }}
       kernel: ${{ steps.classify.outputs.kernel }}
@@ -65,7 +65,7 @@ jobs:
     name: kernel / compile + invariants
     needs: changes
     if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # BOUCHAUD_CI_FAST_DELAI_V1 : delai de l'HEBERGEUR, pas un critere.
     # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : l'ancien job unique enchainait 12 min
     # d'etapes independantes (compilation 2 min 45, P10 1 min 20, gardes 1 min,
@@ -149,7 +149,7 @@ jobs:
     name: kernel / clippy + variantes
     needs: changes
     if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -218,7 +218,7 @@ jobs:
     name: host / tests + preuves de mise a jour
     needs: changes
     if: needs.changes.outputs.kernel == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -300,7 +300,7 @@ jobs:
     name: browser / engine tests
     needs: changes
     if: needs.changes.outputs.browser_engine == 'true' || needs.changes.outputs.userland == 'true' || needs.changes.outputs.ladybird == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
@@ -343,7 +343,7 @@ jobs:
     name: windows / scripts
     needs: changes
     if: needs.changes.outputs.windows == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -431,7 +431,7 @@ jobs:
 
   policy:
     name: ci / policy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
@@ -442,7 +442,7 @@ jobs:
     name: fast-gate
     if: always()
     needs: [changes, kernel-fast, kernel-variantes, host-tests, browser-engine, windows-scripts, policy]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Verdict unique pour branch protection
         env:

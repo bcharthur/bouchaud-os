@@ -230,7 +230,7 @@ jobs:
     # echec bloque, un run annule ou saute ne prouve rien. Pas sur les
     # workflows dont un gate est un check requis de `main`.
     name: dedoublonne push/PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
@@ -286,7 +286,7 @@ jobs:
     needs: dedoublonne
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
     name: ladybird / provenance de l'artefact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -321,7 +321,7 @@ jobs:
     needs: [dedoublonne, provenance]
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode == 'attendu' }}
     name: ladybird / attente de la production de l'artefact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 250
     permissions:
       contents: read
@@ -611,7 +611,7 @@ jobs:
     needs: [dedoublonne, provenance, attente]
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && (needs.provenance.outputs.mode == 'reutilise' || (needs.provenance.outputs.mode == 'attendu' && needs.attente.result == 'success')) }}
     name: ladybird / artefact reutilise (entrees identiques)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -669,7 +669,7 @@ jobs:
     # Palier artefact : la production s'arrete au build, aucune epreuve.
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact' && (needs.build.result == 'success' || needs.reutilise.result == 'success') }}
     name: ladybird / artefact disponible
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       liaison: ${{ steps.liaison.outputs.liaison }}

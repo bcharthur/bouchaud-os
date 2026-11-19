@@ -45,7 +45,7 @@ concurrency:
 jobs:
   construire:
     name: endurance / noyau
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +62,7 @@ jobs:
   tranche:
     name: endurance / tranche ${{ matrix.tranche }} / SMP${{ matrix.cpus }}
     needs: construire
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Bien sous la limite de six heures : une tranche qui la frole rendrait une
     # annulation, pas un verdict.
     timeout-minutes: 200
@@ -142,7 +142,7 @@ jobs:
     name: endurance-gate
     if: always()
     needs: [construire, tranche]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Verdict agrege
         env:
