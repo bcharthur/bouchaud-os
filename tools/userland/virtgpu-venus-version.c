@@ -71,6 +71,50 @@ static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus repons
     return ioctl(fd, DRM_EXECBUFFER, &req) || ioctl(fd, LIT_REPONSE, reponse);
 }
 
+static int verifie_buffer(int fd, uint32_t appareil)
+{
+    reponse_venus r;
+    // Première famille du renderer de banc. Vérifier sa capacité avant
+    // d'utiliser l'index zéro pour créer une queue de transfert.
+    uint32_t familles[] = {179, 0, 0, 0, 7, 1, appareil, 0, 1, 0, 1, 1, 0};
+    if (execute(fd, familles, sizeof(familles), r) || r[0] != 7
+        || r[1] != 1 || r[2] || r[3] != 1 || r[4] != 1 || r[5]
+        || !(r[6] & 7) || r[7] == 0)
+        return 1;
+    const uint32_t device = 0x200;
+    const uint32_t buffer = 0x300;
+    uint32_t cree_device[] = {
+        179, 0, 0, 0, 11, 1, appareil, 0,
+        1, 0, 3, 0, 0, 0,            // VkDeviceCreateInfo
+        1, 1, 0,                    // un VkDeviceQueueCreateInfo
+        2, 0, 0, 0, 0, 1, 1, 0, 0x3f800000,
+        0, 0, 0, 0, 0, 0, 0, 0,     // ni layers, extensions, ni features
+        0, 0, 1, 0, device, 0
+    };
+    if (execute(fd, cree_device, sizeof(cree_device), r) || r[0] != 11
+        || r[1] || r[2] != 1 || r[3] || r[4] != device || r[5])
+        return 2;
+    uint32_t cree_buffer[] = {
+        179, 0, 0, 0, 50, 1, device, 0,
+        1, 0, 12, 0, 0, 0,          // VkBufferCreateInfo
+        4096, 0, 2, 0, 0, 0, 0,     // taille, TRANSFER_DST, EXCLUSIVE
+        0, 0, 1, 0, buffer, 0
+    };
+    if (execute(fd, cree_buffer, sizeof(cree_buffer), r) || r[0] != 50
+        || r[1] || r[2] != 1 || r[3] || r[4] != buffer || r[5])
+        return 3;
+    uint32_t besoins[] = {179, 0, 0, 0, 30, 1, device, 0, buffer, 0, 1, 0};
+    if (execute(fd, besoins, sizeof(besoins), r) || r[0] != 30 || r[1] != 1
+        || r[2] || r[3] < 4096 || r[4] || !r[5] || r[6] || !r[7])
+        return 4;
+    uint32_t detruit_buffer[] = {179, 0, 0, 0, 51, 1, device, 0, buffer, 0, 0, 0};
+    if (execute(fd, detruit_buffer, sizeof(detruit_buffer), r) || r[0] != 51) return 5;
+    uint32_t detruit_device[] = {179, 0, 0, 0, 12, 1, device, 0, 0, 0};
+    if (execute(fd, detruit_device, sizeof(detruit_device), r) || r[0] != 12) return 6;
+    puts("VIRTGPU_VENUS_VKBUFFER_OK octets=4096");
+    return 0;
+}
+
 static int verifie_instances(int fd)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = 4, .commande = 1, .fence = -1};
@@ -111,6 +155,11 @@ static int verifie_instances(int fd)
             || r[5] != 1 || r[6] || r[7] != appareil || r[8])
             return 7;
         printf("VIRTGPU_VENUS_APPAREILS compte=%" PRIu32 " handle=%" PRIu32 "\n", total, appareil);
+        int buffer = verifie_buffer(fd, appareil);
+        if (buffer) {
+            printf("VIRTGPU_VENUS_VKBUFFER_ECHEC etape=%d\n", buffer);
+            return 8;
+        }
         // Réinitialiser le flux de réponse afin que le premier mot
         // appartienne bien à cette commande après la clôture.
         uint32_t destruction[] = {179, 0, 0, 0, 1, 1, handle, 0, 0, 0};

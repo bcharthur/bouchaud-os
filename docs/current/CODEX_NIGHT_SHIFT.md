@@ -50,3 +50,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - EXECBUFFER transmet les mots Venus encodés par l'application dans son contexte. Profil synchrone à un anneau, taille bornée, sans syncobj, sans descripteur de fence et sans liste GEM. Une copie privée de 64 octets lit le blob de réponse. Le banc reste hors de la configuration par défaut.
 - QEMU 11.2 RC / TCG. Deux `vkCreateInstance` et `vkDestroyInstance` émis et vérifiés côté application, reprise du blob après SIGKILL et démappage vert. Le capset et le contexte passent aussi les vérifications précédentes.
 - Suite immédiate. Énumérer les périphériques côté application, puis préparer VkDevice et un buffer. La réponse privée reste à remplacer par GEM et mmap pour Mesa.
+
+## `e0117451` — énumération Vulkan
+
+- Sous QEMU 11.2 RC avec Lavapipe, deux instances distinctes relisent un appareil et le handle attendu par `vkEnumeratePhysicalDevices`.
+- Suite immédiate. Créer une queue et un VkBuffer depuis le programme, puis utiliser les besoins mémoire de ce buffer pour préparer l'allocation et la clôture.
