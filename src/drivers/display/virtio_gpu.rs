@@ -28,6 +28,11 @@
 //! sur BGA. Ne s'execute que si QEMU expose `-device virtio-gpu-pci`
 //! (1af4:1050) ; sans lui, une ligne et rien d'autre.
 
+#[path = "virtio_gpu_rendu.rs"]
+mod rendu;
+pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
+    transfert_texture_rendu, ErreurRendu, TransfertRendu, OCTETS_TEXTURE};
+
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -428,6 +433,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     mire,
                     p10_virgl,
                     capset,
+                    textures_rendu: rendu::TexturesRendu::neuf(),
                     textures: [None; cg::TEXTURES_MAX],
                     bureau_attache: false,
                     entrees: None,
@@ -917,12 +923,13 @@ fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'st
 /// rendre la memoire que si le peripherique ne peut plus la tenir. Sinon elle
 /// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
 /// dit pourquoi.
-unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) {
+unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) -> bool {
+    let mut liberee = true;
     if ressource != 0 {
         if *m == Memoire::Attachee {
             *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
         }
-        let _ = suivie(m, libere(f, ressource));
+        liberee = suivie(m, libere(f, ressource)) == Ok(RESP_OK_NODATA);
     }
     if dma::peut_rendre(*m) {
         memory::free_dma(phys, octets);
@@ -932,6 +939,7 @@ unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: u
             quoi, octets, *m
         );
     }
+    liberee && dma::peut_rendre(*m)
 }
 
 unsafe fn autotest_2d_etapes(
@@ -1027,6 +1035,7 @@ struct Peripherique {
     mire: Option<MireTenue>,
     p10_virgl: Option<gpu3d::CapsetInfo>,
     capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
+    textures_rendu: rendu::TexturesRendu,
     // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
     // scanout attachee au contexte, liste DMA des pages (une fois).
     textures: [Option<TextureFenetre>; cg::TEXTURES_MAX],

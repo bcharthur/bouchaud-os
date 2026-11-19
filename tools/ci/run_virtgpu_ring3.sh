@@ -59,6 +59,7 @@ attend() {
 demarre virgl virtio-gpu-gl-pci sdl,gl=on
 attend virgl 'VIRTGPU_BLIT_RING3_OK pixels=64'
 attend virgl 'VIRTGPU_CAPS_OK'
+attend virgl 'VIRTGPU_TEXTURES_RING3_OK'
 attend virgl 'GPU_COUCHE'
 sleep 3
 import -window root "$sortie/virgl/capture.png"

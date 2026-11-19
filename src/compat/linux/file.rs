@@ -373,7 +373,7 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             (fin - offset) as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender => -errno::EINVAL,
+        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
         FdKind::InputKeyboard => read_input(buffer, count, input::Device::Keyboard),
         FdKind::InputMouse => read_input(buffer, count, input::Device::Mouse),
         FdKind::Pipe(shared, readable) => {
@@ -742,7 +742,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             data.len() as i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
-        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender => -errno::EINVAL,
+        FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
         FdKind::InputKeyboard | FdKind::InputMouse => count as i64,
         FdKind::Pipe(shared, readable) => {
             if readable {
@@ -1777,7 +1777,7 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
             }
             _ => (S_IFCHR | 0o666, 0),
         };
-        let buffer = if matches!(kind, FdKind::GpuRender) {
+        let buffer = if matches!(kind, FdKind::GpuRender(_)) {
             stat_gpu_render()
         } else {
             stat_bytes(1, mode, 0, 0, taille)
@@ -1809,7 +1809,7 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         None => return -errno::EBADF,
     };
     let buffer = match kind {
-        FdKind::GpuRender => stat_gpu_render(),
+        FdKind::GpuRender(_) => stat_gpu_render(),
         FdKind::File(node) | FdKind::Dir(node) => fill_stat(node),
         FdKind::Console => stat_bytes(0, S_IFCHR | 0o620, 0, 0, 0),
         FdKind::Pipe(_, _) => stat_bytes(0, S_IFIFO | 0o600, 0, 0, 0),
@@ -2426,7 +2426,7 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
     };
 
     match kind {
-        FdKind::GpuRender => super::virtgpu::ioctl(request as u32, arg),
+        FdKind::GpuRender(session) => super::virtgpu::ioctl(&session, request as u32, arg),
         // --- Sortie audio, protocole OSS -------------------------------------
         //
         // OSS plutot qu'ALSA : quatre ioctls suffisent a regler un flux, alors

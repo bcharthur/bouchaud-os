@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 struct param { uint64_t param, value; };
 struct caps { uint32_t id, version; uint64_t addr; uint32_t size, pad; };
@@ -14,6 +15,71 @@ struct caps { uint32_t id, version; uint64_t addr; uint32_t size, pad; };
 #define GET_CAPS _IOWR('d', 0x49, struct caps)
 typedef uint32_t pixels_t[64];
 #define BLIT_SONDE _IOR('B', 0xa0, pixels_t)
+
+struct transfert { uint32_t id, pad; uint64_t pixels; };
+struct blit { uint32_t source, cible; };
+#define CREE _IOR('B', 0xa1, uint32_t)
+#define DETRUIT _IOW('B', 0xa2, uint32_t)
+#define CHARGE _IOW('B', 0xa3, struct transfert)
+#define RELIT _IOW('B', 0xa4, struct transfert)
+#define BLIT _IOW('B', 0xa5, struct blit)
+
+static int textures(int fd, unsigned motif)
+{
+    struct blit b;
+    uint32_t extra;
+    if (ioctl(fd, CREE, &b.source) || ioctl(fd, CREE, &b.cible)) return 1;
+    if (!ioctl(fd, CREE, &extra) || errno != ENOMEM) return 2;
+    pixels_t entree, sortie;
+    struct transfert t = {b.cible, 0, (uintptr_t)sortie};
+    if (!ioctl(fd, RELIT, &t) || errno != EINVAL) return 3;
+    for (unsigned i = 0; i < 64; i++)
+        entree[i] = ((i * 0x010511) ^ motif) & 0x00ffffff;
+    struct transfert chargement = {b.source, 0, (uintptr_t)entree};
+    if (ioctl(fd, CHARGE, &chargement) || ioctl(fd, BLIT, &b)
+        || ioctl(fd, RELIT, &t)) return 4;
+    for (unsigned i = 0; i < 64; i++)
+        if ((sortie[i] & 0x00ffffff) != entree[i]) return 5;
+    if (ioctl(fd, DETRUIT, &b.source) || ioctl(fd, DETRUIT, &b.cible)) return 6;
+    if (!ioctl(fd, RELIT, &t) || errno != ENOENT) return 7;
+    return 0;
+}
+
+static int test_textures(int fd)
+{
+    uint32_t parent;
+    if (!ioctl(fd, CREE, (void *)1) || errno != EFAULT || ioctl(fd, CREE, &parent))
+        return 1;
+    pid_t enfant = fork();
+    if (enfant < 0) return 2;
+    if (!enfant) {
+        close(fd);
+        int autre = open("/dev/dri/renderD128", O_RDWR);
+        if (autre < 0 || !ioctl(autre, DETRUIT, &parent) || errno != ENOENT)
+            _exit(2);
+        for (unsigned i = 0; i < 4; ++i) {
+            int r = textures(autre, 0xabc111 + i);
+            if (r) _exit(10 + r);
+        }
+        _exit(close(autre) != 0);
+    }
+    int statut = -1;
+    if (waitpid(enfant, &statut, 0) != enfant || !WIFEXITED(statut) || WEXITSTATUS(statut)) {
+        printf("VIRTGPU_TEXTURES enfant statut=%d\n", statut);
+        return 3;
+    }
+    if (ioctl(fd, DETRUIT, &parent)) return 4;
+    for (unsigned i = 0; i < 4; ++i) {
+        int r = textures(fd, 0x135790 + i);
+        if (r) return 10 + r;
+    }
+    for (unsigned i = 0; i < 10; ++i) {
+        int autre = open("/dev/dri/renderD128", O_RDWR);
+        uint32_t abandonne;
+        if (autre < 0 || ioctl(autre, CREE, &abandonne) || close(autre)) return 5;
+    }
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -78,5 +144,11 @@ int main(int argc, char **argv)
         return 14;
     puts("VIRTGPU_BLIT_RING3_OK pixels=64");
     printf("VIRTGPU_CAPS_OK id=%u version=%u nonzero=%u\n", c.id, version, nonzero);
+    int textures = test_textures(fd);
+    if (textures) {
+        printf("VIRTGPU_TEXTURES_ECHEC code=%d errno=%d\n", textures, errno);
+        return 20 + textures;
+    }
+    puts("VIRTGPU_TEXTURES_RING3_OK processus=2 blits=8 pixels_par_blit=64");
     return close(fd) != 0;
 }
