@@ -382,6 +382,10 @@ pub const CLE_TOUT: usize = 0;
 struct Abonne {
     cle: usize,
     file: Arc<WaitQueue>,
+    /// La tache abonnee : une tache tuee pendant son attente meurt au
+    /// parking SANS derouler sa pile (`meurt_au_parking`), donc sans
+    /// `Drop` ; `desinscrit_tache` retire alors ses abonnements.
+    tid: u32,
 }
 
 static ABONNES: SpinLock<Vec<Abonne>> = SpinLock::new(Vec::new());
@@ -439,10 +443,11 @@ impl Abonnement {
             cles.push(CLE_TOUT);
         }
         let file = Arc::new(WaitQueue::new());
+        let tid = crate::kernel::task::try_current().map(|t| t.tid).unwrap_or(0);
         {
             let mut abonnes = ABONNES.lock();
             for cle in cles {
-                abonnes.push(Abonne { cle, file: Arc::clone(&file) });
+                abonnes.push(Abonne { cle, file: Arc::clone(&file), tid });
             }
         }
         Self { file }
@@ -463,6 +468,15 @@ impl Abonnement {
     /// Un reveil n'a rien rendu pret : compte pour la mesure.
     pub fn reveil_a_vide() {
         REVEILS_A_VIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Une tache meurt pendant son attente (`meurt_au_parking`, qui ne revient
+/// pas) : ses abonnements partent avec elle. Sans cela, chaque tache tuee en
+/// `poll` laissait des entrees que chaque notification parcourait ensuite.
+pub fn desinscrit_tache(tid: u32) {
+    if tid != 0 {
+        ABONNES.lock().retain(|a| a.tid != tid);
     }
 }
 

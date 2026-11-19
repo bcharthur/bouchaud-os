@@ -3403,20 +3403,31 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
     loop {
         // La liste elle-meme est un objet : `epoll_ctl` la notifie, pour
         // qu'un descripteur ajoute pendant l'attente soit vu.
-        let mut cles = alloc::vec![crate::kernel::fd::cle_de(&list)];
-        for &(fd, _, _) in list.lock().clone().iter() {
-            cles_du_fd(fd, &mut cles);
-        }
-        let abonnement = crate::kernel::fd::Abonnement::new(cles);
-        let ticket = abonnement.ticket();
-        let mut attente_ns = deadline_ns;
-        let mut written = 0usize;
+        //
         // BOUCHAUD_EPOLL_SANS_VERROU_TENU_V1 : la liste est COPIEE, puis le
         // verrou rendu, avant d'evaluer. `readable` peut prendre le verrou
         // d'un objet -- et, pour un socket, se garer -- et `user_write` peut
         // faire une faute de page : ni l'un ni l'autre sous un SpinLock.
-        // Sous le gros verrou de l'aiguilleur, ce defaut restait masque.
-        let entrees: Vec<(i32, u32, u64)> = list.lock().clone();
+        //
+        // Revue #344 : la copie qui fixe l'abonnement est celle qu'on
+        // balaie. Un `epoll_ctl` passe entre la copie et l'inscription ne
+        // trouvait aucun abonne, et le descripteur ajoute n'etait pas dans
+        // l'abonnement : relire APRES l'inscription, et recommencer si la
+        // liste a change. Apres l'inscription, tout `epoll_ctl` nous reveille.
+        let (abonnement, ticket, entrees) = loop {
+            let copie: Vec<(i32, u32, u64)> = list.lock().clone();
+            let mut cles = alloc::vec![crate::kernel::fd::cle_de(&list)];
+            for &(fd, _, _) in copie.iter() {
+                cles_du_fd(fd, &mut cles);
+            }
+            let abonnement = crate::kernel::fd::Abonnement::new(cles);
+            let ticket = abonnement.ticket();
+            if *list.lock() == copie {
+                break (abonnement, ticket, copie);
+            }
+        };
+        let mut attente_ns = deadline_ns;
+        let mut written = 0usize;
         for &(fd, wanted, data) in entrees.iter() {
             if written >= max {
                 break;
