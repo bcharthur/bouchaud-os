@@ -52,7 +52,7 @@ def chronologie(texte):
             if not trouve:
                 continue
             champs = {k: int(v, 16 if v.startswith("0x") else 10)
-                      for k, v in CHAMPS.findall(suite)}
+                      for k, v in CHAMPS.findall(suite.partition(" url=")[0])}
             if categorie in ("trame", "fautes", "fautes_fichier", "disque", "fork", "exec", "exec_erreur", "sortie"):
                 if "t" in champs:
                     champs["invite_ms"] = champs.pop("t")

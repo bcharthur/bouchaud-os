@@ -20,7 +20,7 @@ class Chronologie(unittest.TestCase):
 
     def test_domaine_sans_url_privee_et_classe(self):
         lignes = (
-            "[12:00:00] [LB:NAV] onglet=1 demande url=https://example.com/path?q=secret\n"
+            "[12:00:00] [LB:NAV] onglet=1 demande url=https://example.com/path?secret=123\n"
             "[12:00:01] [SCHED-NG-CENTILES] classe=interactive p99_ns=100\n"
         )
         navigation, attente = chronologie(lignes)
