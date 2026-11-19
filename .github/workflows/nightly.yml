@@ -24,7 +24,7 @@ concurrency:
 jobs:
   kernel-build:
     name: nightly / kernel once
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
   qemu-core:
     name: nightly / qemu core
     needs: kernel-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     strategy:
       fail-fast: false
@@ -89,7 +89,7 @@ jobs:
 
   dns:
     name: nightly / dns ring3
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +123,7 @@ jobs:
     # empreinte. Un run demande a la main reste possible : la verification
     # `entrees` du smoke le juge comme les autres.
     name: nightly / resolve Ladybird
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 250
     # `actions: write` : declencher la production canonique de l'empreinte
     # quand aucun artefact n'existe (BOUCHAUD_LADYBIRD_PRODUCTION_SUR_ATTENTE_V1).
@@ -166,7 +166,7 @@ jobs:
     name: nightly / Ladybird product
     needs: [kernel-build, resolve-ladybird]
     if: needs.resolve-ladybird.outputs.found == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -201,7 +201,7 @@ jobs:
   # sans changement .ps1 artificiellement rouge.
   windows-debt:
     name: nightly / Windows scripts debt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 8
     outputs:
       ascii: ${{ steps.ascii.outcome }}
@@ -261,7 +261,7 @@ jobs:
     name: nightly-gate
     if: always()
     needs: [kernel-build, qemu-core, dns, resolve-ladybird, ladybird-smoke, windows-debt]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Verdict
         env:
