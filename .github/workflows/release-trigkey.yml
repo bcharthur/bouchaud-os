@@ -48,7 +48,7 @@ jobs:
   garde:
     name: release-trigkey / garde (sans secret)
     if: inputs.action == 'publier'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -85,7 +85,7 @@ jobs:
   ladybird-artefact:
     name: release-trigkey / artefact Ladybird (selection stricte)
     needs: garde
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -109,7 +109,7 @@ jobs:
   construit:
     name: release-trigkey / image + preuve QEMU (sans secret)
     needs: [garde, ladybird-artefact]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     permissions:
       contents: read
@@ -161,7 +161,7 @@ jobs:
   signe:
     name: release-trigkey / signature (environnement protege)
     needs: [garde, construit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: trigkey-testing
     permissions:
@@ -208,7 +208,7 @@ jobs:
   publie:
     name: release-trigkey / publication testing (etiquette immuable)
     needs: [garde, signe]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -237,7 +237,7 @@ jobs:
   promeut:
     name: release-trigkey / promotion testing -> stable (memes octets)
     if: inputs.action == 'promouvoir'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: trigkey-stable
     permissions:

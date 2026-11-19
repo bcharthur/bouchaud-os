@@ -124,7 +124,7 @@ jobs:
     name: P13 / final SHA gate (no missing proof accepted)
     needs: [hosted-primitives-strict, dedicated-three-campaigns, dedicated-smp8]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
       - name: Compare strict results AND independent C22 and Nightly runs

@@ -34,7 +34,7 @@ concurrency:
 jobs:
   c5:
     name: C5 -- page remplie avant sa PTE (KVM SMP4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +85,7 @@ jobs:
 
   console:
     name: console -- lignes differees sous verrou suspendu (KVM SMP2/SMP4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -177,7 +177,7 @@ jobs:
 
   reveil:
     name: reveil -- tache reveillee derriere un coeur muet (KVM SMP2/SMP4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -275,7 +275,7 @@ jobs:
   # fait naitre et mourir des processus sur tous les coeurs.
   election:
     name: election -- tache prete jamais perdue sur un rejet (TCG/KVM SMP4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -333,7 +333,7 @@ jobs:
     # (2d850401), A/B reveil precis KVM SMP1 tour 4 `on` -- minuteur local
     # mort (`deadline_tsc=0`, `arme_tsc` fige), tout armement precis refuse.
     name: minuteur -- un tir perdu du minuteur local ne le tue pas (KVM SMP1/SMP4)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

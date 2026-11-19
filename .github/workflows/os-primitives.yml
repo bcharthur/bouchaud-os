@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   probes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
@@ -493,7 +493,7 @@ jobs:
   # Isoler la regression P13 des A/B experimentaux donne son verdict des
   # SMP1/4 termines, sans attendre les autres mesures ni en retirer aucune.
   reveil-precis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -562,7 +562,7 @@ jobs:
           if-no-files-found: warn
 
   ordonnanceur-ab:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -629,7 +629,7 @@ jobs:
   # P10+.2b : composition directe dans la memoire du scanout virtio-gpu, en
   # parallele des sondes (deux demarrages par accelerateur).
   gpu-tampon:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
