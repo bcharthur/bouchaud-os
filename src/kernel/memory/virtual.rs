@@ -1399,17 +1399,20 @@ impl AddressSpace {
     ) -> bool {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let flags = (flags & !PTE_RSS_KIND_MASK) | kind.bits() | PTE_PRESENT;
         let mut page = start;
         while page < end {
-            if self.translate(page).is_none() {
-                let frame = match alloc_frame() {
-                    Some(f) => f,
-                    None => return false,
-                };
+            let Some(entry) = self.entry_mut(page, true) else { return false };
+            if *entry & PTE_PRESENT == 0 {
+                let Some(frame) = alloc_frame() else { return false };
+                // Comme pour map(), la frame appartient a l'espace avant
+                // publication et le RSS est impute une fois par nouvelle PTE.
+                // Garder cette entree evite de reparcourir les tables de pages.
                 self.pages.insert(frame);
-                if !self.map_accounted(page, frame, flags, kind) {
-                    return false;
-                }
+                let new = (frame & ADDR_MASK) | flags;
+                *entry = new;
+                flush(page);
+                self.resident.mapped(new);
             }
             page += PAGE_SIZE;
         }
