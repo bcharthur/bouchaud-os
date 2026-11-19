@@ -13,6 +13,13 @@ pid=""
 arrete() {
     if [[ -n $pid ]]; then
         kill "$pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
         wait "$pid" 2>/dev/null || true
         pid=""
     fi

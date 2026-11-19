@@ -94,7 +94,10 @@ Le QEMU de la VM liste venus, blob et hostmem. Avec
 virtio-gpu-gl-pci,blob=on,hostmem=256M,venus=on, l’invité a reçu
 l’offre 0x000001013000001b et retenu 0x0000000100000001. La négociation
 s’arrête donc à VERSION_1 et VIRGL. L’essai n’a pas produit de
-GET_CAPSET Venus abouti. Il manque notamment la négociation BLOB et
+GET_CAPSET Venus abouti. Le processus QEMU est resté bloqué après l'initialisation
+de la file et a dû être arrêté par SIGKILL sur cette configuration logicielle.
+Le test sans périphérique VirtIO a sélectionné le GOP avec la même image UEFI.
+Il manque notamment la négociation BLOB et
 CONTEXT_INIT, le mappage hostmem, les ressources par processus et la
 soumission avec clôtures exposées à l’ABI. Un loader et l’ICD Mesa
 Venus doivent ensuite être validés dans l’invité.
