@@ -10,7 +10,7 @@ const RESP_OK_MAP_INFO: u32 = 0x1106;
 // Le blob de réponse est distinct des allocations Vulkan VkDeviceMemory.
 const MAX_BLOB_REPONSE: u64 = 1024 * 1024;
 const BASE_GEMS: u64 = 2 * MAX_BLOB_REPONSE;
-const FIN_GEMS: u64 = BASE_GEMS + gpu3d::NOMBRE_GEMS_VENUS as u64 * MAX_BLOB_REPONSE;
+const MAX_GEM_VENUS: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub(super) struct Fenetre {
@@ -54,13 +54,16 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
         } else {
             None
         };
-        if taille >= FIN_GEMS {
-            // Alias noyau pour les copies user_read/user_write vers le BAR.
-            memory::mappe_mmio(base.checked_add(BASE_GEMS)?, FIN_GEMS - BASE_GEMS).ok()?;
-        }
         return Some(Fenetre { adresse: v as usize, octets: taille, physique: base, relecture });
     }
     None
+}
+
+impl Fenetre {
+    fn octets_par_gem(self) -> u64 {
+        let possible = self.octets.saturating_sub(BASE_GEMS) / gpu3d::NOMBRE_GEMS_VENUS as u64;
+        possible.min(MAX_GEM_VENUS) & !(PAGE as u64 - 1)
+    }
 }
 
 pub(super) enum Canal {
@@ -143,7 +146,7 @@ pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
     let fenetre = possede_contexte(p, session)?;
-    if octets < PAGE as u64 || octets % PAGE as u64 != 0 || octets > fenetre.octets.min(MAX_BLOB_REPONSE) {
+    if octets < PAGE as u64 || octets % PAGE as u64 != 0 || octets > fenetre.octets_par_gem() {
         return Err(ErreurRendu::Invalide);
     }
     let gems = &mut p.gems_venus;
@@ -197,21 +200,26 @@ pub fn ferme_gem_venus(session: &Arc<()>, handle: u32) -> Result<(), ErreurRendu
 }
 
 pub fn offset_gem_venus(session: &Arc<()>, handle: u32) -> Result<u64, ErreurRendu> {
-    info_gem_venus(session, handle).map(|gem| u64::from(gem.handle) * MAX_BLOB_REPONSE)
+    info_gem_venus(session, handle).map(|gem| u64::from(gem.handle) * MAX_GEM_VENUS)
 }
 
 pub fn mappe_gem_venus(session: &Arc<()>, offset: u64, taille: u64) -> Result<(u64, Arc<BailGem>), ErreurRendu> {
-    if offset % MAX_BLOB_REPONSE != 0 { return Err(ErreurRendu::Invalide); }
-    let handle = u32::try_from(offset / MAX_BLOB_REPONSE).map_err(|_| ErreurRendu::Invalide)?;
+    if offset % MAX_GEM_VENUS != 0 { return Err(ErreurRendu::Invalide); }
+    let handle = u32::try_from(offset / MAX_GEM_VENUS).map_err(|_| ErreurRendu::Invalide)?;
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
     let fenetre = possede_contexte(p, session)?;
-    if fenetre.octets < FIN_GEMS { return Err(ErreurRendu::Indisponible); }
+    let fente = fenetre.octets_par_gem();
+    if fente == 0 { return Err(ErreurRendu::Indisponible); }
     let i = p.gems_venus.cherche(handle)?;
     let objet = p.gems_venus.objets[i].as_mut().ok_or(ErreurRendu::Inconnue)?;
     if taille > u64::from(objet.gem.octets) { return Err(ErreurRendu::Invalide); }
-    let offset_bar = BASE_GEMS + i as u64 * MAX_BLOB_REPONSE;
+    let offset_bar = BASE_GEMS + i as u64 * fente;
+    let physique = fenetre.physique + offset_bar;
     if !objet.mappe {
+        // L'alias noyau sert aux copies user_read/user_write. Seules
+        // les pages du blob demandé sont installées, jamais toute la BAR.
+        memory::mappe_mmio(physique, objet.gem.octets.into()).map_err(|_| ErreurRendu::Plein)?;
         let (q, n) = gpu3d::mappe_blob_venus(objet.gem.ressource, true, offset_bar);
         match unsafe { p.file.commande(&q[..n], 32) } {
             Ok(RESP_OK_MAP_INFO) => objet.mappe = true,
@@ -227,7 +235,7 @@ pub fn mappe_gem_venus(session: &Arc<()>, offset: u64, taille: u64) -> Result<(u
         objet.bail = Arc::downgrade(&bail);
         bail
     });
-    Ok((fenetre.physique + offset_bar, bail))
+    Ok((physique, bail))
 }
 
 pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, ErreurRendu> {
@@ -316,7 +324,7 @@ pub fn initialise_contexte_venus(session: &Arc<()>, anneaux: u8) -> Result<(), E
 pub fn host_visible_venus() -> bool {
     verrou().is_some_and(|garde| garde.as_ref().is_some_and(|p| {
         !p.file.cassee && match &p.hostmem_venus {
-            Some(Canal::Nouveau(fenetre) | Canal::Ouvert(fenetre, ..)) => fenetre.octets >= FIN_GEMS,
+            Some(Canal::Nouveau(fenetre) | Canal::Ouvert(fenetre, ..)) => fenetre.octets_par_gem() != 0,
             None => false,
         }
     }))

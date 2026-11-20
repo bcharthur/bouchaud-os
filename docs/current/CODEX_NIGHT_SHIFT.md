@@ -127,3 +127,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le banc valide une requête de version intégralement via le blob client. QEMU 11.1.3 et 11.2 RC verts. Les 216 garde-fous passent sur le jalon mmap.
 - Le Loader et Mesa s'attachent au renderer, énumèrent le périphérique et créent le device et le buffer. La sonde échoue ensuite à vkBeginCommandBuffer avec VK_ERROR_OUT_OF_HOST_MEMORY. Mesa réserve 8 Mio pour le pool de flux indirect alors que le slot GEM est borné à 1 Mio.
 - Suite. Agrandir les slots GEM selon la taille BAR en conservant un plafond, n'installer l'alias noyau que sur les pages effectivement demandées, puis retester la soumission et les fences Mesa.
+
+## `d854867e` — pool de commandes Mesa
+
+- Les slots GEM sont dimensionnés dans la BAR et plafonnés à 16 Mio. L'alias noyau est créé à la première projection du blob. Une allocation de 8 Mio avec écriture aux deux extrémités, les relectures et le cycle GEM passent sur QEMU 11.1.3 et 11.2 RC.
+- Sur QEMU 11.2 RC/Lavapipe, la vraie sonde Vulkan Loader/Mesa a vérifié les 4 096 octets du motif 5a17c3e9. Au second cycle dans le même processus, le host a recréé le contexte et ses blobs. Mesa est ensuite resté en attente du numéro de séquence de l'anneau. Le banc public échoue donc encore.
+- Suite. Répliquer le blocage sur 11.1.3, tracer le second cycle autour de la publication du flux indirect et isoler la réutilisation des identifiants de contexte et des slots avant d'activer Skia.

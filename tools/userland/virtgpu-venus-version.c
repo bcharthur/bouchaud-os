@@ -237,6 +237,25 @@ static int verifie_mmap_gem(int fd)
     return 0;
 }
 
+static int verifie_grand_gem(int fd)
+{
+    const size_t octets = 8 * 1024 * 1024;
+    struct drm_blob blob = {.mem = 2, .flags = 1, .taille = octets};
+    if (ioctl(fd, DRM_CREATE_BLOB, &blob) || verifie_gem(fd, &blob)) return 1;
+    struct drm_virtgpu_map map = {.handle = blob.bo};
+    if (ioctl(fd, DRM_MAP, &map)) return 2;
+    volatile uint8_t *oct = mmap(NULL, octets, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+    if (oct == MAP_FAILED) return 3;
+    oct[0] = 0x67;
+    oct[octets - 1] = 0x89;
+    if (oct[0] != 0x67 || oct[octets - 1] != 0x89) return 4;
+    if (munmap((void *)oct, octets)) return 5;
+    struct drm_gem_close close = {.bo = blob.bo};
+    if (ioctl(fd, DRM_GEM_CLOSE, &close)) return 6;
+    puts("VIRTGPU_VENUS_GRAND_GEM_OK octets=8388608");
+    return 0;
+}
+
 static int relit_vkmemoire_gem(int fd, uint64_t memoire, uint32_t motif)
 {
     const uint64_t octets = 4096;
@@ -587,6 +606,8 @@ int main(int argc, char **argv)
             return 21;
         int mapping = verifie_mmap_gem(fd);
         if (mapping) { printf("VIRTGPU_VENUS_DRM_MMAP_ECHEC etape=%d\n", mapping); return 20; }
+        int grand = verifie_grand_gem(fd);
+        if (grand) { printf("VIRTGPU_VENUS_GRAND_GEM_ECHEC etape=%d\n", grand); return 23; }
         int gem = verifie_gems(fd);
         if (gem) { printf("VIRTGPU_VENUS_DRM_GEM_ECHEC etape=%d\n", gem); return 18; }
         if (ioctl(fd, DEMAPPE)) {

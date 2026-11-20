@@ -69,6 +69,7 @@ if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096' "$sortie/serie.log")" -eq 4
     test "$(grep -acF 'VIRTGPU_VENUS_VKBUFFER_OK octets=4096' "$sortie/serie.log")" -eq 4
     test "$(grep -acF 'VIRTGPU_VENUS_APPAREILS compte=' "$sortie/serie.log")" -eq 4
+    grep -aqF 'VIRTGPU_VENUS_GRAND_GEM_OK octets=8388608' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DRM_MMAP_OK' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DRM_GEM_OK objets=8' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DRM_INSTANCES_OK cycles=2' "$sortie/serie.log"
