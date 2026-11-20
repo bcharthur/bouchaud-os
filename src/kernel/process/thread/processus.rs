@@ -72,6 +72,11 @@ pub struct ProcessMetadata {
     pub uid: u32,
     pub gid: u32,
     pub ecran: Option<EcranVirtuel>,
+    /// BOUCHAUD_JIT_RWX_V1 : l'image est un lanceur Java installe par root
+    /// (`security::policy::lanceur_java_de_confiance`), verifie a l'exec,
+    /// hors de tout verrou de processus. La politique lit ce drapeau ; elle
+    /// ne reprend pas le verrou du systeme de fichiers.
+    pub image_java_sure: bool,
 }
 
 /// `groupe_en_sortie` (BOUCHAUD_GROUPE_RECLAME_V1) : un fil du processus a

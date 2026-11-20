@@ -60,7 +60,52 @@ pub const fn prot_viole_wx(prot: u32, prot_write: u32, prot_exec: u32) -> bool {
     prot & prot_write != 0 && prot & prot_exec != 0
 }
 
+/// BOUCHAUD_JIT_RWX_V1 -- l'UNIQUE exception a W^X.
+///
+/// Une page a la fois inscriptible et executable n'est accordee que si les
+/// QUATRE conditions tiennent : la demande est bien W+X, la memoire est
+/// ANONYME (pas un fichier : on ne rend pas executable un contenu qu'un autre
+/// processus peut reecrire), PRIVEE (pas partagee avec un autre espace), et le
+/// processus porte la capacite `JIT_RWX`. Les segments ELF n'ont aucune
+/// exception (`segment_viole_wx`).
+#[inline]
+pub const fn exception_jit_rwx(
+    prot: u32,
+    prot_write: u32,
+    prot_exec: u32,
+    anonyme: bool,
+    prive: bool,
+    capacite_jit_rwx: bool,
+) -> bool {
+    prot_viole_wx(prot, prot_write, prot_exec) && anonyme && prive && capacite_jit_rwx
+}
+
 /// Un segment ELF viole-t-il W^X ?
+/// BOUCHAUD_JIT_RWX_V1 : les morceaux `[debut, fin)` couvrent-ils TOUTE la
+/// plage, sans trou ? L'exception RWX d'un `mprotect` n'est accordee qu'a une
+/// plage entierement decrite par des VMA anonymes : un trou est une memoire
+/// dont on ne sait rien, et ne pas savoir n'accorde rien.
+pub fn plage_couverte(morceaux: &mut [(u64, u64)], debut: u64, fin: u64) -> bool {
+    if debut >= fin {
+        return false;
+    }
+    morceaux.sort_unstable_by_key(|morceau| morceau.0);
+    let mut atteint = debut;
+    for &(d, f) in morceaux.iter() {
+        if f <= atteint {
+            continue;
+        }
+        if d > atteint {
+            return false;
+        }
+        atteint = f;
+        if atteint >= fin {
+            return true;
+        }
+    }
+    atteint >= fin
+}
+
 #[inline]
 pub const fn segment_viole_wx(drapeaux_segment: u32, pf_w: u32, pf_x: u32) -> bool {
     drapeaux_segment & pf_w != 0 && drapeaux_segment & pf_x != 0

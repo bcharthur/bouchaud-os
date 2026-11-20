@@ -160,6 +160,60 @@ pub fn prot_to_flags_verifie(prot: u32) -> Option<u64> {
     Some(prot_to_flags(prot))
 }
 
+/// BOUCHAUD_JIT_RWX_V1 : la meme barriere, avec la SEULE exception admise.
+///
+/// Une demande inscriptible ET executable n'est acceptee que si les trois
+/// conditions tiennent ensemble : la memoire est anonyme et privee (aucun
+/// fichier, aucun autre processus ne la voit), et le processus porte
+/// `JIT_RWX` -- que seul un lanceur Java installe par root recoit
+/// (`policy::accorde_jit_rwx`). Tout le reste passe par
+/// [`prot_to_flags_verifie`], qui refuse.
+///
+/// La premiere barriere (`security::memory`) applique la meme regle ; les
+/// deux sont independantes, et il faut les deux pour qu'une page RWX existe.
+pub fn prot_to_flags_verifie_jit(prot: u32, anonyme_prive: bool, capacite_jit_rwx: bool) -> Option<u64> {
+    if crate::kernel::security::wx::exception_jit_rwx(
+        prot,
+        PROT_WRITE,
+        PROT_EXEC,
+        anonyme_prive,
+        anonyme_prive,
+        capacite_jit_rwx,
+    ) {
+        WX_JIT_ACCORDES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return Some(prot_to_flags(prot));
+    }
+    prot_to_flags_verifie(prot)
+}
+
+/// Pages RWX accordees au titre de `JIT_RWX` : un compteur qui ne bouge que
+/// pour un lanceur Java de confiance.
+pub static WX_JIT_ACCORDES: AtomicU64 = AtomicU64::new(0);
+
+/// Le processus courant porte-t-il `JIT_RWX` ? Lu AVANT tout verrou `mm` :
+/// la politique prend les verrous de metadonnees et du registre.
+fn capacite_jit_rwx_courante(prot: u32) -> bool {
+    crate::kernel::security::wx::prot_viole_wx(prot, PROT_WRITE, PROT_EXEC)
+        && crate::kernel::security::policy::current()
+            .capabilities
+            .contains(crate::kernel::security::capability::Capabilities::JIT_RWX)
+}
+
+/// Toute la plage `[addr, fin)` est-elle decrite par des VMA anonymes ?
+fn plage_anonyme_privee(promesses: &[Vma], addr: u64, fin: u64) -> bool {
+    let mut morceaux = alloc::vec::Vec::new();
+    for vma in promesses {
+        if vma.debut >= fin || vma.fin <= addr {
+            continue;
+        }
+        if !matches!(vma.backing, Backing::Zero) {
+            return false;
+        }
+        morceaux.push((vma.debut.max(addr), vma.fin.min(fin)));
+    }
+    crate::kernel::security::wx::plage_couverte(&mut morceaux, addr, fin)
+}
+
 /// Traduit `PROT_*` en drapeaux de table de pages, sans controle W^X.
 ///
 /// Reserve aux appelants qui composent eux-memes une demande dont ils
@@ -381,6 +435,7 @@ pub fn sys_mmap(
     let process_rc = task::current_process();
     let fd_kind = process_rc.files.lock().get(fd).map(|desc| desc.kind.clone());
     let ecran = process_rc.metadata.lock().ecran;
+    let capacite_jit_rwx = capacite_jit_rwx_courante(prot);
     let mut process = process_rc.mm.lock();
     let base = match choisit_base_mmap(&mut process, addr, length, flags) {
         Ok(base) => base,
@@ -388,7 +443,8 @@ pub fn sys_mmap(
     };
     let fixed = flags & MAP_FIXED != 0;
 
-    let Some(drapeaux) = prot_to_flags_verifie(prot) else {
+    let anonyme_prive = flags & MAP_ANONYMOUS != 0 && map_type == MAP_PRIVATE;
+    let Some(drapeaux) = prot_to_flags_verifie_jit(prot, anonyme_prive, capacite_jit_rwx) else {
         return -errno::EACCES;
     };
 
@@ -605,12 +661,17 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     // une page deja ecrite qu'on rendrait executable SANS retirer l'ecriture
     // donne le meme resultat qu'un `mmap` inscriptible et executable, en une
     // etape de moins.
-    let Some(_) = prot_to_flags_verifie(prot) else {
-        return -errno::EACCES;
-    };
-
+    //
+    // L'exception JIT_RWX exige une plage ENTIEREMENT anonyme : elle se lit
+    // sous le verrou `mm` qui couvre aussi la modification, pour qu'un autre
+    // fil ne puisse pas remplacer la plage entre le controle et l'effet.
+    let capacite_jit_rwx = capacite_jit_rwx_courante(prot);
     let process_rc = task::current_process();
     let mut process = process_rc.mm.lock();
+    let anonyme_prive = capacite_jit_rwx && plage_anonyme_privee(&process.promesses, addr, fin);
+    let Some(_) = prot_to_flags_verifie_jit(prot, anonyme_prive, capacite_jit_rwx) else {
+        return -errno::EACCES;
+    };
 
     // Clean cache frames are deliberately shared without COW. Never make one
     // writable in place: that would grant one process writes into every other

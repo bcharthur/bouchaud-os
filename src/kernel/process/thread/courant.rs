@@ -898,6 +898,15 @@ pub fn fault_retry_cumul() -> (u64, u64, u64, u64) {
 /// programme ne peut pas distinguer une attente qui dort d'une attente qui
 /// brule un cœur : les deux durent le meme temps au mur. C'est exactement la
 /// question que posait la reparation de la couche UDP.
+/// Temps processeur (utilisateur, noyau) en nanosecondes de la TACHE
+/// courante. Le total d'un PROCESSUS se lit par `proc_processus_cumul`, qui
+/// compte aussi les fils recycles et morts et la tranche en cours : une somme
+/// des seules taches vivantes reculerait (revue #341).
+pub fn cpu_ns_tache_courante() -> (u64, u64) {
+    let tache = current();
+    (tache.user_cpu_ns.charge(), tache.kernel_cpu_ns.charge())
+}
+
 pub fn cpu_time_ms(pid: u32) -> u64 {
     let mut total = 0u64;
     for task in tasks().iter() {

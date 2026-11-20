@@ -1384,6 +1384,12 @@ pub fn sys_close(fd: i32) -> i64 {
     let closed = process.files.lock().close(fd);
     if let Some((node, pid)) = verrouille {
         verrous::libere_fichier(node, pid);
+        // `flock` appartient sous Linux a la description de fichier ouverte,
+        // et ne tombe qu'a la fermeture de sa DERNIERE copie. Bouchaud le
+        // rattache au processus, comme `fcntl` : il tombe des le premier
+        // `close` sur ce fichier. Plus tot que Linux, jamais plus tard --
+        // aucun verrou fantome.
+        verrous::libere_fichier(verrous::cle_flock(node), pid);
     }
     if closed {
         // EOF/HUP et place d'un canal peuvent changer a la disparition de la
@@ -1701,6 +1707,53 @@ fn fcntl_verrou(fd: i32, command: u32, arg: u64) -> i64 {
                 // BOUCHAUD_SMP_BLOCKING_IO_FIX_V1: une attente bloquante doit
                 // marquer la tache Blocked afin que schedule() libere le BKL global
                 // pendant que le producteur/consommateur progresse sur un autre CPU.
+                task::attends_un_tick();
+            }
+        }
+    }
+}
+
+/// `flock(fd, operation)` -- BOUCHAUD_FLOCK_V1.
+///
+/// Verrou consultatif sur le fichier entier : partage (`LOCK_SH`) ou exclusif
+/// (`LOCK_EX`), `LOCK_NB` pour ne pas attendre. HotSpot l'utilise sur ses
+/// fichiers de performance ; un lanceur de jeu, sur ses fichiers d'instance.
+/// Sans attente bornee, comme Linux : un processus tue sort de l'attente par
+/// la preemption.
+pub fn sys_flock(fd: i32, operation: u32) -> i64 {
+    const LOCK_SH: u32 = 1;
+    const LOCK_EX: u32 = 2;
+    const LOCK_NB: u32 = 4;
+    const LOCK_UN: u32 = 8;
+
+    let genre = match operation & !LOCK_NB {
+        LOCK_SH => verrous::F_RDLCK,
+        LOCK_EX => verrous::F_WRLCK,
+        LOCK_UN => verrous::F_UNLCK,
+        _ => return -errno::EINVAL,
+    };
+    let process = task::current_process();
+    let noeud = match process.files.lock().get(fd).map(|desc| desc.kind.clone()) {
+        Some(FdKind::File(node)) | Some(FdKind::Dir(node)) => node,
+        Some(_) => return -errno::EINVAL,
+        None => return -errno::EBADF,
+    };
+    let cle = verrous::cle_flock(noeud);
+    // Une CONVERSION (partage <-> exclusif) retire d'abord le verrou tenu,
+    // comme Linux (`flock_lock_inode`) : elle n'est pas atomique. Sinon deux
+    // processus qui tiennent LOCK_SH et demandent LOCK_EX s'attendraient
+    // l'un l'autre pour toujours (revue #341). Meme avec LOCK_NB, l'ancien
+    // verrou est perdu si le nouveau est refuse -- c'est aussi Linux.
+    if genre != verrous::F_UNLCK && verrous::tient_autre_genre(cle, process.pid, genre) {
+        verrous::pose(cle, process.pid, verrous::F_UNLCK, 0, 0);
+    }
+    loop {
+        match verrous::pose(cle, process.pid, genre, 0, 0) {
+            verrous::Pose::Accorde => return 0,
+            verrous::Pose::Occupe => {
+                if operation & LOCK_NB != 0 {
+                    return -errno::EAGAIN;
+                }
                 task::attends_un_tick();
             }
         }
@@ -2035,6 +2088,21 @@ pub fn sys_chdir(path_addr: u64) -> i64 {
         }
         Some(_) => -errno::ENOTDIR,
         None => -errno::ENOENT,
+    }
+}
+
+/// `fchdir(fd)` : le repertoire courant devient celui que designe `fd`.
+/// Meme regle que `chdir` : un repertoire, sinon ENOTDIR.
+pub fn sys_fchdir(fd: i32) -> i64 {
+    let process = task::current_process();
+    let kind = process.files.lock().get(fd).map(|desc| desc.kind.clone());
+    match kind {
+        Some(FdKind::Dir(node)) if ramfs::fs().nodes[node].kind == NodeKind::Dir => {
+            process.metadata.lock().cwd = node;
+            0
+        }
+        Some(_) => -errno::ENOTDIR,
+        None => -errno::EBADF,
     }
 }
 
