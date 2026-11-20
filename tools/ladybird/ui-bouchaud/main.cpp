@@ -203,7 +203,7 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     Vector<ByteString> arguments;
     arguments.append("BouchaudBrowserHost");
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
-    if (StringView { env_ou("BOUCHAUD_SKIA_BACKEND", "cpu") } != "vulkan"sv)
+    if (std::strcmp(env_ou("BOUCHAUD_SKIA_BACKEND", "cpu"), "vulkan") != 0)
 #endif
         arguments.append("--force-cpu-painting");
     arguments.append("--force-fontconfig");
