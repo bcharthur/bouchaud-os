@@ -14,10 +14,18 @@ repetitions=$5
 accel=${BO_SMOKE_ACCEL:-tcg}
 timings=${BO_SMOKE_SKIA_TIMINGS:-0}
 compare_readback=${BO_SMOKE_SKIA_COMPARE_READBACK:-0}
+compare_submit=${BO_SMOKE_SKIA_COMPARE_SUBMIT:-0}
+if [[ $compare_readback == 1 && $compare_submit == 1 ]]; then
+    echo 'Sélectionner une seule comparaison Vulkan.' >&2
+    exit 2
+fi
 bras_pair=(cpu vulkan)
 if [[ $compare_readback == 1 ]]; then
     timings=1
     bras_pair=(vulkan-full vulkan-partial)
+elif [[ $compare_submit == 1 ]]; then
+    timings=1
+    bras_pair=(vulkan-explicit-submit vulkan-readback-submit)
 fi
 case "$accel" in
     tcg|kvm) ;;
@@ -56,6 +64,8 @@ for ((tour = 1; tour <= repetitions; tour++)); do
         backend=${essai%%-*}
         partial=0
         if [[ $essai == vulkan-partial ]]; then partial=1; fi
+        readback_submit=0
+        if [[ $essai == vulkan-readback-submit ]]; then readback_submit=1; fi
         dossier=$(printf '%s/%02d-%s' "$sortie" "$tour" "$essai")
         mkdir -- "$dossier"
         cp --reflink=auto -- "$boot" "$dossier/amorce.bin"
@@ -63,6 +73,7 @@ for ((tour = 1; tour <= repetitions; tour++)); do
         code=0
         BO_SMOKE_ACCEL="$accel" BO_SMOKE_AFFICHAGE=venus BO_SMOKE_SKIA_BACKEND="$backend" \
             BO_SMOKE_SKIA_TIMINGS="$timings" BO_SMOKE_SKIA_PARTIAL_READBACK="$partial" \
+            BO_SMOKE_SKIA_READBACK_SUBMIT="$readback_submit" \
             BO_SMOKE_VENUS_SYSROOT="$rootfs" BO_SMOKE_SUFFIXE="$suffixe" \
             tools/ci/run_ladybird_browser_host.sh "$dossier/amorce.bin" "$natif" \
             > "$dossier/smoke.log" 2>&1 || code=$?

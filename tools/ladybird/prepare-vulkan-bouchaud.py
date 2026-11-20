@@ -114,6 +114,8 @@ find_package(CURL REQUIRED)""",
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
     bool try_read_into_bitmap(Bitmap&, IntPoint source_position = {}, Optional<IntRect> destination = {}) const;
     Optional<IntRect> bouchaud_readback_damage;
+    bool bouchaud_bitmap_readback { false };
+    bool bouchaud_readback_succeeded { false };
 #endif""",
     )
     remplace(
@@ -173,6 +175,7 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         return Gfx::PaintingSurface::wrap_bitmap(*bitmap);
     // Chaque bitmap doit d'abord recevoir une image complète. Une erreur de
     // copie complète invalide la base jusqu'à la prochaine lecture réussie.
+    surface->bouchaud_bitmap_readback = true;
     surface->on_flush = [bitmap = move(bitmap), needs_full_readback = true](auto& surface) mutable {
         static bool const partial = getenv("BOUCHAUD_SKIA_PARTIAL_READBACK") != nullptr;
         auto const damage = surface.bouchaud_readback_damage;
@@ -184,6 +187,7 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
             && surface.try_read_into_bitmap(*bitmap, damage->location(), damage);
         bool const copied = copied_subset || surface.try_read_into_bitmap(*bitmap);
         needs_full_readback = !copied;
+        surface.bouchaud_readback_succeeded = copied;
         auto const copied_size = copied_subset ? damage->size() : bitmap->size();
         if (copied_subset) {
             static bool published_subset = false;
@@ -239,12 +243,21 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
 #endif""",
     )
 
+    remplace(
+        root, "Libraries/LibGfx/SkiaBackendContext.h",
+        "    void check_async_work_completion();",
+        """    void check_async_work_completion();
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    void finish_bouchaud_bitmap_readback() { perform_post_flush_cleanup(); }
+#endif""",
+    )
     player = "Libraries/LibWeb/Painting/DisplayListPlayerSkia.cpp"
     remplace(
         root, player, "#include <AK/TemporaryChange.h>",
         """#include <AK/TemporaryChange.h>
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
 #    include <AK/Array.h>
+#    include <AK/Optional.h>
 #    include <AK/StringBuilder.h>
 #    include <AK/Time.h>
 #    include <stdlib.h>
@@ -260,25 +273,48 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         """    if (auto context = surface.skia_backend_context()) {
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
         static bool const measure = getenv("BOUCHAUD_SKIA_TIMINGS") != nullptr;
-        if (measure) {
-            struct Samples {
-                Array<i64, 16> values {};
-                size_t count = 0;
+        struct Samples {
+            Array<i64, 16> values {};
+            size_t count = 0;
 
-                void record(char const* stage, i64 duration)
-                {
-                    values[count++] = duration;
-                    if (count != values.size())
-                        return;
-                    StringBuilder line;
-                    for (auto const value : values)
-                        line.appendff(" {}", value);
-                    dbgln("[LB:SKIA:GPU] stage={} wall_us{}", stage, line.string_view());
-                    count = 0;
+            void record(char const* stage, i64 duration)
+            {
+                values[count++] = duration;
+                if (count != values.size())
+                    return;
+                StringBuilder line;
+                for (auto const value : values)
+                    line.appendff(" {}", value);
+                dbgln("[LB:SKIA:GPU] stage={} wall_us{}", stage, line.string_view());
+                count = 0;
+            }
+        };
+        static thread_local Samples completions;
+        static thread_local Samples submissions;
+        static bool const use_readback_submission = getenv("BOUCHAUD_SKIA_READBACK_SUBMIT") != nullptr;
+        bool const readback_attempted = use_readback_submission && surface.bouchaud_bitmap_readback;
+        if (readback_attempted) {
+            // readPixels réussie rend les pixels disponibles dans le bitmap.
+            // Le rappel reste différé par le service Compositor.
+            auto const begin = measure ? Optional<MonotonicTime> { MonotonicTime::now() } : Optional<MonotonicTime> {};
+            surface.bouchaud_readback_succeeded = false;
+            surface.flush();
+            if (surface.bouchaud_readback_succeeded) {
+                context->finish_bouchaud_bitmap_readback();
+                if (begin.has_value()) {
+                    submissions.record("flush_submit", 0);
+                    completions.record("completion_observed", (MonotonicTime::now() - *begin).to_microseconds());
                 }
-            };
-            static thread_local Samples completions;
-            static thread_local Samples submissions;
+                static bool announced = false;
+                if (!announced) {
+                    dbgln("[LB:SKIA] submit=readback");
+                    announced = true;
+                }
+                callback();
+                return;
+            }
+        }
+        if (measure) {
             auto const begin = MonotonicTime::now();
             context->flush_and_submit_async(&surface.sk_surface(), [begin, callback = move(callback)] {
                 completions.record("completion_observed", (MonotonicTime::now() - begin).to_microseconds());
@@ -288,6 +324,10 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         } else
 #endif
             context->flush_and_submit_async(&surface.sk_surface(), move(callback));
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        if (readback_attempted)
+            return;
+#endif
     } else {
         callback();
     }
