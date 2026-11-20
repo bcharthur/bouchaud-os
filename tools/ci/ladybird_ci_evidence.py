@@ -2,10 +2,9 @@
 import datetime
 import json
 import os
-import subprocess
 import time
 
-from ladybird_empreinte import empreinte, empreinte_vulkan
+from ladybird_empreinte import assure_commit, empreinte, empreinte_vulkan
 from ladybird_provenance import gh_api, gh_declenche
 
 DEPOT = os.environ["GITHUB_REPOSITORY"]
@@ -79,11 +78,18 @@ def duree(objet):
 def vulkan():
     workflow = "ladybird-vulkan-experimental.yml"
     identite = empreinte_vulkan()
-    historiques = attend(lambda: liste_vulkan_terminee(workflow))
+    ids = os.environ.get("VALIDATION_VULKAN", "")
+    if ids:
+        historiques = [attend(lambda: termine(int(rid))) for rid in ids.split(",")]
+    else:
+        historiques = attend(lambda: liste_vulkan_terminee(workflow))
     vus = set()
     for run in historiques:
         run_id = run["id"]
         assert run["conclusion"] == "success", run_id
+        assert run["path"] == ".github/workflows/ladybird-vulkan-experimental.yml", run_id
+        assure_commit(run["head_sha"])
+        assert empreinte_vulkan(run["head_sha"]) == identite, run_id
         build = next(j for j in jobs(run_id) if j["name"] == "build")
         etape = next(s for s in build["steps"] if s["name"] ==
                      "Construire le navigateur et son compositeur Vulkan")
@@ -106,8 +112,9 @@ def liste_vulkan_terminee(workflow):
 
 
 if __name__ == "__main__":
-    identite = empreinte()["empreinte"]
-    production_cpu("0" * 64, False, "skipped", succes=False)
-    production_cpu(identite, True, "success")
-    production_cpu(identite, False, "skipped")
+    if not os.environ.get("VALIDATION_VULKAN"):
+        identite = empreinte()["empreinte"]
+        production_cpu("0" * 64, False, "skipped", succes=False)
+        production_cpu(identite, True, "success")
+        production_cpu(identite, False, "skipped")
     vulkan()

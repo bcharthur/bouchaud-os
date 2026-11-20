@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Execute qualification without changing production verdicts
         env:
+          VALIDATION_VULKAN: "44761656586,44762044028"
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
