@@ -66,8 +66,9 @@ for ((tour = 1; tour <= repetitions; tour++)); do
             etat=echec
             echec=1
         fi
-        if [[ $timings == 1 ]] && ! python3 tools/ci/bench_ladybird_readback.py             --exige "$backend" "$dossier/serie-browser-host${suffixe}.log" > "$dossier/timings.json"; then
-            etat=mesures-incompletes
+        if [[ $timings == 1 ]] && ! python3 tools/ci/bench_ladybird_readback.py \
+            --exige "$backend" "$dossier/serie-browser-host${suffixe}.log" > "$dossier/timings.json"; then
+            if [[ $etat == ok ]]; then etat=mesures-incompletes; fi
             echec=1
         fi
         if ! identite | cmp -s "$sortie/entrees.sha256" -; then
