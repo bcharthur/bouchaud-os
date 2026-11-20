@@ -241,6 +241,10 @@ def decide(palier, courant_id, empreinte_courante, liste_artefacts, api, emprein
     return {"mode": "construit", "source_run": "", "raison": f"{raison} : repli build dans le run"}
 
 
+class AucuneBrancheCompatible(RuntimeError):
+    """Les branches sont lisibles, mais ne portent pas les entrées demandées."""
+
+
 class AttenteEchec(RuntimeError):
     """Fin d'attente sans artefact : plus de production, ou delai depasse."""
 
@@ -356,7 +360,18 @@ def selectionne_ref_production(api, refs, empreinte, empreinte_de):
         if observee == empreinte:
             return ref
         raisons.append(f"{ref}@{sha}={observee}")
-    raise AttenteEchec(f"aucune branche ne porte l'empreinte {empreinte} ({', '.join(raisons)})")
+    raise AucuneBrancheCompatible(f"aucune branche ne porte l'empreinte {empreinte} ({', '.join(raisons)})")
+
+
+def fusion_pr_verifiee(env, courant, git):
+    if env.get("GITHUB_EVENT_NAME") != "pull_request" or not env.get("GITHUB_EVENT_PATH"):
+        return False
+    with open(env["GITHUB_EVENT_PATH"], encoding="utf-8") as evenement:
+        pr = json.load(evenement)["pull_request"]
+    if env.get("GITHUB_SHA") != courant:
+        return False
+    parents = git("show", "-s", "--format=%P", courant).decode().split()
+    return parents == [pr["base"]["sha"], pr["head"]["sha"]]
 
 
 def gh_declenche(depot, ref, empreinte, reconstruire):
@@ -455,6 +470,12 @@ def main(argv=None) -> int:
     try:
         d = decide(palier, courant_id, courant["empreinte"], liste_artefacts(api), api, empreinte_de, depot,
                    reconstruire=reconstruire, depuis=depuis, declenche=declenche)
+    except AucuneBrancheCompatible as exc:
+        if not fusion_pr_verifiee(env, courant["commit"], le.git):
+            print(f"LADYBIRD_PROVENANCE_ECHEC {exc}")
+            return 1
+        d = {"mode": "construit", "source_run": "",
+             "raison": "entrées propres au commit de fusion PR vérifié"}
     except Exception as exc:
         print(f"LADYBIRD_PROVENANCE_ECHEC {type(exc).__name__}: {exc}")
         return 1
