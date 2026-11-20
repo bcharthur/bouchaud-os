@@ -195,6 +195,61 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
     };""",
     )
 
+    player = "Libraries/LibWeb/Painting/DisplayListPlayerSkia.cpp"
+    remplace(
+        root, player, "#include <AK/TemporaryChange.h>",
+        """#include <AK/TemporaryChange.h>
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+#    include <AK/Array.h>
+#    include <AK/StringBuilder.h>
+#    include <AK/Time.h>
+#    include <stdlib.h>
+#endif""",
+    )
+    remplace(
+        root, player,
+        """    if (auto context = surface.skia_backend_context())
+        context->flush_and_submit_async(&surface.sk_surface(), move(callback));
+    else
+        callback();
+    surface.flush();""",
+        """    if (auto context = surface.skia_backend_context()) {
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        static bool const measure = getenv("BOUCHAUD_SKIA_TIMINGS") != nullptr;
+        if (measure) {
+            struct Samples {
+                Array<i64, 16> values {};
+                size_t count = 0;
+
+                void record(char const* stage, i64 duration)
+                {
+                    values[count++] = duration;
+                    if (count != values.size())
+                        return;
+                    StringBuilder line;
+                    for (auto const value : values)
+                        line.appendff(" {}", value);
+                    dbgln("[LB:SKIA:GPU] stage={} wall_us{}", stage, line.string_view());
+                    count = 0;
+                }
+            };
+            static thread_local Samples completions;
+            static thread_local Samples submissions;
+            auto const begin = MonotonicTime::now();
+            context->flush_and_submit_async(&surface.sk_surface(), [begin, callback = move(callback)] {
+                completions.record("completion_observed", (MonotonicTime::now() - begin).to_microseconds());
+                callback();
+            });
+            submissions.record("flush_submit", (MonotonicTime::now() - begin).to_microseconds());
+        } else
+#endif
+            context->flush_and_submit_async(&surface.sk_surface(), move(callback));
+    } else {
+        callback();
+    }
+    surface.flush();""",
+    )
+
 
 if __name__ == "__main__":
     main()
