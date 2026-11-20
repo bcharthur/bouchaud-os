@@ -183,11 +183,22 @@ class ProductionTests(unittest.TestCase):
         d = decide([], Api({}), {}, palier="qualification", declenche=dec)
         self.assertEqual((d["mode"], dec.appels), ("attendu", 1))
 
-    def test_declenchement_impossible_repli_build_dans_le_run(self):
-        for dec in (Declencheur(RuntimeError("HTTP 403")), None):
-            with self.subTest(dec=dec):
-                d = decide([], Api({}), {}, declenche=dec)
-                self.assertEqual(d["mode"], "construit")
+    def test_erreur_de_dispatch_sans_build_de_repli(self):
+        with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+            decide([], Api({}), {}, declenche=Declencheur(RuntimeError("HTTP 403")))
+
+    def test_fork_sans_dispatch_conserve_le_build_local(self):
+        self.assertEqual(decide([], Api({}), {}, declenche=None)["mode"], "construit")
+
+    def test_ref_production_selectionne_une_branche_aux_entrees_identiques(self):
+        def api(path):
+            refs = {"branches/topic%2Fgpu": sha(1), "branches/main": sha(2)}
+            return {"commit": {"sha": refs[path]}}
+
+        empreintes = {sha(1): AUTRE, sha(2): E}
+        self.assertEqual(lp.selectionne_ref_production(api, ("topic/gpu", "main"), E, empreintes.get), "main")
+        with self.assertRaisesRegex(lp.AttenteEchec, "aucune branche"):
+            lp.selectionne_ref_production(api, ("topic/gpu",), E, empreintes.get)
 
     def test_reconstruire_ignore_tout_artefact_et_toute_production_anterieure(self):
         dec = Declencheur()
