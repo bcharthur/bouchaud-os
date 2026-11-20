@@ -201,8 +201,10 @@ def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "", tro
     if ('#[cfg(feature = "banc-gpu-venus")]' not in unmap
             or "mappe_reponse_venus(false)" not in unmap or "mappe_memoire_venus(false, 0)" not in unmap
             or "requete == &reponse[..n_reponse] || requete == &memoire[..n_memoire]" not in unmap
+            or "(PREMIER_GEM_VENUS..PREMIER_GEM_VENUS + NOMBRE_GEMS_VENUS as u32).contains(&id)" not in unmap
+            or "&& requete == &gem[..n_gem]" not in unmap
             or not re.search(r'cfg\(not\(feature = "banc-gpu-venus"\)\)\]\s*\{\s*let _ = requete;\s*false', unmap)):
-        fautes.append("virtio_gpu_3d.rs : seule la correspondance exacte aux deux commandes UNMAP du banc est admise.")
+        fautes.append("virtio_gpu_3d.rs : seules les requêtes UNMAP exactes des ressources HOST3D du banc sont admises.")
     if c.count(POSE) != 1 or i_sonnette < 0 or i_pose > i_sonnette:
         fautes.append("virtio_gpu.rs : une commande part sans barriere (VIRTIO_GPU_FLAG_FENCE posee apres la sonnette ou absente).")
     if s.count(SONNETTE) != 1 or SONNETTE not in c:
@@ -312,6 +314,9 @@ def main() -> int:
             print(f"virtio-PCI : le test negatif {n} ne rougit pas -- garde inoperant")
             return 1
     autres = [
+        ("virtio_gpu_3d.rs (UNMAP hors du segment GEM)", lambda: verifie(s, readme, banc, cargo, flux,
+            trois_d.replace("(PREMIER_GEM_VENUS..PREMIER_GEM_VENUS + NOMBRE_GEMS_VENUS as u32).contains(&id)",
+                            "true", 1))),
         ("virtio_gpu_3d.rs (BLOB retenu)", lambda: verifie(s, readme, banc, cargo, flux, trois_d.replace(
             "F_VERSION_1 | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }",
             "F_VERSION_1 | (offered & (1 << 3)) | if opt_in && offered & F_VIRGL != 0 { F_VIRGL } else { 0 }", 1))),

@@ -800,6 +800,18 @@ fn peuple_page_loader(
             stall_pf_phase(229, page);
             FaultOutcome::Resolved
         }
+        #[cfg(feature = "banc-gpu-venus")]
+        PromesseBacking::GemGpu { phys_base, mapping_start, .. } => {
+            let phys = phys_base + (page - mapping_start);
+            if p.space.map_foreign_accounted(
+                page, phys, effective.drapeaux, crate::kernel::vmm::ResidentKind::Device,
+            ) {
+                note.pose(crate::kernel::fautes::Categorie::Materiel);
+                FaultOutcome::Resolved
+            } else {
+                FaultOutcome::IoError
+            }
+        }
         PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
             let phys = phys_base.saturating_add(phys_offset)
                 .saturating_add(page.saturating_sub(mapping_start));

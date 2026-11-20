@@ -37,7 +37,7 @@ pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
 #[path = "virtio_gpu_venus.rs"]
 mod venus;
 #[cfg(feature = "banc-gpu-venus")]
-pub use venus::{cree_gem_venus, ferme_gem_venus, info_gem_venus, contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
+pub use venus::{host_visible_venus, BailGem, cree_gem_venus, ferme_gem_venus, info_gem_venus, mappe_gem_venus, offset_gem_venus, contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
     initialise_contexte_venus, relis_memoire_venus, soumets_venus, version_vulkan_banc,
     OCTETS_REPONSE_VENUS, TAILLE_RELECTURE_VENUS};
 

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -136,6 +137,9 @@ struct drm_gem_close { uint32_t bo, pad; };
 #define DRM_CREATE_BLOB _IOWR('d', 0x4a, struct drm_blob)
 #define DRM_RESOURCE_INFO _IOWR('d', 0x45, struct drm_resource_info)
 #define DRM_GEM_CLOSE _IOW('d', 0x09, struct drm_gem_close)
+struct drm_virtgpu_map { uint64_t offset; uint32_t handle, pad; };
+#define DRM_MAP _IOWR('d', 0x41, struct drm_virtgpu_map)
+
 
 static int verifie_gem(int fd, const struct drm_blob *blob)
 {
@@ -168,6 +172,89 @@ static int verifie_gems(int fd)
     return 0;
 }
 
+static int verifie_mmap_gem(int fd)
+{
+    const size_t page = 4096;
+    struct drm_blob blob = {.mem = 2, .flags = 1, .taille = 3 * page};
+    if (ioctl(fd, DRM_CREATE_BLOB, &blob)) return 1;
+    struct drm_virtgpu_map map = {.handle = blob.bo};
+    if (ioctl(fd, DRM_MAP, &map) || !map.offset || map.offset % page) return 2;
+    if (mmap(NULL, 4 * page, PROT_READ, MAP_SHARED, fd, map.offset) != MAP_FAILED
+        || errno != EINVAL) return 3;
+    if (mmap(NULL, page, PROT_READ, MAP_SHARED, fd, map.offset + page) != MAP_FAILED
+        || errno != EINVAL) return 4;
+    uint8_t *p = mmap(NULL, 3 * page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+    if (p == MAP_FAILED) return 5;
+    p[0] = 19;
+    p[page] = 23;
+    p[2 * page] = 29;
+    if (mprotect(p, page, PROT_READ | PROT_EXEC) != -1 || errno != EACCES
+        || mprotect(p, page, PROT_READ)) return 6;
+
+    int controle[2], retour[2];
+    if (pipe(controle) || pipe(retour)) return 7;
+    pid_t enfant = fork();
+    if (enfant < 0) return 8;
+    if (enfant == 0) {
+        close(controle[1]);
+        close(retour[0]);
+        close(fd);
+        char signal;
+        if (read(controle[0], &signal, 1) != 1 || p[0] != 19 || p[page] != 23 || p[2 * page] != 29)
+            _exit(1);
+        p[2 * page] = 31;
+        if (write(retour[1], "!", 1) != 1) _exit(2);
+        execl("/version", "version", "fin", (char *)NULL);
+        _exit(3);
+    }
+    close(controle[0]);
+    close(retour[1]);
+    struct drm_gem_close ferme = {.bo = blob.bo};
+    int valide = !ioctl(fd, DRM_GEM_CLOSE, &ferme)
+        && ioctl(fd, DRM_MAP, &map) == -1 && errno == ENOENT
+        && !munmap(p + page, page)
+        && mmap(p, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0) == p;
+    struct drm_blob autre = {.mem = 2, .flags = 1, .taille = page};
+    valide &= !ioctl(fd, DRM_CREATE_BLOB, &autre) && autre.res != blob.res;
+    char signal;
+    int statut;
+    if (write(controle[1], "!", 1) != 1 || read(retour[0], &signal, 1) != 1
+        || waitpid(enfant, &statut, 0) != enfant || !WIFEXITED(statut) || WEXITSTATUS(statut)
+        || !valide || p[0] != 0 || p[2 * page] != 31) return 9;
+    close(controle[1]);
+    close(retour[0]);
+    if (munmap(p, 3 * page)) return 10;
+
+    struct drm_blob suivant = {.mem = 2, .flags = 1, .taille = page};
+    if (ioctl(fd, DRM_CREATE_BLOB, &suivant) || suivant.res != blob.res || suivant.bo == blob.bo)
+        return 11;
+    ferme.bo = autre.bo;
+    if (ioctl(fd, DRM_GEM_CLOSE, &ferme)) return 12;
+    ferme.bo = suivant.bo;
+    if (ioctl(fd, DRM_GEM_CLOSE, &ferme)) return 13;
+    puts("VIRTGPU_VENUS_DRM_MMAP_OK");
+    return 0;
+}
+
+static int relit_vkmemoire_gem(int fd, uint64_t memoire, uint32_t motif)
+{
+    const uint64_t octets = 4096;
+    struct drm_blob blob = {.mem = 2, .flags = 1, .taille = octets, .id = memoire};
+    if (ioctl(fd, DRM_CREATE_BLOB, &blob) || verifie_gem(fd, &blob)) return 1;
+    struct drm_virtgpu_map map = {.handle = blob.bo};
+    if (ioctl(fd, DRM_MAP, &map)) return 2;
+    const uint32_t *mots = mmap(NULL, octets, PROT_READ, MAP_SHARED, fd, map.offset);
+    if (mots == MAP_FAILED) return 3;
+    int exact = 1;
+    for (size_t i = 0; i < octets / sizeof(*mots); i++)
+        exact &= mots[i] == motif;
+    if (munmap((void *)mots, octets)) return 4;
+    struct drm_gem_close req = {.bo = blob.bo};
+    if (ioctl(fd, DRM_GEM_CLOSE, &req) || !exact) return 5;
+    printf("VIRTGPU_VENUS_VKFILL_MMAP_OK octets=4096 motif=%08x\n", motif);
+    return 0;
+}
+
 static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus reponse)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = octets, .commande = (uintptr_t)flux, .fence = -1};
@@ -178,7 +265,7 @@ struct relecture { uint64_t id_memoire, destination; };
 #define RELIT_MEMOIRE _IOW('B', 0xae, struct relecture)
 
 static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
-                          uint32_t buffer, uint32_t besoin, uint32_t types, uint32_t motif)
+                          uint32_t buffer, uint32_t besoin, uint32_t types, uint32_t motif, int par_gem)
 {
     reponse_venus r;
     uint32_t proprietes[] = {179, 0, 0, 0, 8, 1, appareil, 0, 1, 0, 32, 0, 16, 0};
@@ -246,21 +333,26 @@ static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
     };
     if (execute(fd, attends, sizeof(attends), r) || r[0] != 39 || r[1]) return 13;
     puts("VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096");
-    uint32_t donnees[1024] = {0};
-    struct relecture relit = {MEMOIRE, 1};
-    if (!ioctl(fd, RELIT_MEMOIRE, &relit) || errno != EFAULT) return 16;
-    relit.destination = (uintptr_t)donnees;
-    if (ioctl(fd, RELIT_MEMOIRE, &relit)) {
-        perror("VENUS_RELIT_MEMOIRE");
-        return 17;
-    }
-    for (size_t i = 0; i < sizeof(donnees) / sizeof(donnees[0]); ++i) {
-        if (donnees[i] != motif) {
-            printf("VENUS_REMPLISSAGE indice=%zu lu=%08x attendu=%08x\n", i, donnees[i], motif);
-            return 18;
+    if (par_gem) {
+        int gem = relit_vkmemoire_gem(fd, MEMOIRE, motif);
+        if (gem) { printf("VIRTGPU_VENUS_VKFILL_MMAP_ECHEC etape=%d\n", gem); return 19; }
+    } else {
+        uint32_t donnees[1024] = {0};
+        struct relecture relit = {MEMOIRE, 1};
+        if (!ioctl(fd, RELIT_MEMOIRE, &relit) || errno != EFAULT) return 16;
+        relit.destination = (uintptr_t)donnees;
+        if (ioctl(fd, RELIT_MEMOIRE, &relit)) {
+            perror("VENUS_RELIT_MEMOIRE");
+            return 17;
         }
+        for (size_t i = 0; i < sizeof(donnees) / sizeof(donnees[0]); ++i) {
+            if (donnees[i] != motif) {
+                printf("VENUS_REMPLISSAGE indice=%zu lu=%08x attendu=%08x\n", i, donnees[i], motif);
+                return 18;
+            }
+        }
+        printf("VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096 motif=%08x\n", motif);
     }
-    printf("VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096 motif=%08x\n", motif);
     uint32_t detruit_fence[] = {179, 0, 0, 0, 36, 1, device, 0, FENCE, 0, 0, 0};
     if (execute(fd, detruit_fence, sizeof(detruit_fence), r) || r[0] != 36) return 14;
     uint32_t detruit_pool[] = {179, 0, 0, 0, 86, 1, device, 0, POOL, 0, 0, 0};
@@ -269,7 +361,7 @@ static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
     return 0;
 }
 
-static int verifie_buffer(int fd, uint32_t appareil)
+static int verifie_buffer(int fd, uint32_t appareil, int par_gem)
 {
     reponse_venus r;
     // Première famille du renderer de banc. Vérifier sa capacité avant
@@ -305,7 +397,7 @@ static int verifie_buffer(int fd, uint32_t appareil)
     if (execute(fd, besoins, sizeof(besoins), r) || r[0] != 30 || r[1] != 1
         || r[2] || r[3] < 4096 || r[4] || !r[5] || r[6] || !r[7])
         return 4;
-    int fill = remplit_buffer(fd, appareil, device, buffer, r[3], r[7], 0x5a174000 | appareil);
+    int fill = remplit_buffer(fd, appareil, device, buffer, r[3], r[7], 0x5a174000 | appareil, par_gem);
     if (fill) {
         printf("VIRTGPU_VENUS_VKFILL_ECHEC etape=%d\n", fill);
         return 7;
@@ -320,7 +412,7 @@ static int verifie_buffer(int fd, uint32_t appareil)
     return 0;
 }
 
-static int verifie_instances(int fd)
+static int verifie_instances(int fd, int par_gem)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = 4, .commande = 1, .fence = -1};
     if (!ioctl(fd, DRM_EXECBUFFER, &req) || errno != EFAULT) return 1;
@@ -360,7 +452,7 @@ static int verifie_instances(int fd)
             || r[5] != 1 || r[6] || r[7] != appareil || r[8])
             return 7;
         printf("VIRTGPU_VENUS_APPAREILS compte=%" PRIu32 " handle=%" PRIu32 "\n", total, appareil);
-        int buffer = verifie_buffer(fd, appareil);
+        int buffer = verifie_buffer(fd, appareil, par_gem);
         if (buffer) {
             printf("VIRTGPU_VENUS_VKBUFFER_ECHEC etape=%d\n", buffer);
             return 8;
@@ -434,7 +526,7 @@ static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
 
 int main(int argc, char **argv)
 {
-    (void)argv;
+    if (argc == 2 && !strcmp(argv[1], "fin")) return 0;
     int fd = open("/dev/dri/renderD128", O_RDWR);
     int decouverte = verifie_decouverte_drm();
     if (decouverte) { printf("VIRTGPU_VENUS_DRM_DECOUVERTE_ECHEC etape=%d\n", decouverte); return 19; }
@@ -453,7 +545,12 @@ int main(int argc, char **argv)
     printf("VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=%" PRIu32 ".%" PRIu32 ".%" PRIu32 "\n",
            reference >> 22, (reference >> 12) & 0x3ff, reference & 0xfff);
     if (argc > 1) {
-        if (verifie_instances(fd)) return 16;
+        if (verifie_instances(fd, 0) || ioctl(fd, DEMAPPE)) return 16;
+        uint32_t api = 0;
+        if (ioctl(fd, VERSION_VENUS, &api) || api != reference || verifie_instances(fd, 1))
+            return 21;
+        int mapping = verifie_mmap_gem(fd);
+        if (mapping) { printf("VIRTGPU_VENUS_DRM_MMAP_ECHEC etape=%d\n", mapping); return 20; }
         int gem = verifie_gems(fd);
         if (gem) { printf("VIRTGPU_VENUS_DRM_GEM_ECHEC etape=%d\n", gem); return 18; }
         if (ioctl(fd, DEMAPPE)) {

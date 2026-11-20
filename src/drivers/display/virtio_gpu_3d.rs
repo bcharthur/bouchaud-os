@@ -132,8 +132,18 @@ pub fn blob_memoire_venus(ressource: u32, id_memoire: u64, octets: u32) -> [u8; 
 
 #[cfg(feature = "banc-gpu-venus")]
 pub fn mappe_memoire_venus(mappe: bool, offset: u64) -> ([u8; 40], usize) {
+    mappe_blob_venus(RESSOURCE_RELECTURE_VENUS, mappe, offset)
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+pub const PREMIER_GEM_VENUS: u32 = 0xb110;
+#[cfg(feature = "banc-gpu-venus")]
+pub const NOMBRE_GEMS_VENUS: usize = 8;
+
+#[cfg(feature = "banc-gpu-venus")]
+pub fn mappe_blob_venus(id: u32, mappe: bool, offset: u64) -> ([u8; 40], usize) {
     let (mut q, n) = mappe_reponse_venus(mappe);
-    put32(&mut q, 24, RESSOURCE_RELECTURE_VENUS);
+    put32(&mut q, 24, id);
     if mappe { q[32..40].copy_from_slice(&offset.to_le_bytes()); }
     (q, n)
 }
@@ -146,7 +156,14 @@ pub fn unmap_host3d_qemu(requete: &[u8]) -> bool {
     {
         let (reponse, n_reponse) = mappe_reponse_venus(false);
         let (memoire, n_memoire) = mappe_memoire_venus(false, 0);
-        requete == &reponse[..n_reponse] || requete == &memoire[..n_memoire]
+        if requete == &reponse[..n_reponse] || requete == &memoire[..n_memoire] {
+            return true;
+        }
+        let Some(valeur) = requete.get(24..28) else { return false; };
+        let id = u32::from_le_bytes(valeur.try_into().unwrap());
+        let (gem, n_gem) = mappe_blob_venus(id, false, 0);
+        (PREMIER_GEM_VENUS..PREMIER_GEM_VENUS + NOMBRE_GEMS_VENUS as u32).contains(&id)
+            && requete == &gem[..n_gem]
     }
     #[cfg(not(feature = "banc-gpu-venus"))]
     {

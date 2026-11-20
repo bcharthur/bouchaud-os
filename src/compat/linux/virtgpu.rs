@@ -51,7 +51,7 @@ fn transfert(session: &Arc<()>, charge: bool, id: u32, region: Option<RegionRend
     if charge || user_write(adresse, &octets) { 0 } else { -errno::EFAULT }
 }
 
-fn erreur(e: ErreurRendu) -> i64 {
+pub(super) fn erreur(e: ErreurRendu) -> i64 {
     -(match e {
         ErreurRendu::Indisponible => errno::ENODEV,
         ErreurRendu::Plein => errno::ENOMEM,
@@ -99,9 +99,13 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
                 1 | 2 => 1u64, // matériel virtuel 3D et interrogation des capsets
                 #[cfg(feature = "banc-gpu-venus")]
                 6 => virtio_gpu::contexte_venus_disponible() as u64,
-                3..=5 | 8 => 0,
+                #[cfg(feature = "banc-gpu-venus")]
+                3 | 4 => virtio_gpu::host_visible_venus() as u64,
+                #[cfg(feature = "banc-gpu-venus")]
+                9 => if virtio_gpu::host_visible_venus() { crate::kernel::vmm::PAGE_SIZE } else { 0 },
+                5 | 8 => 0, // cross-device, nom
                 #[cfg(not(feature = "banc-gpu-venus"))]
-                6 => 0, // blob, host-visible, cross-device, context-init, nom
+                3 | 4 | 6 => 0, // blob, host-visible, context-init
                 7 => masque, // les seuls capsets lisibles par cette interface
                 _ => return -errno::EINVAL,
             };
@@ -187,6 +191,17 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             };
             virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
                 .map_or_else(erreur, |()| 0)
+        }
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc010_6441 => {
+            let Some(mut buf) = user_read(arg, 16) else { return -errno::EFAULT; };
+            if mot(&buf, 12) != 0 { return -errno::EINVAL; }
+            let offset = match virtio_gpu::offset_gem_venus(session, mot(&buf, 8)) {
+                Ok(offset) => offset,
+                Err(e) => return erreur(e),
+            };
+            buf[..8].copy_from_slice(&offset.to_le_bytes());
+            if user_write(arg, &buf) { 0 } else { -errno::EFAULT }
         }
         // DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB. HOST3D mappable sans
         // commandes attachées, partage PRIME ou pages invitées.

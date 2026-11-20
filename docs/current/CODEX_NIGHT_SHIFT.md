@@ -114,3 +114,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 
 - Le mode `BO_VENUS_LOADER_SYSROOT` prend un dossier d'invité contenant `vulkan-probe`, `venus.json`, `lib/libvulkan.so.1`, l'ICD Mesa et les dépendances de son ELF. Il exige la découverte DRM et deux comparaisons complètes. Rejouer avec `DISPLAY=:N BO_VENUS_LOADER_SYSROOT=/chemin/guest tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`.
 - La sonde publique passe les deux motifs en contrôle Linux hôte avec Lavapipe. Dans Bouchaud OS sous QEMU 11.2 RC, le verdict reste en échec à vkEnumeratePhysicalDevices (paramètre DRM 3 absent). Le banc du transport filaire reste vert. Rootfs de reproduction local dans `/workspace/work/p10/resume-guest-discovery/guest`.
+
+## `c6f61849` — DRM MAP et mmap des blobs HOST3D
+
+- Le BAR est borné par slot. MAP expose un offset par handle. mmap associe le contexte et son GEM à un bail d'espace d'adressage. Les fragments et retraits concurrents gardent leurs références jusqu'à l'ACK TLB, y compris avec fork et exec. GEM_CLOSE masque le handle immédiatement et le pilote ne recycle le slot qu'après la dernière référence puis UNMAP et UNREF confirmé. PROT_EXEC et l'agrandissement mremap du mapping sont refusés.
+- QEMU 11.1.3 et 11.2 RC, TCG/Lavapipe. Deux motifs vérifiés intégralement par mmap DRM, en plus des deux cycles privés conservés. Tests positifs MAP_SHARED après fermeture GEM, mprotect read-only, fork, exec, munmap partiel et remplacement MAP_FIXED. Tests négatifs taille, offset, exécution et handle expiré. Garde VirtIO à 36 mutations.
+- Le Vulkan Loader avec Mesa franchit maintenant RESOURCE_BLOB et HOST_VISIBLE. Le point bloquant suivant observé est `failed to initialize context: Invalid argument` sur le CONTEXT_INIT Mesa à 64 anneaux.
