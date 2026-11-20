@@ -412,7 +412,8 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             let len = core::cmp::min(count, state.buffer.len());
             let data: Vec<u8> = state.buffer.drain(..len).collect();
             drop(state);
-            crate::kernel::fd::notify_readiness(); // le tube redevient inscriptible
+            // BOUCHAUD_REVEIL_CIBLE_V1 : les ecrivains de CE tube seulement.
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&shared)); // le tube redevient inscriptible
             if user_write(buffer, &data) {
                 len as i64
             } else {
@@ -500,7 +501,7 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             let len = core::cmp::min(count, guard.octets.len());
             let data: Vec<u8> = guard.octets.drain(..len).collect();
             drop(guard);
-            crate::kernel::fd::notify_readiness(); // le pair peut de nouveau ecrire
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&inbox)); // le pair peut de nouveau ecrire
             if user_write(buffer, &data) {
                 len as i64
             } else {
@@ -773,7 +774,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 Ok(ecrits) => ecrits,
                 Err(erreur) => return erreur,
             };
-            crate::kernel::fd::notify_readiness();
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&shared));
             ecrits as i64
         }
         FdKind::EventFd(state) => {
@@ -788,7 +789,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 return -errno::EINVAL;
             }
             state.lock().counter += value;
-            crate::kernel::fd::notify_readiness();
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&state));
             8
         }
         FdKind::TimerFd(_) => -errno::EINVAL,
@@ -821,7 +822,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
                 let canal = outbox.lock();
                 (ecrits != 0 && canal.reveille_compositeur, ecrits != 0 && canal.reveille_natif)
             };
-            crate::kernel::fd::notify_readiness();
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&outbox));
             if natif {
                 crate::kernel::native::activite::publie();
             }
@@ -3010,6 +3011,33 @@ fn attends_place<F: Fn() -> Capacite>(etat: F, non_bloquant: bool) -> Result<usi
 /// de l'`Arc<Process>` (BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1) : `poll` en
 /// interroge chaque descripteur quatre fois par passe. `None` : fil noyau,
 /// ou descripteur absent.
+/// BOUCHAUD_REVEIL_CIBLE_V1 : les objets dont l'etat decide de la
+/// disponibilite de `fd`. Un descripteur sans objet nommable s'abonne a tout
+/// (`CLE_TOUT`), comme avant ce mecanisme.
+fn cles_du_fd(fd: i32, cles: &mut Vec<usize>) {
+    use crate::kernel::fd::{cle_de, CLE_TOUT};
+    match genre_du_fd(fd) {
+        // Ferme ou invalide : `poll` le rend tout de suite (POLLNVAL/EBADF).
+        None => {}
+        Some(FdKind::Pipe(etat, _)) => cles.push(cle_de(&etat)),
+        // Lisible par le canal entrant, inscriptible par le canal sortant.
+        Some(FdKind::SocketPair(entree, sortie)) => {
+            cles.push(cle_de(&entree));
+            cles.push(cle_de(&sortie));
+        }
+        Some(FdKind::EventFd(etat)) => cles.push(cle_de(&etat)),
+        // Le temps decide (echeance de l'attente) ; une cle propre evite
+        // l'abonnement universel.
+        Some(FdKind::TimerFd(etat)) => cles.push(cle_de(&etat)),
+        // Pompe par l'echeance de 2 ms (`readiness_deadline_ns`) : la pile
+        // reseau n'avance que lorsqu'on l'interroge. Une cle propre.
+        Some(FdKind::Socket(etat)) => cles.push(cle_de(&etat)),
+        // Toujours prets.
+        Some(FdKind::File(_)) | Some(FdKind::Dir(_)) => {}
+        _ => cles.push(CLE_TOUT),
+    }
+}
+
 fn genre_du_fd(fd: i32) -> Option<FdKind> {
     task::avec_processus_courant(|process| process.files.lock().get(fd).map(|desc| desc.kind.clone())).flatten()
 }
@@ -3154,10 +3182,19 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
 
     task::poll_phase_set(task::POLL_ENTREE, count as u64);
     let _signalable = task::AttenteSignalable::entre();
+    let mut apres_reveil = false;
     loop {
-        // Armer AVANT le scan ferme la course producteur entre « pas pret » et
-        // parking: la generation aura change et wait_readiness ne dormira pas.
-        let ticket = crate::kernel::fd::readiness_ticket();
+        // BOUCHAUD_REVEIL_CIBLE_V1 : s'abonner aux objets surveilles, PUIS
+        // prendre le ticket, PUIS balayer : un producteur qui passe entre le
+        // balayage et le parking change la generation de NOTRE file.
+        let mut cles = Vec::new();
+        for index in 0..count {
+            if let Some(octets) = user_read(fds + (index * 8) as u64, 4) {
+                cles_du_fd(i32::from_le_bytes([octets[0], octets[1], octets[2], octets[3]]), &mut cles);
+            }
+        }
+        let abonnement = crate::kernel::fd::Abonnement::new(cles);
+        let ticket = abonnement.ticket();
         let mut attente_ns = deadline_ns;
         let mut ready = 0i64;
         for index in 0..count {
@@ -3208,6 +3245,9 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             task::poll_phase_set(task::POLL_HORS, 0);
             return ready;
         }
+        if apres_reveil {
+            crate::kernel::fd::Abonnement::reveil_a_vide();
+        }
         // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 : rien de pret, un signal a
         // livrer -> EINTR, et `deliver_pending` lancera son gestionnaire au
         // retour. Sans cela, une boucle d'evenements au repos en `poll(-1)`
@@ -3218,7 +3258,8 @@ pub fn sys_poll(fds: u64, count: usize, timeout_ms: i32) -> i64 {
             return -errno::EINTR;
         }
         task::poll_phase_set(task::POLL_ATTENTE, 0);
-        crate::kernel::fd::wait_readiness(ticket, attente_ns);
+        abonnement.attends(ticket, attente_ns);
+        apres_reveil = true;
         task::poll_phase_set(task::POLL_REVEIL, 0);
     }
 }
@@ -3241,39 +3282,54 @@ pub fn sys_select(
     };
 
     let _signalable = task::AttenteSignalable::entre();
+    // L'ensemble DEMANDE, lu une fois. Il etait reecrit avec le resultat a
+    // chaque tour, meme sans rien rendre : apres un reveil a vide, `select`
+    // n'attendait plus sur rien jusqu'a son echeance.
+    let words = if read_set != 0 { (nfds.max(0) as usize).div_ceil(64) } else { 0 };
+    let demandes: Vec<u64> = (0..words)
+        .map(|word| user_read_u64(read_set + (word * 8) as u64).unwrap_or(0))
+        .collect();
     loop {
-        let ticket = crate::kernel::fd::readiness_ticket();
+        let mut cles = Vec::new();
+        for (word, bits) in demandes.iter().enumerate() {
+            for bit in 0..64 {
+                let fd = (word * 64 + bit) as i32;
+                if fd < nfds && bits & (1 << bit) != 0 {
+                    cles_du_fd(fd, &mut cles);
+                }
+            }
+        }
+        let abonnement = crate::kernel::fd::Abonnement::new(cles);
+        let ticket = abonnement.ticket();
         let mut attente_ns = deadline_ns;
         let mut ready = 0i64;
-        if read_set != 0 {
-            let words = (nfds.max(0) as usize).div_ceil(64);
-            for word in 0..words {
-                let bits = user_read_u64(read_set + (word * 8) as u64).unwrap_or(0);
-                let mut result = 0u64;
-                for bit in 0..64 {
-                    let fd = (word * 64 + bit) as i32;
-                    if fd >= nfds {
-                        break;
-                    }
-                    if bits & (1 << bit) != 0 && readable(fd) {
-                        result |= 1 << bit;
-                        ready += 1;
-                    }
-                    if bits & (1 << bit) != 0 {
-                        attente_ns = plus_proche(attente_ns, readiness_deadline_ns(fd));
-                    }
+        let mut resultats = alloc::vec![0u64; words];
+        for (word, bits) in demandes.iter().enumerate() {
+            for bit in 0..64 {
+                let fd = (word * 64 + bit) as i32;
+                if fd >= nfds {
+                    break;
                 }
-                user_write(read_set + (word * 8) as u64, &result.to_le_bytes());
+                if bits & (1 << bit) != 0 && readable(fd) {
+                    resultats[word] |= 1 << bit;
+                    ready += 1;
+                }
+                if bits & (1 << bit) != 0 {
+                    attente_ns = plus_proche(attente_ns, readiness_deadline_ns(fd));
+                }
             }
         }
         if ready > 0 || deadline_ns.map_or(false, |d| crate::kernel::timer::monotonic_ns() >= d) {
+            for (word, resultat) in resultats.iter().enumerate() {
+                user_write(read_set + (word * 8) as u64, &resultat.to_le_bytes());
+            }
             return ready;
         }
         // BOUCHAUD_SIGNAL_INTERROMPT_POLL_V1 (voir `sys_poll`).
         if task::signal_interrompt_attente() {
             return -errno::EINTR;
         }
-        crate::kernel::fd::wait_readiness(ticket, attente_ns);
+        abonnement.attends(ticket, attente_ns);
     }
 }
 
@@ -3309,9 +3365,12 @@ pub fn sys_epoll_ctl(epfd: i32, operation: u32, fd: i32, event: u64) -> i64 {
                 None => return -errno::EFAULT,
             };
             let data = user_read_u64(event + 4).unwrap_or(0);
-            let mut list = list.lock();
-            list.retain(|entry| entry.0 != fd);
-            list.push((fd, events, data));
+            {
+                let mut entrees = list.lock();
+                entrees.retain(|entry| entry.0 != fd);
+                entrees.push((fd, events, data));
+            }
+            crate::kernel::fd::notifie_cle(crate::kernel::fd::cle_de(&list));
             0
         }
         EPOLL_CTL_DEL => {
@@ -3342,15 +3401,33 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
 
     let _signalable = task::AttenteSignalable::entre();
     loop {
-        let ticket = crate::kernel::fd::readiness_ticket();
-        let mut attente_ns = deadline_ns;
-        let mut written = 0usize;
+        // La liste elle-meme est un objet : `epoll_ctl` la notifie, pour
+        // qu'un descripteur ajoute pendant l'attente soit vu.
+        //
         // BOUCHAUD_EPOLL_SANS_VERROU_TENU_V1 : la liste est COPIEE, puis le
         // verrou rendu, avant d'evaluer. `readable` peut prendre le verrou
         // d'un objet -- et, pour un socket, se garer -- et `user_write` peut
         // faire une faute de page : ni l'un ni l'autre sous un SpinLock.
-        // Sous le gros verrou de l'aiguilleur, ce defaut restait masque.
-        let entrees: Vec<(i32, u32, u64)> = list.lock().clone();
+        //
+        // Revue #344 : la copie qui fixe l'abonnement est celle qu'on
+        // balaie. Un `epoll_ctl` passe entre la copie et l'inscription ne
+        // trouvait aucun abonne, et le descripteur ajoute n'etait pas dans
+        // l'abonnement : relire APRES l'inscription, et recommencer si la
+        // liste a change. Apres l'inscription, tout `epoll_ctl` nous reveille.
+        let (abonnement, ticket, entrees) = loop {
+            let copie: Vec<(i32, u32, u64)> = list.lock().clone();
+            let mut cles = alloc::vec![crate::kernel::fd::cle_de(&list)];
+            for &(fd, _, _) in copie.iter() {
+                cles_du_fd(fd, &mut cles);
+            }
+            let abonnement = crate::kernel::fd::Abonnement::new(cles);
+            let ticket = abonnement.ticket();
+            if *list.lock() == copie {
+                break (abonnement, ticket, copie);
+            }
+        };
+        let mut attente_ns = deadline_ns;
+        let mut written = 0usize;
         for &(fd, wanted, data) in entrees.iter() {
             if written >= max {
                 break;
@@ -3378,7 +3455,7 @@ pub fn sys_epoll_wait(epfd: i32, events: u64, max: usize, timeout_ms: i32) -> i6
         if task::signal_interrompt_attente() {
             return -errno::EINTR;
         }
-        crate::kernel::fd::wait_readiness(ticket, attente_ns);
+        abonnement.attends(ticket, attente_ns);
     }
 }
 
