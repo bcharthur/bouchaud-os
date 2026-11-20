@@ -240,3 +240,20 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Audit mémoire et transport. Les clones d'espace conservent le bail GEM. Le retrait de VMA conserve une référence jusqu'à l'acquittement du TLB. Une fermeture GEM retire le handle avant de recycler le slot. Un résultat matériel incertain conserve la ressource en quarantaine. L'export sync_file intervient après acquittement VirtIO. Les bancs précédents couvrent fermeture, fork, remplacement et mmap partiels, deux propriétaires, fences étrangères et pannes de file. La fermeture pendant une vraie commande en vol et le repli du binaire dynamique restent à qualifier.
 - Les simulations `git merge-tree --write-tree` avec les têtes #344 `8440efd7` et #345 `6a214d09` passent. L'intégration comportementale avec des têtes combinées reste ouverte. La PR complète touche aussi le chemin VirtIO de production. Pour livrer un socle stable indépendamment, préparer une série distincte et faire repasser la CI CPU, DMA, composition et repli sur le diff réduit.
 - Le lanceur A/B fixe maintenant l'accélérateur explicitement, TCG par défaut. `BO_SMOKE_ACCEL=kvm` requiert `/dev/kvm` accessible et n'a pas de repli automatique. Six bras simulés par mode confirment l'alternance et la propagation. La VM de qualification n'expose ni `/dev/kvm` ni `/dev/dri`. Aucun résultat HTML ou A/B mesuré dans ce passage.
+
+## Reproduire le cache zlib d’ANGLE
+
+`tools/ci/prepare_angle_zlib_cache.sh` fetch le commit épinglé, vérifie les
+objets Git et génère l’archive avec le même `git archive` que vcpkg. En cas
+d’accès refusé depuis la machine de build, exécuter cet outil depuis une
+machine ayant accès à la source officielle, avec le même checkout du port,
+puis transférer `angle-4028ebf8710ee39d2286cb0f847f9b95c59f84d8.tar.gz` et
+vérifier le SHA-256 imprimé avant de le placer dans
+`third_party/vcpkg-downloads`. On peut aussi passer un dépôt Git local
+contenant le commit officiel comme premier argument. L’outil refuse un
+cache existant différent.
+
+Exercé avec une fixture Git, avec comparaison octet à octet contre
+`git archive`, réexécution et refus d’un cache différent. Le dépôt avec
+une mauvaise révision a été rejeté par la version épinglée. L’accès
+effectif à la source Chromium reste refusé depuis le Cloud.
