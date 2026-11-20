@@ -625,6 +625,7 @@ struct ImagePage {
 struct State {
     BouchaudTransport::Sortie<> sortie_gui;
     bool trame_a_republier { false };
+    bool fermeture_volontaire { false };
     // Descripteurs et geometrie fournis par le gestionnaire de fenetres.
     int gui_fd { -1 };
     int surface_fd { -1 };

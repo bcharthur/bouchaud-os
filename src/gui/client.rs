@@ -80,6 +80,7 @@ pub struct Client {
     serie: u32,
     verdict: VerdictProtocole,
     pub fermeture_demandee: bool,
+    fermeture_volontaire: bool,
     pub trames: u64,
     pub octets_recus: u64,
     pub evenements_envoyes: u64,
@@ -361,6 +362,7 @@ impl Client {
             serie: 0,
             verdict: VerdictProtocole::neuf(),
             fermeture_demandee: false,
+            fermeture_volontaire: false,
             trames: 0,
             octets_recus: 0,
             evenements_envoyes: 0,
@@ -564,7 +566,7 @@ impl Client {
 
     pub fn demande_fermeture(&mut self) {
         let charge = proto::FENETRE_PRINCIPALE.to_le_bytes();
-        self.envoie(Genre::CloseRequest, &charge);
+        self.fermeture_volontaire |= self.envoie(Genre::CloseRequest, &charge);
         self.fermeture_demandee = true;
     }
 
@@ -832,7 +834,13 @@ impl Client {
                 false
             }
             Genre::Close => {
-                self.fermeture_demandee = true;
+                if crate::gui::services::racine() == self.pid {
+                    // Le navigateur a fini son arrêt. Lire son vrai statut avant
+                    // de récolter la session, même si le message Close est arrivé.
+                    self.fermeture_volontaire |= charge == proto::FENETRE_PRINCIPALE.to_le_bytes();
+                } else {
+                    self.fermeture_demandee = true;
+                }
                 false
             }
             _ => false,
@@ -1040,9 +1048,7 @@ impl Client {
                 "gui: client pid={} termine (code {})",
                 self.pid, code
             ));
-            // P18_CHILD_RECOVERY_V1: une sortie inattendue du courtier, meme
-            // avec code 0, ne laisse ni racine stale ni enfants orphelins.
-            crate::gui::services::relance_apres_crash(self.pid, code);
+            crate::gui::services::sortie_courtier(self.pid, code, self.fermeture_volontaire);
             self.etat = Etat::Termine;
             let arbre = task::arbre_de(self.pid);
             // BOUCHAUD_BUREAU_RING3_MORT_ISOLEE_V1 : la mort d'UN client

@@ -769,6 +769,7 @@ void BrowserWindow::branche_chrome()
             vue->paste_text_from_clipboard();
     };
     c.on_close = [] {
+        BouchaudChrome::state().fermeture_volontaire = true;
         warnln("[LB:UI] fermeture demandee");
         Core::EventLoop::current().quit(0);
     };

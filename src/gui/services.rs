@@ -20,10 +20,14 @@ const FENETRE_CRASH_MS: u64 = 30_000;
 const MAX_RELANCES_CRASH: u32 = 3;
 static CRASH_DEBUT_MS: AtomicU64 = AtomicU64::new(0);
 static CRASH_RELANCES: AtomicU32 = AtomicU32::new(0);
-pub fn relance_apres_crash(pid: u32, code: i32) {
+pub fn sortie_courtier(pid: u32, code: i32, fermeture_volontaire: bool) {
     // P18_CHILD_RECOVERY_V1: une sortie 0 inattendue du courtier doit aussi
     // etre suivie; l'arret explicite passe par Client::termine().
     if RACINE.load(Ordering::Acquire) != pid { return; }
+    if crate::gui::sortie_courtier::normale(code, fermeture_volontaire) {
+        crate::kernel::dmesg::log_fmt(format_args!("LADYBIRD_BROKER_EXIT pid={} code={}", pid, code));
+        return;
+    }
     // Appele uniquement par le fil du bureau ; le PID est celui de la session
     // effectivement visible. Un STOP explicite passe par Client::termine().
     let maintenant = crate::kernel::timer::monotonic_ms();
