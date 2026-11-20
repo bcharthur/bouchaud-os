@@ -14,12 +14,8 @@
     } \
 } while (0)
 
-int main(int argc, char **argv)
+static int transfert(int cpu, uint32_t motif)
 {
-    const int cpu = argc == 2 && !strcmp(argv[1], "--allow-cpu");
-    if (argc > 1 && !cpu)
-        return 2;
-
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physique = VK_NULL_HANDLE;
@@ -32,7 +28,6 @@ int main(int argc, char **argv)
     uint32_t famille = 0;
     int code = 1;
     int en_vol = 0;
-    const uint32_t motif = 0x5a17c3e9;
     const VkDeviceSize taille = 4096;
 
     const VkApplicationInfo app = {
@@ -147,7 +142,7 @@ int main(int argc, char **argv)
         if (mots[i] != motif) { code = 1; break; }
     }
     vkUnmapMemory(device, memoire);
-    if (!code) puts("VULKAN_TRANSFERT_OK octets=4096 verification=exacte");
+    if (!code) printf("VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=%08x\n", motif);
 
 fin:
     /* On timeout, leave live submissions to process teardown. */
@@ -161,4 +156,15 @@ fin:
     free(familles);
     free(appareils);
     return code;
+}
+
+
+int main(int argc, char **argv)
+{
+    const int cpu = argc == 2 && !strcmp(argv[1], "--allow-cpu");
+    if (argc > 1 && !cpu)
+        return 2;
+
+    int code = transfert(cpu, UINT32_C(0x5a17c3e9));
+    return code ? code : transfert(cpu, UINT32_C(0xa18e3c16));
 }

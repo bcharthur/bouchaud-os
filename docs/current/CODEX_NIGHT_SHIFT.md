@@ -109,3 +109,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le banc expose à libdrm le nœud de rendu et la vue PCI de la fonction réellement sondée. La sonde ring 3 vérifie getdents, stat, readlink et PCI_SLOT_NAME. Le banc Vue PCI, GEM et relecture Vulkan passe sous QEMU 11.2 RC.
 - Avec le vrai Loader et l'ICD Debian, Mesa écrit désormais `using DRM device /dev/dri/renderD128`, puis `required kernel param 3 is missing`. Le point bloquant est passé de l'énumération du nœud au support de l'ABI blobs et mappings.
 - Suite. Ajouter les baux GEM détenus par les VMA avec transfert du bail à la retraite TLB lors du dernier retrait de la VMA. Vérifier explicitement munmap partiel, MAP_FIXED, fork, exec et destruction avant d'activer HOST_VISIBLE. Rejouer la sonde publique `tools/userland/vulkan-transfert-probe.c` avec l'ICD Mesa.
+
+## `b4ec90ee` — banc des fonctions publiques Vulkan
+
+- Le mode `BO_VENUS_LOADER_SYSROOT` prend un dossier d'invité contenant `vulkan-probe`, `venus.json`, `lib/libvulkan.so.1`, l'ICD Mesa et les dépendances de son ELF. Il exige la découverte DRM et deux comparaisons complètes. Rejouer avec `DISPLAY=:N BO_VENUS_LOADER_SYSROOT=/chemin/guest tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`.
+- La sonde publique passe les deux motifs en contrôle Linux hôte avec Lavapipe. Dans Bouchaud OS sous QEMU 11.2 RC, le verdict reste en échec à vkEnumeratePhysicalDevices (paramètre DRM 3 absent). Le banc du transport filaire reste vert. Rootfs de reproduction local dans `/workspace/work/p10/resume-guest-discovery/guest`.

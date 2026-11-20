@@ -10,11 +10,31 @@ boot=$(realpath "$1")
 sortie=$(realpath -m "$2")
 mkdir "$sortie"
 mkdir "$sortie/scen"
-musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-venus-version.c -o "$sortie/scen/version"
-if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
-    printf '/version demappe\n' > "$sortie/scen/autorun"
+sysroot=${BO_VENUS_LOADER_SYSROOT:-}
+if [[ -n $sysroot ]]; then
+    # Rootfs préparé avec la sonde publique, le loader, le vrai ICD Venus
+    # et ses dépendances. Aucun téléchargement ni installation implicite.
+    for entree in vulkan-probe venus.json lib/libvulkan.so.1; do
+        if [[ ! -f $sysroot/$entree ]]; then
+            echo "Entrée manquante dans BO_VENUS_LOADER_SYSROOT $entree" >&2
+            exit 2
+        fi
+    done
+    cp -Lr "$sysroot/." "$sortie/scen/"
+    cat >"$sortie/scen/autorun" <<'RUN'
+export LD_LIBRARY_PATH=/lib
+export VK_DRIVER_FILES=/venus.json
+export VK_LOADER_DEBUG=error,warn,driver
+export VN_DEBUG=init
+/vulkan-probe --allow-cpu
+RUN
 else
-    printf '/version\n' > "$sortie/scen/autorun"
+    musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-venus-version.c -o "$sortie/scen/version"
+    if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
+        printf '/version demappe\n' > "$sortie/scen/autorun"
+    else
+        printf '/version\n' > "$sortie/scen/autorun"
+    fi
 fi
 IMAGE="$sortie/guest.img" tools/userland/mkdisk.sh "$sortie/scen" >/dev/null
 timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 -vga none \
@@ -28,6 +48,14 @@ timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 
         exit "$rc"
     fi
 }
+if grep -aEq 'PANIC|panicked at|DOUBLE FAULT|TRIPLE FAULT' "$sortie/serie.log"; then exit 1; fi
+if [[ -n $sysroot ]]; then
+    grep -aqF 'Found ICD manifest file /venus.json' "$sortie/serie.log"
+    grep -aqF 'using DRM device /dev/dri/renderD128' "$sortie/serie.log"
+    grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=5a17c3e9' "$sortie/serie.log"
+    grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=a18e3c16' "$sortie/serie.log"
+    exit 0
+fi
 grep -aqF 'P10_VENUS_HOSTMEM_OK' "$sortie/serie.log"
 grep -aqF 'P10_BLOB_INVITE_OK' "$sortie/serie.log"
 grep -aqF 'VIRTGPU_VENUS_DRM_DECOUVERTE_OK' "$sortie/serie.log"
@@ -47,7 +75,4 @@ if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     grep -aqF 'VIRTGPU_VENUS_CTX_ORPHELIN_OK' "$sortie/serie.log"
     grep -aqF 'P10_VENUS_ORPHELIN_RECUPERE' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DEMAPPE_OK' "$sortie/serie.log"
-fi
-if grep -aEq 'PANIC|panicked at|DOUBLE FAULT|TRIPLE FAULT' "$sortie/serie.log"; then
-    exit 1
 fi
