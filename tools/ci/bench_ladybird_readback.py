@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 MARQUEUR = "[LB:SKIA:READBACK] end_us:wall_us:bytes"
+PRESENTATION = re.compile(r"\[LB:FRAME\][^\n]*\bpresent_us=(\d+)")
 MARQUEUR_GPU = "[LB:SKIA:GPU] stage="
 ECHANTILLON = re.compile(r"(\d+):(\d+):(\d+)")
 
@@ -46,7 +47,10 @@ def resume(journal):
             else:
                 echecs += 1
 
+    presentations = [int(valeur) for valeur in PRESENTATION.findall(journal)]
     return {
+        "presentation_navigateur": {"echantillons": len(presentations),
+                                     "duree_murale_us": centiles(presentations)},
         "lectures_reussies": len(durees),
         "lectures_en_echec": echecs,
         "lots_incomplets": lots_incomplets,
@@ -60,9 +64,18 @@ def resume(journal):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("journal", type=Path)
+    parser.add_argument("--exige", choices=("readback", "cpu", "vulkan"), default="readback",
+                        help="Vérifie les mesures attendues pour le bras demandé.")
     args = parser.parse_args()
     bilan = resume(args.journal.read_text(errors="replace"))
     print(json.dumps(bilan, indent=2))
+    if args.exige == "cpu":
+        return 0 if bilan["presentation_navigateur"]["echantillons"] and not bilan["lectures_reussies"] else 1
+    if args.exige == "vulkan":
+        complet = (bilan["presentation_navigateur"]["echantillons"] and bilan["lectures_reussies"]
+                   and not bilan["lectures_en_echec"] and not bilan["lots_incomplets"]
+                   and all(etape["echantillons"] for etape in bilan["gpu"].values()))
+        return 0 if complet else 1
     return 0 if bilan["lectures_reussies"] else 1
 
 

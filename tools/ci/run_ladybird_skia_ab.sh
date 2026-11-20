@@ -12,6 +12,7 @@ rootfs=$(realpath -e "$3")
 sortie=$(realpath -m "$4")
 repetitions=$5
 accel=${BO_SMOKE_ACCEL:-tcg}
+timings=${BO_SMOKE_SKIA_TIMINGS:-0}
 case "$accel" in
     tcg|kvm) ;;
     *) echo 'BO_SMOKE_ACCEL doit valoir tcg ou kvm.' >&2; exit 2 ;;
@@ -38,6 +39,7 @@ identite > "$sortie/entrees.sha256"
 printf '%s\n' "$qemu_version" > "$sortie/qemu-version.txt"
 printf '%s\n' "$accel" > "$sortie/acceleration.txt"
 git rev-parse HEAD > "$sortie/source.txt"
+printf '%s\n' "$timings" > "$sortie/skia-timings.txt"
 printf 'tour\tbackend\tcode\tetat\n' > "$sortie/verdicts.tsv"
 
 echec=0
@@ -62,6 +64,10 @@ for ((tour = 1; tour <= repetitions; tour++)); do
         etat=ok
         if ((code != 0)) || ! grep -qFx 'LADYBIRD_FUNCTIONAL_SMOKE ok' "$dossier/smoke.log"; then
             etat=echec
+            echec=1
+        fi
+        if [[ $timings == 1 ]] && ! python3 tools/ci/bench_ladybird_readback.py             --exige "$backend" "$dossier/serie-browser-host${suffixe}.log" > "$dossier/timings.json"; then
+            etat=mesures-incompletes
             echec=1
         fi
         if ! identite | cmp -s "$sortie/entrees.sha256" -; then
