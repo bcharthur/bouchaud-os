@@ -405,7 +405,7 @@ PRODUCTIONS = (
     (Scenario("production sur la branche d'audit", "workflow_dispatch", "artefact",
               ref="refs/heads/audit/p13-console-sync-ci-20261024", mode="construit"), True),
 )
-HORS_PRODUCTION = ("artefact", "reutilise", "attente", "primitives")
+HORS_PRODUCTION = ("artefact", "reutilise", "attente", "primitives", "perf-surface", "perf-surface-bilan")
 
 
 def controle_production(texte: str, c=contrat) -> list[str]:
