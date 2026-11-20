@@ -69,6 +69,9 @@ REQUISES_PARTOUT = {
     "endurance-kvm", "sites", "crash-rendu", "bureau-ring3",
 }
 HORS_RUN_DEV = {"primitives"}
+BUILD_PROVENANCE = "needs.provenance.result == 'success' && needs.provenance.outputs.mode == 'construit'"
+BUILD_IF = "    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && " + BUILD_PROVENANCE + " }}"
+
 Q = ("(github.event_name == 'workflow_dispatch' && inputs.palier == 'qualification') "
      "|| github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024'")
 LIAISON = 'tools/ci/verifie_artefact_ladybird.sh "${{ needs.artefact.outputs.liaison }}" native-browser'
@@ -144,8 +147,8 @@ def verifie(t: dict) -> list:
         f.append("provenance : garde d'empreinte ou palier absent")
     # 3
     build = j.get("build", "")
-    if "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe'" not in entete(build):
-        f.append("build : ne suit pas la decision de provenance (repli build exige, aucun build pendant une production)")
+    if BUILD_IF not in entete(build).splitlines():
+        f.append("build : ne suit pas la decision de provenance (succes et mode construit obligatoires)")
     m_job = re.search(r"^    timeout-minutes: (\d+)$", entete(build), re.M)
     e = etapes(build)
     i_construit = index(e, lambda x: x[0] == "Construire Ladybird")
@@ -292,7 +295,7 @@ def negatifs(t: dict) -> list:
         ("qualification non stricte", "lb", f"p13_strict: ${{{{ {Q} }}}}",
          "p13_strict: ${{ github.ref == 'refs/heads/audit/p13-console-sync-ci-20261024' }}"),
         ("garde d'empreinte retiree", "lb", garde_ligne, "        run: true\n"),
-        ("build ignore la decision", "lb", "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe' }}", "true }}"),
+        ("build ignore la decision", "lb", BUILD_PROVENANCE + " }}", "true }}"),
         ("delai d'etape retire", "lb", "        timeout-minutes: 150\n        run: |", "        run: |"),
         ("cache seulement sur succes", "lb", "if: ${{ !cancelled() && steps.ccache.outcome == 'success' }}",
          "if: ${{ success() && steps.ccache.outcome == 'success' }}"),
@@ -344,8 +347,10 @@ def negatifs(t: dict) -> list:
         ("reutilisation sans attente reussie", "lb", "(needs.provenance.outputs.mode == 'attendu' && needs.attente.result == 'success')",
          "(needs.provenance.outputs.mode == 'attendu')"),
         ("build pendant une production attendue", "lb",
-         "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe'",
-         "needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'existe'"),
+         BUILD_PROVENANCE,
+         "needs.provenance.result == 'success' && (needs.provenance.outputs.mode == 'construit' || needs.provenance.outputs.mode == 'attendu')"),
+        ("build sur provenance echouee", "lb", BUILD_PROVENANCE,
+         "needs.provenance.outputs.mode == 'construit'"),
         ("audit reconstruire retire", "lb", "      reconstruire:\n", "      reconstruire_x:\n"),
         ("attente non transmise au verdict", "lb", "          R_ATTENTE: ${{ needs.attente.result }}\n", ""),
         ("provenance sans droit de declencher", "lb", "      actions: write\n    outputs:\n      mode:",

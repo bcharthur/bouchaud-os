@@ -375,7 +375,9 @@ PANNES = (
              pannes={"primitives": "skipped"}),
     Scenario("smoke en echec : performance sautee (dev)", "push", mode="reutilise", pannes=("browser-host-smoke",)),
     Scenario("reutilisation en echec (dev)", "push", mode="reutilise", pannes=("reutilise",)),
-    Scenario("provenance en echec : repli build (dev)", "push", mode="", pannes=("provenance",)),
+    Scenario("provenance en echec, decision absente (dev)", "push", mode="", pannes=("provenance",)),
+    Scenario("provenance en echec malgre une decision de build (dev)", "push",
+             mode="construit", pannes=("provenance",)),
     Scenario("build en echec (qualification)", "workflow_dispatch", "qualification", mode="construit",
              pannes=("build",)),
     Scenario("primitives en echec (qualification)", "workflow_dispatch", "qualification", mode="construit",
@@ -451,6 +453,8 @@ def controle(texte: str, c=contrat) -> list[str]:
             continue
         if r["verdict_ok"]:
             erreurs.append(f"{sc.nom} : verdict VERT malgre la panne")
+        if r["resultats"].get("provenance") == "failure" and r["resultats"].get("build") != "skipped":
+            erreurs.append(f"{sc.nom} : build execute malgre la provenance rouge")
     return erreurs
 
 
