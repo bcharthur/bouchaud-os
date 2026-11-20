@@ -173,10 +173,11 @@ pub fn unmap_host3d_qemu(requete: &[u8]) -> bool {
 }
 
 #[cfg(feature = "banc-gpu-venus")]
-pub fn entete_soumission_venus(octets: usize) -> Option<[u8; 32]> {
+pub fn entete_soumission_venus(octets: usize, anneau: u8) -> Option<[u8; 32]> {
     let mut q = submit_header(octets)?;
-    put32(&mut q, 4, 2); // INFO_RING_IDX, anneau de contrôle 0
+    put32(&mut q, 4, 2); // INFO_RING_IDX
     put32(&mut q, 16, CONTEXTE_VENUS);
+    q[20] = anneau;
     Some(q)
 }
 

@@ -259,6 +259,7 @@ pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, Erreur
             return Err(ErreurRendu::Commande);
         }
     }
+    if !existe { p.anneaux_venus = 1; }
     match unsafe { lit_version(&mut p.file, fenetre.adresse) } {
         Ok(version) => {
             p.hostmem_venus = Some(Canal::Ouvert(fenetre, Some(octets), proprietaire));
@@ -289,7 +290,7 @@ fn prepare_canal(p: &mut Peripherique, proprietaire: &Weak<()>) -> Result<(bool,
     Ok((false, None))
 }
 
-pub fn initialise_contexte_venus(session: &Arc<()>) -> Result<(), ErreurRendu> {
+pub fn initialise_contexte_venus(session: &Arc<()>, anneaux: u8) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
     let proprietaire = Arc::downgrade(session);
@@ -300,6 +301,7 @@ pub fn initialise_contexte_venus(session: &Arc<()>) -> Result<(), ErreurRendu> {
     let (q, n) = gpu3d::contexte_venus(true);
     match unsafe { p.file.commande(&q[..n], ENTETE) } {
         Ok(RESP_OK_NODATA) => {
+            p.anneaux_venus = anneaux;
             p.hostmem_venus = Some(Canal::Ouvert(fenetre, None, proprietaire));
             Ok(())
         }
@@ -402,20 +404,28 @@ fn aperture_possedee(p: &Peripherique, session: &Arc<()>) -> Result<usize, Erreu
     }
 }
 
-pub fn soumets_venus(session: &Arc<()>, flux: &[u8]) -> Result<(), ErreurRendu> {
-    let entete = gpu3d::entete_soumission_venus(flux.len()).ok_or(ErreurRendu::Invalide)?;
+pub fn soumets_venus(session: &Arc<()>, flux: &[u8], anneau: u8) -> Result<(), ErreurRendu> {
+    let entete = gpu3d::entete_soumission_venus(flux.len(), anneau).ok_or(ErreurRendu::Invalide)?;
     let mut q = alloc::vec::Vec::new();
     q.try_reserve_exact(entete.len() + flux.len()).map_err(|_| ErreurRendu::Plein)?;
     q.extend_from_slice(&entete);
     q.extend_from_slice(flux);
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let mem = aperture_possedee(p, session)? as *mut u32;
+    let fenetre = possede_contexte(p, session)?;
+    if anneau >= p.anneaux_venus { return Err(ErreurRendu::Invalide); }
+
+    let memo = match p.hostmem_venus {
+        Some(Canal::Ouvert(_, Some(_), _)) => Some(fenetre.adresse as *mut u32),
+        _ => None,
+    };
     unsafe {
-        for i in 0..OCTETS_REPONSE_VENUS / 4 { write_volatile(mem.add(i), u32::MAX); }
-        fence(Ordering::SeqCst);
+        if let Some(memo) = memo {
+            for i in 0..OCTETS_REPONSE_VENUS / 4 { write_volatile(memo.add(i), u32::MAX); }
+            fence(Ordering::SeqCst);
+        }
         if p.file.commande(&q, ENTETE) == Ok(RESP_OK_NODATA)
-            && attente_reponse(250, || read_volatile(mem) != u32::MAX)
+            && memo.is_none_or(|memo| attente_reponse(250, || read_volatile(memo) != u32::MAX))
         {
             return Ok(());
         }

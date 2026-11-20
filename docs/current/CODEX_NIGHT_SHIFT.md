@@ -120,3 +120,10 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le BAR est borné par slot. MAP expose un offset par handle. mmap associe le contexte et son GEM à un bail d'espace d'adressage. Les fragments et retraits concurrents gardent leurs références jusqu'à l'ACK TLB, y compris avec fork et exec. GEM_CLOSE masque le handle immédiatement et le pilote ne recycle le slot qu'après la dernière référence puis UNMAP et UNREF confirmé. PROT_EXEC et l'agrandissement mremap du mapping sont refusés.
 - QEMU 11.1.3 et 11.2 RC, TCG/Lavapipe. Deux motifs vérifiés intégralement par mmap DRM, en plus des deux cycles privés conservés. Tests positifs MAP_SHARED après fermeture GEM, mprotect read-only, fork, exec, munmap partiel et remplacement MAP_FIXED. Tests négatifs taille, offset, exécution et handle expiré. Garde VirtIO à 36 mutations.
 - Le Vulkan Loader avec Mesa franchit maintenant RESOURCE_BLOB et HOST_VISIBLE. Le point bloquant suivant observé est `failed to initialize context: Invalid argument` sur le CONTEXT_INIT Mesa à 64 anneaux.
+
+## `a6eda479` — contexte DRM et réponses appartenant au client
+
+- CONTEXT_INIT valide jusqu'à 64 anneaux avec masque d'événements nul. EXECBUFFER utilise l'anneau demandé et le contexte propriétaire. Le pilote laisse le client gérer le flux de réponse dans son GEM quand le blob privé du banc n'est pas ouvert.
+- Le banc valide une requête de version intégralement via le blob client. QEMU 11.1.3 et 11.2 RC verts. Les 216 garde-fous passent sur le jalon mmap.
+- Le Loader et Mesa s'attachent au renderer, énumèrent le périphérique et créent le device et le buffer. La sonde échoue ensuite à vkBeginCommandBuffer avec VK_ERROR_OUT_OF_HOST_MEMORY. Mesa réserve 8 Mio pour le pool de flux indirect alors que le slot GEM est borné à 1 Mio.
+- Suite. Agrandir les slots GEM selon la taille BAR en conservant un plafond, n'installer l'alias noyau que sur les pages effectivement demandées, puis retester la soumission et les fences Mesa.

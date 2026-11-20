@@ -243,21 +243,24 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             virtio_gpu::ferme_gem_venus(session, mot(&buf, 0)).map_or_else(erreur, |()| 0)
         }
         // DRM_IOCTL_VIRTGPU_EXECBUFFER, profil de banc synchrone.
-        // Les flux qui demandent une réponse utilisent le blob de transport
-        // de l'ouverture. Pas de liste GEM ni de syncobj dans ce profil.
+        // Le mode historique garde son blob de réponse. Sans ce mode,
+        // le blob de réponse et ses positions sont gérés par le client.
+        // Pas de liste GEM ni de syncobj dans ce profil.
         #[cfg(feature = "banc-gpu-venus")]
         0xc040_6442 => {
             let Some(buf) = user_read(arg, 64) else { return -errno::EFAULT; };
             let taille = mot(&buf, 4) as usize;
-            if !matches!(mot(&buf, 0), 0 | 4) || taille == 0 || taille > 2016
-                || taille % 4 != 0 || mot(&buf, 28) != u32::MAX
-                || buf[16..28].iter().chain(&buf[32..]).any(|b| *b != 0)
+            let flags = mot(&buf, 0);
+            let anneau = if flags & 4 != 0 { mot(&buf, 32) } else { 0 };
+            if !matches!(flags, 0 | 4) || taille == 0 || taille > 2016
+                || taille % 4 != 0 || anneau >= 64
+                || buf[16..28].iter().chain(&buf[36..]).any(|b| *b != 0)
             {
                 return -errno::EINVAL;
             }
             let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
             let Some(flux) = user_read(adresse, taille) else { return -errno::EFAULT; };
-            virtio_gpu::soumets_venus(session, &flux).map_or_else(erreur, |()| 0)
+            virtio_gpu::soumets_venus(session, &flux, anneau as u8).map_or_else(erreur, |()| 0)
         }
         #[cfg(feature = "banc-gpu-venus")]
         0x8040_42ad | 0x8200_42ad => {
@@ -286,27 +289,29 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
                 Err(e) => erreur(e),
             }
         }
-        // DRM_IOCTL_VIRTGPU_CONTEXT_INIT, sous-ensemble Venus à un anneau.
+        // DRM_IOCTL_VIRTGPU_CONTEXT_INIT, anneaux sans événements DRM.
         #[cfg(feature = "banc-gpu-venus")]
         0xc010_644b => {
             let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT; };
             let n = mot(&buf, 0) as usize;
-            if !(1..=2).contains(&n) || mot(&buf, 4) != 0 { return -errno::EINVAL; }
+            if !(1..=3).contains(&n) || mot(&buf, 4) != 0 { return -errno::EINVAL; }
             let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
             let Some(params) = user_read(adresse, n * 16) else { return -errno::EFAULT; };
             let mut capset = false;
-            let mut anneaux = false;
+            let mut anneaux = None;
+            let mut poll = false;
             for p in params.chunks_exact(16) {
                 let cle = u64::from_le_bytes(p[..8].try_into().unwrap());
                 let valeur = u64::from_le_bytes(p[8..16].try_into().unwrap());
                 match (cle, valeur) {
                     (1, 4) if !capset => capset = true,
-                    (2, 1) if !anneaux => anneaux = true,
+                    (2, 1..=64) if anneaux.is_none() => anneaux = Some(valeur as u8),
+                    (3, 0) if !poll => poll = true,
                     _ => return -errno::EINVAL,
                 }
             }
             if !capset { return -errno::EINVAL; }
-            virtio_gpu::initialise_contexte_venus(session).map_or_else(erreur, |()| 0)
+            virtio_gpu::initialise_contexte_venus(session, anneaux.unwrap_or(1)).map_or_else(erreur, |()| 0)
         }
         // Bouchaud expérimental : _IOR('B', 0xaa, uint32_t).
         #[cfg(feature = "banc-gpu-venus")]

@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -101,7 +102,7 @@ static int verifie_version_drm(int fd)
 
 static int verifie_contexte(int fd)
 {
-    struct drm_context_param params[] = {{1, 4}, {2, 2}};
+    struct drm_context_param params[] = {{1, 4}, {2, 65}};
     struct drm_context_init init = {2, 0, (uintptr_t)params};
     if (!ioctl(fd, DRM_CONTEXT_INIT, &init) || errno != EINVAL) return 1;
     init.adr = 1;
@@ -252,6 +253,39 @@ static int relit_vkmemoire_gem(int fd, uint64_t memoire, uint32_t motif)
     struct drm_gem_close req = {.bo = blob.bo};
     if (ioctl(fd, DRM_GEM_CLOSE, &req) || !exact) return 5;
     printf("VIRTGPU_VENUS_VKFILL_MMAP_OK octets=4096 motif=%08x\n", motif);
+    return 0;
+}
+
+static int verifie_reponse_client(int fd, uint32_t reference)
+{
+    struct drm_context_param params[] = {{1, 4}, {2, 64}, {3, 0}};
+    struct drm_context_init init = {3, 0, (uintptr_t)params};
+    params[2].valeur = 1;
+    if (ioctl(fd, DRM_CONTEXT_INIT, &init) != -1 || errno != EINVAL) return 1;
+    params[2].valeur = 0;
+    if (ioctl(fd, DRM_CONTEXT_INIT, &init)) return 2;
+
+    struct drm_blob blob = {.mem = 2, .flags = 1, .taille = 4096};
+    if (ioctl(fd, DRM_CREATE_BLOB, &blob)) return 3;
+    struct drm_virtgpu_map map = {.handle = blob.bo};
+    if (ioctl(fd, DRM_MAP, &map)) return 4;
+    volatile uint32_t *r = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+    if (r == MAP_FAILED) return 5;
+    for (unsigned i = 0; i < 5; i++) r[i] = UINT32_MAX;
+    uint32_t flux[] = {178, 0, 1, 0, blob.res, 0, 0, 20, 0, 137, 1, 1, 0};
+    struct drm_execbuffer req = {.flags = 4, .taille = sizeof(flux), .commande = (uintptr_t)flux};
+    req.anneau = 64;
+    if (ioctl(fd, DRM_EXECBUFFER, &req) != -1 || errno != EINVAL) return 6;
+    req.anneau = 0;
+    if (ioctl(fd, DRM_EXECBUFFER, &req)) return 7;
+    for (unsigned i = 0; i < 10000 && r[4] == UINT32_MAX; i++) sched_yield();
+    if (r[0] != 137 || r[1] || r[2] != 1 || r[3] || r[4] != reference) return 8;
+    reponse_venus privee;
+    if (ioctl(fd, LIT_REPONSE, privee) != -1 || errno != EINVAL) return 9;
+    if (munmap((void *)r, 4096)) return 10;
+    struct drm_gem_close ferme = {.bo = blob.bo};
+    if (ioctl(fd, DRM_GEM_CLOSE, &ferme) || ioctl(fd, DEMAPPE)) return 11;
+    puts("VIRTGPU_VENUS_REPONSE_CLIENT_OK anneaux=64");
     return 0;
 }
 
@@ -416,6 +450,8 @@ static int verifie_instances(int fd, int par_gem)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = 4, .commande = 1, .fence = -1};
     if (!ioctl(fd, DRM_EXECBUFFER, &req) || errno != EFAULT) return 1;
+    uint32_t flux_invalide = UINT32_MAX;
+    req.commande = (uintptr_t)&flux_invalide;
     req.anneau = 1;
     if (!ioctl(fd, DRM_EXECBUFFER, &req) || errno != EINVAL) return 2;
     for (uint32_t handle = 1; handle <= 2; ++handle) {
@@ -577,6 +613,8 @@ int main(int argc, char **argv)
         puts("VIRTGPU_VENUS_TAILLES_OK cycles=4");
         if (verifie_proprietaire(fd, reference, 1)) return 15;
         if (verifie_proprietaire(fd, reference, 0)) return 17;
+        int client = verifie_reponse_client(fd, reference);
+        if (client) { printf("VIRTGPU_VENUS_REPONSE_CLIENT_ECHEC etape=%d\n", client); return 22; }
         puts("VIRTGPU_VENUS_DEMAPPE_OK");
     }
     return close(fd) != 0;
