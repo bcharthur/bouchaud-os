@@ -16,16 +16,16 @@ jobs:
         run: |
           set -euo pipefail
           depot="$GITHUB_REPOSITORY"
-          run=44781313296
+          run=44732379176
           for tentative in $(seq 1 210); do
             etat=$(gh api "repos/$depot/actions/runs/$run")
-            jq -e '.head_sha == "3b09793374036f8a302d99f6174db0093dc59bbb"' <<< "$etat" >/dev/null
+            jq -e '.head_sha == "4bf3f9823fa4b17f07255545567ffb9db4cdc721"' <<< "$etat" >/dev/null
             if [[ $(jq -r .status <<< "$etat") == completed ]]; then break; fi
             sleep 30
           done
           jq -e '.status == "completed" and .conclusion == "success"' <<< "$etat" >/dev/null
           artefact=$(gh api "repos/$depot/actions/runs/$run/artifacts" | jq -cer '
-            [.artifacts[] | select(.name == "bouchaud-ladybird-vulkan-experimental" and .expired == false)]
+            [.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)]
             | if length == 1 then .[0] else error("archive Vulkan non unique ou absente") end')
           aid=$(jq -r .id <<< "$artefact")
           digest=$(jq -er '.digest | sub("^sha256:"; "") | select(test("^[0-9a-f]{64}$"))' <<< "$artefact")
