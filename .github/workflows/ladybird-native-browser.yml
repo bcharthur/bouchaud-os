@@ -291,7 +291,7 @@ jobs:
     permissions:
       contents: read
       # write : declencher la production (palier artefact) si aucun artefact
-      # de l'empreinte n'existe. Refuse (fork) => repli build dans le run.
+      # de l'empreinte n'existe. Les forks construisent dans leur propre run.
       actions: write
     outputs:
       mode: ${{ steps.decision.outputs.mode }}
@@ -311,7 +311,8 @@ jobs:
           PALIER_PRODUCTION: ${{ inputs.palier == 'artefact' && 'artefact' || '' }}
           RECONSTRUIRE: ${{ inputs.reconstruire == true && 'true' || 'false' }}
           EMPREINTE_DEMANDEE: ${{ inputs.empreinte }}
-          REF_PRODUCTION: ${{ github.head_ref || github.ref_name }}
+          REF_PRODUCTION: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.head_ref || github.ref_name) || '' }}
+          REF_BASE: ${{ github.base_ref }}
         run: PALIER="${PALIER_PRODUCTION:-$PALIER}" python3 tools/ci/ladybird_provenance.py
 
   attente:
@@ -342,8 +343,8 @@ jobs:
 
   build:
     needs: [dedoublonne, provenance]
-    # Repli sur build si la decision manque : couteux, jamais faux.
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.outputs.mode != 'reutilise' && needs.provenance.outputs.mode != 'attendu' && needs.provenance.outputs.mode != 'existe' }}
+    # Une decision absente ou rouge ne donne jamais le droit de produire.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.provenance.result == 'success' && needs.provenance.outputs.mode == 'construit' }}
     name: ladybird / build once
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -1671,8 +1672,9 @@ jobs:
   perf-surface-bilan:
     name: ladybird / perf (bilan avant/apres)
     needs: [dedoublonne, perf-surface]
-    # Saute avec ses producteurs quand l'artefact du meme SHA est reutilise.
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' }}
+    # Le palier artefact ne joue aucune mesure. En qualification, une
+    # matrice en échec produit toujours son verdict de bilan.
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
