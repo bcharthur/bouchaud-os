@@ -684,6 +684,8 @@ fn boucle() {
             lance_application(&mut wins, home, &mut degats, &chemin);
         }
     }
+    #[cfg(all(feature = "reference-desktop", feature = "banc-gpu-perte-scanout"))]
+    lance_application(&mut wins, home, &mut degats, "/mire-gpu");
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
     // plus bas. `services_initialises` dit que la session supervisee PEUT
     // demarrer : la premiere trame est posee et le reseau a eu sa chance. Le

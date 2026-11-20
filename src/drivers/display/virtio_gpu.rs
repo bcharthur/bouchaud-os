@@ -709,6 +709,14 @@ impl FileControle {
             );
             return Err(dma::REPONSE_INVALIDE);
         }
+        if !file::corps_valide(lit_genre(requete), genre, utilise.len, longueur_reponse as u32) {
+            self.cassee = true;
+            crate::serial_println!(
+                "VIRTIO_GPU_FILE violation=corps-incompatible commande={:#x} genre={:#x} len={}",
+                lit_genre(requete), genre, utilise.len
+            );
+            return Err(dma::REPONSE_INVALIDE);
+        }
         { self.derniere_reponse_len = utilise.len; }
         self.dernier_util = dernier.wrapping_add(1);
         // BOUCHAUD_GPU_ATTRIBUTION_V1 : duree de l'aller-retour, par genre.
@@ -880,10 +888,12 @@ fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'st
 /// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
 /// dit pourquoi.
 unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) {
-    if *m == Memoire::Attachee {
-        *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+    if ressource != 0 {
+        if *m == Memoire::Attachee {
+            *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+        }
+        let _ = suivie(m, libere(f, ressource));
     }
-    let _ = suivie(m, libere(f, ressource));
     if dma::peut_rendre(*m) {
         memory::free_dma(phys, octets);
     } else {
@@ -1563,6 +1573,15 @@ pub fn active_scanout(largeur: usize, hauteur: usize) -> Option<(*mut u32, u64)>
     Some((virt as *mut u32, phys))
 }
 
+/// Ferme le scanout lors du retour au GOP, sous le meme verrou que la presentation.
+pub fn desactive_scanout() {
+    let Some(mut garde) = verrou() else { return };
+    let Some(p) = garde.as_mut() else { return };
+    if let Some(s) = p.scanout {
+        unsafe { rend_scanout(p, s) };
+    }
+}
+
 /// Rend le scanout du bureau : ecran eteint (SET_SCANOUT ressource 0),
 /// DETACH, UNREF ; la memoire n'est rendue que si le peripherique ne peut
 /// plus la tenir (`virtio_gpu_dma`).
@@ -1853,6 +1872,11 @@ pub fn veut_composition_gpu(oui: bool) -> bool {
     COMPOSITION_VOULUE.swap(oui, Ordering::AcqRel)
 }
 
+/// Le BLIT et sa convention ont ete verifies au pixel pendant la sonde.
+pub fn composition_gpu_etalonnee() -> bool {
+    P10_VIRGL_PRET.load(Ordering::Acquire)
+}
+
 /// Le compositeur GPU peut-il servir cette trame ? VIRGL negocie, scanout
 /// virtio actif, politique voulue, aucun echec anterieur.
 pub fn composition_gpu_disponible() -> bool {
@@ -2025,7 +2049,10 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
     const H: u32 = 8;
     let octets = (L * H * 4) as usize;
     let (sp, sv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
-    let (dp, dv) = memory::alloc_dma(PAGE).ok_or("dma-autotest")?;
+    let Some((dp, dv)) = memory::alloc_dma(PAGE) else {
+        rend_si_sur(f, 0, sp, PAGE, &mut Memoire::NonAttachee, "autotest-sans-ressource");
+        return Err("dma-autotest");
+    };
     let src = core::slice::from_raw_parts_mut(sv as *mut u32, (L * H) as usize);
     let dst = core::slice::from_raw_parts_mut(dv as *mut u32, (L * H) as usize);
     for y in 0..H { for x in 0..L { src[(y * L + x) as usize] = cg::pixel_mire(x, y); } }
@@ -2115,6 +2142,12 @@ pub fn presente_trame_gpu(plan: &trame::Plan, couches: &[CoucheGpu]) -> bool {
                 crate::serial_println!("GPU_COMPOSITION_INJECTION refus_trame=300 (file intacte)");
                 return Err("injection-banc");
             }
+        }
+        #[cfg(feature = "banc-gpu-perte-scanout")]
+        if trame_n >= 120 && plan.nb == 0 && !couches.is_empty() {
+            crate::serial_println!("GPU_PERTE_SCANOUT_INJECTION trame={} plan_2d=0", trame_n);
+            p.file.cassee = true;
+            return Err("perte-scanout-banc");
         }
         let mut commandes = 0u64;
         let mut flush = cg::R::default();

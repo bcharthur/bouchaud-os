@@ -129,6 +129,23 @@ pub fn juge(
     Ok(())
 }
 
+/// Une clôture valide ne suffit pas à prouver le résultat de la commande.
+pub fn corps_valide(commande: u32, reponse: u32, taille: u32, capacite: u32) -> bool {
+    if (0x1200..=0x1205).contains(&reponse) {
+        return taille == ENTETE;
+    }
+    let attendu = match commande {
+        0x0100 => 0x1101, // GET_DISPLAY_INFO
+        0x0108 => 0x1102, // GET_CAPSET_INFO
+        0x0109 => 0x1103, // GET_CAPSET
+        0x010a => 0x1104, // GET_EDID
+        0x010b => 0x1105, // RESOURCE_ASSIGN_UUID
+        0x0208 => 0x1106, // RESOURCE_MAP_BLOB
+        _ => 0x1100,      // OK_NODATA
+    };
+    reponse == attendu && taille == if attendu == 0x1100 { ENTETE } else { capacite }
+}
+
 /// Pose le drapeau et le `fence_id` dans l'en-tete d'une requete.
 pub fn pose_barriere(requete: &mut [u8], barriere: u64) {
     let d = u32::from_le_bytes([

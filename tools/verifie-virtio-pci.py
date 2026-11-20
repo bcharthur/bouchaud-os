@@ -58,6 +58,7 @@ GARDE_ETRANGERE = '#[cfg(feature = "' + OPTION_ETRANGERE + '")]\n        if lit_
 POSE = "file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);"
 SONNETTE = "write_volatile(self.sonnette as *mut u16, 0);"
 JUGE = "if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {"
+JUGE_CORPS = "if !file::corps_valide(lit_genre(requete), genre, utilise.len, longueur_reponse as u32) {"
 AVANCE = "self.dernier_util = dernier.wrapping_add(1);"
 DEPLACEMENT = "<barriere deplacee apres la sonnette>"
 # BOUCHAUD_VIRTIO_GPU_TAMPONS_V1 : la reponse du transfert est gardee (`rendu`)
@@ -175,9 +176,14 @@ def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "", tro
     i_juge, i_avance = c.find(JUGE), c.find(AVANCE)
     if c.count(JUGE) != 1 or s.count(AVANCE) != 1 or i_avance < i_juge:
         fautes.append("virtio_gpu.rs : la reponse n'est plus jugee avant d'etre prise pour celle de la commande.")
-    bloc_juge = c[i_juge:i_avance] if 0 <= i_juge < i_avance else ""
-    if "self.cassee = true;" not in bloc_juge or "return Err(dma::REPONSE_INVALIDE);" not in bloc_juge:
-        fautes.append("virtio_gpu.rs : une reponse jugee invalide ne casse plus la file / ne rend plus REPONSE_INVALIDE.")
+    i_juge_corps = c.find(JUGE_CORPS)
+    if c.count(JUGE_CORPS) != 1 or not 0 <= i_juge < i_juge_corps < i_avance:
+        fautes.append("virtio_gpu.rs : le corps doit etre juge avant de consommer la reponse.")
+    for debut in (i_juge, i_juge_corps):
+        fin = c.find("\n        }", debut) if debut >= 0 else -1
+        bloc_juge = c[debut:fin] if 0 <= debut < fin < i_avance else ""
+        if "self.cassee = true;" not in bloc_juge or "return Err(dma::REPONSE_INVALIDE);" not in bloc_juge:
+            fautes.append("virtio_gpu.rs : chaque refus doit casser la file et rendre REPONSE_INVALIDE.")
     if re.search(r"\bcommande_double\b|\bLOT_REQUETE_MAX\b|\btransfert_et_vide\b", s):
         fautes.append("virtio_gpu.rs : groupement de commandes (LOT_V1) reintroduit sans preuve d'ordre de traitement.")
     if not SEQUENTIEL.search(corps(s, "presente")):
@@ -231,6 +237,8 @@ def main() -> int:
         (DEPLACEMENT, ""),
         # reponse non jugee
         (JUGE, "if let Err(v) = Ok::<(), file::Violation>(()) {"),
+        (JUGE_CORPS, "if false {"),
+        (JUGE_CORPS + "\n            self.cassee = true;", JUGE_CORPS),
         # reponse invalide prise pour une reussite
         ("            return Err(dma::REPONSE_INVALIDE);", "            return Ok(genre);"),
         # file non cassee apres une violation
