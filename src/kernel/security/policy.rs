@@ -142,6 +142,14 @@ pub fn current() -> Snapshot {
     out
 }
 
+#[cfg(feature = "banc-gpu-venus")]
+pub(super) fn compositor_venus(pid: u32) -> bool {
+    CONTEXTS.lock().iter().any(|entry| {
+        entry.pid == pid && entry.profile == SecurityProfile::BrowserContent
+            && entry.image == "/usr/libexec/ladybird/Compositor"
+    })
+}
+
 pub fn launch(image: &str) -> Snapshot {
     if task::in_user_task() {
         return current();

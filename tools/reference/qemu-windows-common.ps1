@@ -39,7 +39,8 @@ function Get-BouchaudDisplayArguments {
     param(
         [Parameter(Mandatory = $true)][string]$QemuExe,
         [ValidateSet('auto','gtk','sdl','none')][string]$Display = 'auto',
-        [switch]$Fullscreen
+        [switch]$Fullscreen,
+        [switch]$Virgl
     )
     # QEMU prints its backends on stdout on some versions, stderr on others.
     $output = (& $QemuExe -display help 2>&1 | Out-String)
@@ -52,9 +53,14 @@ function Get-BouchaudDisplayArguments {
     if (($backend -ne 'none') -and ($output -notmatch "(?m)^\s*$backend\s*$")) {
         throw "Backend QEMU '$backend' indisponible (qemu-system-x86_64 -display help)."
     }
+    $gl = 'off'
+    if ($Virgl) {
+        if ($backend -eq 'none') { throw 'VIRGL requiert une fenetre QEMU GTK ou SDL avec GL.' }
+        $gl = 'on'
+    }
     switch ($backend) {
-        'gtk'  { $displayArgs = @('-display','gtk,zoom-to-fit=on,gl=off') }
-        'sdl'  { $displayArgs = @('-display','sdl,gl=off') }
+        'gtk'  { $displayArgs = @('-display',"gtk,zoom-to-fit=on,gl=$gl") }
+        'sdl'  { $displayArgs = @('-display',"sdl,gl=$gl") }
         'none' { $displayArgs = @('-display','none') }
     }
     if ($Fullscreen -and $backend -ne 'none') { $displayArgs += '-full-screen' }
@@ -63,6 +69,40 @@ function Get-BouchaudDisplayArguments {
         Write-Host 'NOTE : SDL ne garantit pas le zoom GTK. Utiliser -Display gtk si disponible.' -ForegroundColor Yellow
     }
     return $displayArgs
+}
+
+function Get-BouchaudGraphicsArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$QemuExe,
+        [switch]$Virgl
+    )
+    if (-not $Virgl) { return @('-vga','std') }
+    $devices = (& $QemuExe -device help 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $devices -notmatch '"virtio-gpu-gl-pci"') {
+        throw "QEMU ne fournit pas virtio-gpu-gl-pci. Utiliser le profil CPU ou un build QEMU disposant de virglrenderer."
+    }
+    Write-Host 'QEMU_GPU_DEVICE=virtio-gpu-gl-pci GL=on RENDERER_HOST=non-verifie'
+    Write-Host 'QEMU_GPU_DISPLAY=virtio secondaire. Le VGA primaire porte le GOP de secours.'
+    return @('-vga','std','-device','virtio-gpu-gl-pci')
+}
+
+function Get-BouchaudQemuGraphicsVerdict {
+    param([bool]$Virgl, [int]$ExitCode, [string]$Journal = '', [string]$Serie = '')
+    if ($ExitCode -ne 0) {
+        if ($Virgl -and $Journal -match '(?i)(failed|unable|cannot|could not|not available|not supported|does not support).{0,100}(OpenGL|GL context|EGL|GLX)|(OpenGL|GL context|EGL|GLX).{0,100}(failed|not available|not supported)') {
+            return 'contexte-opengl-refuse'
+        }
+        if ($Virgl -and $Journal -match '(?i)virtio-gpu-gl-pci.*(not found|not supported|not a valid|failed)|virglrenderer.*(failed|unavailable)') {
+            return 'peripherique-3d-refuse'
+        }
+        return 'qemu-echec'
+    }
+    if (-not $Virgl) { return 'profil-cpu' }
+    if ($Serie -match 'UEFI scanout=gop raison=perte-virtio') { return 'repli-gop' }
+    if ($Serie -match 'BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK' -and $Serie -match 'UEFI scanout=virtio') {
+        return 'virgl-invite-confirme'
+    }
+    return 'virgl-invite-non-confirme'
 }
 
 function Get-BouchaudInputArguments {
@@ -103,6 +143,7 @@ function Invoke-BouchaudQemu {
         [Parameter(Mandatory = $true)][string]$QemuExe,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$SerialPath,
+        [string]$StderrPath = '',
         [switch]$DryRun
     )
     $writable = @($Arguments | Where-Object {
@@ -121,6 +162,13 @@ function Invoke-BouchaudQemu {
         }
         return 0
     }
-    & $QemuExe @Arguments
+    if ($StderrPath) {
+        # Windows PowerShell 5 peut convertir stderr en ErrorRecord.
+        # Le verdict reel est celui de QEMU et son journal reste disponible.
+        $ErrorActionPreference = 'Continue'
+        & $QemuExe @Arguments 2> $StderrPath
+    } else {
+        & $QemuExe @Arguments
+    }
     return $LASTEXITCODE
 }

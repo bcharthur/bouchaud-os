@@ -9,6 +9,11 @@ LB="$ROOT/third_party/ladybird"
 FINAL_SRC="$ROOT/third_party/ladybird-browser-src"
 SRC="$ROOT/third_party/ladybird-browser-prepared"
 BUILD="$ROOT/third_party/build-ladybird-browser-bouchaud"
+VULKAN_COMPOSITOR=OFF
+if [[ ${BOUCHAUD_P10_GPU_VULKAN:-0} == 1 ]]; then
+    VULKAN_COMPOSITOR=ON
+    BUILD="$BUILD-vulkan"
+fi
 VCPKG_INSTALLED_ROOT="$ROOT/third_party/vcpkg-browser-installed"
 VCPKG_TRIPLET="x64-linux"
 VCPKG="$VCPKG_INSTALLED_ROOT/$VCPKG_TRIPLET"
@@ -43,6 +48,9 @@ python3 tools/ladybird/prepare-fonts-systeme.py "$SRC"
 python3 tools/ladybird/prepare-v16-fonts.py "$SRC"
 python3 tools/ladybird/prepare-tls-diagnostic.py "$SRC"
 python3 tools/ladybird/prepare-browser-runtime-link.py "$SRC"
+if [[ "$VULKAN_COMPOSITOR" == ON ]]; then
+    python3 tools/ladybird/prepare-vulkan-bouchaud.py "$SRC"
+fi
 python3 tools/ladybird/prepare-sandbox-bouchaud.py "$SRC"
 python3 tools/ladybird/prepare-audio-bouchaud.py "$SRC"
 python3 tools/ladybird/prepare-worker-terminate.py "$SRC"
@@ -309,6 +317,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
     -DENABLE_GUI_TARGETS=ON \
     -DBOUCHAUD_SERVICES_ONLY=ON \
     -DBOUCHAUD_PORT=ON \
+    -DBOUCHAUD_VULKAN_COMPOSITOR="$VULKAN_COMPOSITOR" \
     -DENABLE_CLANG_PLUGINS=OFF \
     -DENABLE_LTO_FOR_RELEASE=OFF \
     -DENABLE_INSTALL_FREEDESKTOP_FILES=OFF \
@@ -374,6 +383,7 @@ cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" \
 # de l'embarquer ou non dans un disque deja proche de son plafond.
 
 OUT="$ROOT/third_party/native-browser-bouchaud"
+if [[ "$VULKAN_COMPOSITOR" == ON ]]; then OUT="$OUT-vulkan"; fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name WebDriver -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
@@ -459,8 +469,13 @@ for runtime in WebContent RequestServer ImageDecoder WebWorker Compositor WebDri
     [ -x "$OUT/$runtime" ] || continue
     file "$OUT/$runtime" | tee "$OUT/$runtime.file.txt"
     if readelf -l "$OUT/$runtime" | grep 'INTERP' >/dev/null; then
-        echo "ERREUR: $runtime contient encore un interpreteur ELF dynamique" >&2
-        readelf -l "$OUT/$runtime" >&2 || true
+        if [[ "$VULKAN_COMPOSITOR" == OFF ]]; then
+            echo "ERREUR: $runtime contient encore un interpreteur ELF dynamique" >&2
+            readelf -l "$OUT/$runtime" >&2 || true
+            exit 1
+        fi
+    elif [[ "$VULKAN_COMPOSITOR" == ON ]]; then
+        echo "ERREUR: $runtime est incompatible avec le Vulkan Loader dynamique" >&2
         exit 1
     fi
 done

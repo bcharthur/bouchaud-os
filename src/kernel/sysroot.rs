@@ -83,6 +83,37 @@ fn write_binary(parent: usize, name: &str, content: &[u8], mode: u16) {
     fs.nodes[node].mode = mode;
 }
 
+/// Vue PCI du noeud de rendu utilisé par l'énumération de libdrm.
+#[cfg(feature = "banc-gpu-venus")]
+pub fn installe_drm_pci(dev: &crate::arch::x86_64::pci::PciDevice) {
+    use alloc::format;
+
+    let noeud = mkdir_path("/sys/dev/char/226:128/device");
+    let dri = mkdir_path("/dev/dri");
+    if noeud == 0 || dri == 0 || mkdir_path("/sys/dev/char/226:128/device/drm") == 0
+        || mkdir_path("/sys/bus/pci") == 0
+    {
+        return;
+    }
+
+    let pci_subsysteme = crate::arch::x86_64::pci::config_lit32(dev, 0x2c);
+    let pci_revision = crate::arch::x86_64::pci::config_lit32(dev, 8) as u8;
+    let event = format!("PCI_SLOT_NAME=0000:{:02x}:{:02x}.{}\n", dev.bus, dev.slot, dev.func);
+    write_file(noeud, "uevent", &event, 0o444);
+    for (nom, valeur) in [
+        ("vendor", dev.vendor),
+        ("device", dev.device),
+        ("subsystem_vendor", pci_subsysteme as u16),
+        ("subsystem_device", (pci_subsysteme >> 16) as u16),
+        ("revision", u16::from(pci_revision)),
+    ] {
+        write_file(noeud, nom, &format!("0x{:04x}\n", valeur), 0o444);
+    }
+
+    // getdents découvre le nom. open et stat le résolvent via device_for_path.
+    write_file(dri, "renderD128", "", 0o666);
+}
+
 /// Installe l'arborescence systeme. Idempotent.
 pub fn install() {
     // Repertoires standards : `ld.so` cherche les bibliotheques dans /lib et

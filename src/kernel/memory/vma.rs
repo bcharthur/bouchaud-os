@@ -31,6 +31,13 @@ pub enum Backing {
         file_offset: u64,
         file_size: u64,
     },
+    /// Blob HOST3D, dont la rétention suit l'espace et ses retraits TLB.
+    #[cfg(feature = "banc-gpu-venus")]
+    GemGpu {
+        bail_id: u64,
+        phys_base: u64,
+        mapping_start: u64,
+    },
     /// Memoire d'un peripherique mappee directement (framebuffer physique).
     Framebuffer {
         phys_base: u64,
@@ -45,6 +52,8 @@ impl Backing {
             Backing::Zero => "zero",
             Backing::File { .. } => "file-private",
             Backing::SharedFile { .. } => "file-shared",
+            #[cfg(feature = "banc-gpu-venus")]
+            Backing::GemGpu { .. } => "gem-gpu",
             Backing::Framebuffer { .. } => "framebuffer",
         }
     }
@@ -209,6 +218,12 @@ pub fn protege(regions: &mut Vec<Vma>, debut: u64, fin: u64, drapeaux: u64) -> b
         let mut milieu = region;
         milieu.debut = region.debut.max(debut);
         milieu.fin = region.fin.min(fin);
+        #[cfg(feature = "banc-gpu-venus")]
+        let drapeaux = if matches!(region.backing, Backing::GemGpu { .. }) {
+            drapeaux | crate::kernel::vmm::PTE_NO_CACHE | crate::kernel::vmm::PTE_WRITE_THROUGH
+        } else {
+            drapeaux
+        };
         let protection_change = region.drapeaux != drapeaux;
         milieu.drapeaux = drapeaux;
         if protection_change {
