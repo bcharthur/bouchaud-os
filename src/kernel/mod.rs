@@ -143,3 +143,5 @@ pub mod security;
 pub mod native;
 #[path = "object/readiness.rs"]
 pub mod readiness;
+
+// Vérification CI isolée du déclenchement sur changement noyau.
