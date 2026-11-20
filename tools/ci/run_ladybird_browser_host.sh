@@ -229,6 +229,15 @@ echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 if [ "$AFFICHAGE" = venus ]; then
   sed -i "1i export LD_LIBRARY_PATH=/lib\nexport VK_DRIVER_FILES=/usr/share/vulkan/icd.d/bouchaud_venus.json\nexport BOUCHAUD_SKIA_BACKEND=$SKIA_BACKEND" "$SCENARIO/autorun"
+  if [[ ${BO_SMOKE_SKIA_TIMINGS:-0} == 1 ]]; then
+    sed -i "1i export BOUCHAUD_SKIA_TIMINGS=1" "$SCENARIO/autorun"
+  fi
+  if [[ ${BO_SMOKE_SKIA_PARTIAL_READBACK:-0} == 1 && $SKIA_BACKEND == vulkan ]]; then
+    sed -i "1i export BOUCHAUD_SKIA_PARTIAL_READBACK=1" "$SCENARIO/autorun"
+  fi
+  if [[ ${BO_SMOKE_SKIA_READBACK_SUBMIT:-0} == 1 && $SKIA_BACKEND == vulkan ]]; then
+    sed -i "1i export BOUCHAUD_SKIA_READBACK_SUBMIT=1" "$SCENARIO/autorun"
+  fi
 fi
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
@@ -1056,6 +1065,14 @@ if [ "$AFFICHAGE" = venus ] && ! grep -aFq "[LB:SKIA] backend=$SKIA_BACKEND" "$L
   exit 1
 fi
 if [ "$AFFICHAGE" = venus ] && [ "$SKIA_BACKEND" = vulkan ]; then
+  if [[ ${BO_SMOKE_SKIA_PARTIAL_READBACK:-0} == 1 ]] && ! grep -aFq '[LB:SKIA] readback=partial' "$LOG"; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=readback_partiel_absent" >&2
+    exit 1
+  fi
+  if [[ ${BO_SMOKE_SKIA_READBACK_SUBMIT:-0} == 1 ]] && ! grep -aFq '[LB:SKIA] submit=readback' "$LOG"; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=submit_par_readback_absent" >&2
+    exit 1
+  fi
   if ! grep -aFq '[LB:SKIA] readback=vulkan' "$LOG" || grep -aFq '[LB:SKIA] readback=failed' "$LOG"; then
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=readback_skia" >&2
     exit 1
