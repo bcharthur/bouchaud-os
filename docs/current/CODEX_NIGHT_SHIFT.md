@@ -152,3 +152,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le profil de build Vulkan sépare les binaires dynamiques et maintient un profil CPU dans le même artefact. Le chemin Skia vérifie le succès de readPixels avant de marquer une relecture. Le repli à l'allocation dessine dans le bitmap partagé. Le smoke exige la relecture Vulkan et les preuves visuelles existantes.
 - Préparateurs testés deux fois sur Ladybird cdfe5f858eb5, diff stable, scripts Bash vérifiés, 22/22 contrats Ladybird, mauvais mode du smoke refusé. Le build complet ne peut pas encore fournir un binaire, car ANGLE n'a pas accès à la source zlib Chromium épinglée. Skia séparé en cours via archives dont les empreintes vcpkg sont conservées et le miroir Git FreType épinglé.
 - Suite. Finir le build Skia, résoudre le téléchargement ANGLE, puis lancer les deux bras du smoke avec le même artefact et relever `[LB:SKIA]`. L'échec RC de l'anneau Mesa et le rendu Vulkan de pages restent à qualifier.
+
+## `1054aed329f9d7aecc4071484e006eb92629ec1a` — Loader explicite et répétitions
+
+- Le profil Vulkan installe explicitement `vulkan-loader`. L'overlay upstream `vulkan` est vide. Le profil CPU continue d'exclure le Loader, les headers et VMA. Les deux manifestes ont été vérifiés sur le vrai arbre Ladybird épinglé.
+- La campagne locale finale a réussi trois lancements sur trois pour chaque QEMU 11.1.3 et 11.2 RC, avec deux motifs exacts par lancement. Les échecs RC de la première série restent recensés. Non-regression Gate 44704736289 vert.
+- Skia isolé. Après Automake/bzip2 avec empreintes d'origine, le miroir FreType et une variante sans Fontconfig ont passé les dépendances concernées. La récupération de GN via CIPD est bloquée. Une tentative avec le vrai GN Debian 487f835 est lancée dans un overlay local, sans changer les outils épinglés du dépôt.
