@@ -1,22 +1,40 @@
 name: Transfert de l'artefact Ladybird Vulkan
 on:
   push:
-    branches: [codex/p10-vulkan-artifact-44731438812]
+    branches: [codex/p10-vulkan-artifact-44762232542]
 permissions:
   actions: read
   contents: read
 jobs:
   export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 120
     steps:
       - name: Vérifier et découper le ZIP publié
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/bcharthur/bouchaud-os/actions/artifacts/14631118879/zip > ladybird.zip
-          echo 'f3be070ceb6eda60d616156ecd1751c5948a4044c0dd282b7ff3410a4c0efc8b  ladybird.zip' | sha256sum -c
-          split -b 24MiB -d -a 2 ladybird.zip partie-
+          set -euo pipefail
+          depot="$GITHUB_REPOSITORY"
+          run=44762232542
+          for tentative in $(seq 1 210); do
+            etat=$(gh api "repos/$depot/actions/runs/$run")
+            jq -e '.head_sha | startswith("4e9c129b")' <<< "$etat" >/dev/null
+            if [[ $(jq -r .status <<< "$etat") == completed ]]; then break; fi
+            sleep 30
+          done
+          jq -e '.status == "completed" and .conclusion == "success"' <<< "$etat" >/dev/null
+          artefact=$(gh api "repos/$depot/actions/runs/$run/artifacts" | jq -cer '
+            [.artifacts[] | select(.name == "bouchaud-ladybird-vulkan-experimental" and .expired == false)]
+            | if length == 1 then .[0] else error("archive Vulkan non unique ou absente") end')
+          aid=$(jq -r .id <<< "$artefact")
+          digest=$(jq -er '.digest | sub("^sha256:"; "") | select(test("^[0-9a-f]{64}$"))' <<< "$artefact")
+          gh api "repos/$depot/actions/artifacts/$aid/zip" > ladybird.zip
+          echo "$digest  ladybird.zip" | tee "$RUNNER_TEMP/ladybird.sha256" | sha256sum -c
+          octets=$(stat -c %s ladybird.zip)
+          tranche=$(((octets + 15) / 16))
+          test "$tranche" -lt $((30 * 1024 * 1024))
+          split -b "$tranche" -d -a 2 ladybird.zip partie-
           test "$(find . -maxdepth 1 -name 'partie-*' | wc -l)" = 16
       - uses: actions/upload-artifact@v4
         with:
