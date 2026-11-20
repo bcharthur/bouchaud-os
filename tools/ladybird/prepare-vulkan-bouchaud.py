@@ -100,11 +100,20 @@ find_package(CURL REQUIRED)""",
     )
 
     remplace(
+        root, "Libraries/LibGfx/PaintingSurface.h", "#include <LibGfx/Size.h>",
+        """#include <LibGfx/Size.h>
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+#    include <AK/Optional.h>
+#    include <LibGfx/Rect.h>
+#endif""",
+    )
+    remplace(
         root, "Libraries/LibGfx/PaintingSurface.h",
         "    void read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;",
         """    void read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
-    bool try_read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;
+    bool try_read_into_bitmap(Bitmap&, IntPoint source_position = {}, Optional<IntRect> destination = {}) const;
+    Optional<IntRect> bouchaud_readback_damage;
 #endif""",
     )
     remplace(
@@ -117,7 +126,7 @@ find_package(CURL REQUIRED)""",
     try_read_into_bitmap(bitmap, source_position);
 }
 
-bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_position) const
+bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_position, Optional<IntRect> destination) const
 #endif
 {""",
     )
@@ -125,6 +134,14 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         root, "Libraries/LibGfx/PaintingSurface.cpp",
         "    m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());",
         """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    if (destination.has_value()) {
+        auto const& rect = *destination;
+        auto const subset_rect = SkIRect::MakeXYWH(rect.x(), rect.y(), rect.width(), rect.height());
+        SkPixmap subset;
+        if (!pixmap.bounds().contains(subset_rect) || !pixmap.extractSubset(&subset, subset_rect))
+            return false;
+        return m_impl->surface->readPixels(subset, source_position.x(), source_position.y());
+    }
     return m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());
 #else
     m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());
@@ -154,12 +171,27 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
     // Le repli dessine directement dans le bitmap partagé.
     if (!surface->skia_backend_context())
         return Gfx::PaintingSurface::wrap_bitmap(*bitmap);
-#endif
-    surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
-#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    // Chaque bitmap doit d'abord recevoir une image complète. Une erreur de
+    // copie complète invalide la base jusqu'à la prochaine lecture réussie.
+    surface->on_flush = [bitmap = move(bitmap), needs_full_readback = true](auto& surface) mutable {
+        static bool const partial = getenv("BOUCHAUD_SKIA_PARTIAL_READBACK") != nullptr;
+        auto const damage = surface.bouchaud_readback_damage;
+        surface.bouchaud_readback_damage.clear();
         static bool const measure = getenv("BOUCHAUD_SKIA_TIMINGS") != nullptr;
         auto const begin = measure ? Optional<MonotonicTime> { MonotonicTime::now() } : Optional<MonotonicTime> {};
-        bool const copied = surface.try_read_into_bitmap(*bitmap);
+        bool const copied_subset = partial && !needs_full_readback && damage.has_value()
+            && !damage->is_empty() && damage->size() != surface.size()
+            && surface.try_read_into_bitmap(*bitmap, damage->location(), damage);
+        bool const copied = copied_subset || surface.try_read_into_bitmap(*bitmap);
+        needs_full_readback = !copied;
+        auto const copied_size = copied_subset ? damage->size() : bitmap->size();
+        if (copied_subset) {
+            static bool published_subset = false;
+            if (!published_subset) {
+                dbgln("[LB:SKIA] readback=partial");
+                published_subset = true;
+            }
+        }
         if (begin.has_value()) {
             auto const end = MonotonicTime::now();
             auto const elapsed = (end - *begin).to_microseconds();
@@ -171,7 +203,7 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
             static thread_local Array<ReadbackSample, 16> samples {};
             static thread_local size_t count = 0;
             samples[count++] = { end.nanoseconds() / 1000,
-                elapsed, copied ? static_cast<u64>(bitmap->width()) * bitmap->height() * 4 : 0 };
+                elapsed, copied ? static_cast<u64>(copied_size.width()) * copied_size.height() * 4 : 0 };
             if (count == samples.size()) {
                 StringBuilder line;
                 for (auto const& sample : samples)
@@ -189,10 +221,22 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
             dbgln("[LB:SKIA] readback=vulkan");
             published_readback = true;
         }
+    };
 #else
+    surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
         surface.read_into_bitmap(*bitmap);
-#endif
-    };""",
+    };
+#endif""",
+    )
+
+    remplace(
+        root, "Services/Compositor/BackingStoreManager.cpp",
+        "        auto damage_rect = store.accumulated_damage;",
+        """        auto damage_rect = store.accumulated_damage;
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        // Le dommage est cumulé depuis la dernière utilisation de ce tampon.
+        store.surface->bouchaud_readback_damage = damage_rect;
+#endif""",
     )
 
     player = "Libraries/LibWeb/Painting/DisplayListPlayerSkia.cpp"
