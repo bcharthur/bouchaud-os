@@ -123,9 +123,9 @@ const VENUS_ENUMERATE_INSTANCE_VERSION: u32 = 137;
 pub const RESSOURCE_RELECTURE_VENUS: u32 = 0xB108;
 
 #[cfg(feature = "banc-gpu-venus")]
-pub fn blob_memoire_venus(id_memoire: u64, octets: u32) -> [u8; 56] {
+pub fn blob_memoire_venus(ressource: u32, id_memoire: u64, octets: u32) -> [u8; 56] {
     let mut q = blob_reponse_venus(octets);
-    put32(&mut q, 24, RESSOURCE_RELECTURE_VENUS);
+    put32(&mut q, 24, ressource);
     q[40..48].copy_from_slice(&id_memoire.to_le_bytes());
     q
 }

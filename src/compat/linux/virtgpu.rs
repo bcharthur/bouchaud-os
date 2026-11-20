@@ -165,6 +165,45 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             virtio_gpu::blit_texture_rendu(session, mot(&buf, 0), mot(&buf, 4), zones)
                 .map_or_else(erreur, |()| 0)
         }
+        // DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB. HOST3D mappable sans
+        // commandes attachées, partage PRIME ou pages invitées.
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc030_644a => {
+            let Some(mut buf) = user_read(arg, 48) else { return -errno::EFAULT; };
+            if mot(&buf, 0) != 2 || mot(&buf, 4) != 1 || buf[24..40].iter().any(|b| *b != 0) {
+                return -errno::EINVAL;
+            }
+            if !super::fault_in_user_range(arg, 48, true) { return -errno::EFAULT; }
+            let octets = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+            let id = u64::from_le_bytes(buf[40..48].try_into().unwrap());
+            let gem = match virtio_gpu::cree_gem_venus(session, id, octets) {
+                Ok(gem) => gem,
+                Err(e) => return erreur(e),
+            };
+            buf[8..12].copy_from_slice(&gem.handle.to_le_bytes());
+            buf[12..16].copy_from_slice(&gem.ressource.to_le_bytes());
+            if user_write(arg, &buf) { return 0; }
+            let _ = virtio_gpu::ferme_gem_venus(session, gem.handle);
+            -errno::EFAULT
+        }
+        #[cfg(feature = "banc-gpu-venus")]
+        0xc010_6445 => {
+            let Some(mut buf) = user_read(arg, 16) else { return -errno::EFAULT; };
+            let gem = match virtio_gpu::info_gem_venus(session, mot(&buf, 0)) {
+                Ok(gem) => gem,
+                Err(e) => return erreur(e),
+            };
+            buf[4..8].copy_from_slice(&gem.ressource.to_le_bytes());
+            buf[8..12].copy_from_slice(&gem.octets.to_le_bytes());
+            buf[12..16].copy_from_slice(&2u32.to_le_bytes());
+            if user_write(arg, &buf) { 0 } else { -errno::EFAULT }
+        }
+        #[cfg(feature = "banc-gpu-venus")]
+        0x4008_6409 => {
+            let Some(buf) = user_read(arg, 8) else { return -errno::EFAULT; };
+            if mot(&buf, 4) != 0 { return -errno::EINVAL; }
+            virtio_gpu::ferme_gem_venus(session, mot(&buf, 0)).map_or_else(erreur, |()| 0)
+        }
         // DRM_IOCTL_VIRTGPU_EXECBUFFER, profil de banc synchrone.
         // Les flux qui demandent une réponse utilisent le blob de transport
         // de l'ouverture. Pas de liste GEM ni de syncobj dans ce profil.

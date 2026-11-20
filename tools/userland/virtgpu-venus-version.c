@@ -66,6 +66,49 @@ struct drm_execbuffer {
 typedef uint32_t reponse_venus[128];
 #define LIT_REPONSE _IOR('B', 0xad, reponse_venus)
 
+struct drm_blob {
+    uint32_t mem, flags, bo, res;
+    uint64_t taille;
+    uint32_t pad, cmd_size;
+    uint64_t cmd, id;
+};
+struct drm_resource_info { uint32_t bo, res, octets, mem; };
+struct drm_gem_close { uint32_t bo, pad; };
+#define DRM_CREATE_BLOB _IOWR('d', 0x4a, struct drm_blob)
+#define DRM_RESOURCE_INFO _IOWR('d', 0x45, struct drm_resource_info)
+#define DRM_GEM_CLOSE _IOW('d', 0x09, struct drm_gem_close)
+
+static int verifie_gem(int fd, const struct drm_blob *blob)
+{
+    struct drm_resource_info info = {.bo = blob->bo};
+    return ioctl(fd, DRM_RESOURCE_INFO, &info) || info.res != blob->res
+           || info.octets != blob->taille || info.mem != 2;
+}
+
+static int verifie_gems(int fd)
+{
+    struct drm_blob invalide = {.mem = 2, .flags = 1, .taille = 4097};
+    if (ioctl(fd, DRM_CREATE_BLOB, &invalide) != -1 || errno != EINVAL) return 1;
+    struct drm_blob blobs[8];
+    for (size_t i = 0; i < sizeof(blobs) / sizeof(blobs[0]); i++) {
+        blobs[i] = (struct drm_blob){.mem = 2, .flags = 1, .taille = i ? 4096 : 65536};
+        if (ioctl(fd, DRM_CREATE_BLOB, &blobs[i]) || !blobs[i].bo || !blobs[i].res
+            || verifie_gem(fd, &blobs[i])) return 2;
+    }
+    struct drm_blob extra = {.mem = 2, .flags = 1, .taille = 4096};
+    if (ioctl(fd, DRM_CREATE_BLOB, &extra) != -1 || errno != ENOMEM) return 3;
+    struct drm_gem_close ferme = {.bo = blobs[0].bo};
+    if (ioctl(fd, DRM_GEM_CLOSE, &ferme) || ioctl(fd, DRM_GEM_CLOSE, &ferme) != -1
+        || errno != ENOENT) return 4;
+    struct drm_resource_info ferme_info = {.bo = ferme.bo};
+    if (ioctl(fd, DRM_RESOURCE_INFO, &ferme_info) != -1 || errno != ENOENT) return 5;
+    if (ioctl(fd, DRM_CREATE_BLOB, &extra) || extra.bo == ferme.bo
+        || extra.res != blobs[0].res || verifie_gem(fd, &extra)) return 6;
+    // Les objets restants exercent la libération groupée du contexte.
+    puts("VIRTGPU_VENUS_DRM_GEM_OK objets=8");
+    return 0;
+}
+
 static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus reponse)
 {
     struct drm_execbuffer req = {.flags = 4, .taille = octets, .commande = (uintptr_t)flux, .fence = -1};
@@ -287,14 +330,16 @@ static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
         struct drm_context_init init = {1, 0, (uintptr_t)&param};
         if (rendu < 0 || ioctl(rendu, DRM_CONTEXT_INIT, &init))
             _exit(1);
-        if (avec_blob && (ioctl(rendu, VERSION_TAILLE, &q) || q.version != reference))
+        struct drm_blob blob = {.mem = 2, .flags = 1, .taille = 65536};
+        if (avec_blob && (ioctl(rendu, VERSION_TAILLE, &q) || q.version != reference
+                          || ioctl(rendu, DRM_CREATE_BLOB, &blob) || verifie_gem(rendu, &blob)))
             _exit(1);
-        if (write(notification[1], "!", 1) != 1) _exit(2);
+        if (write(notification[1], &blob.bo, sizeof(blob.bo)) != sizeof(blob.bo)) _exit(2);
         for (;;) pause();
     }
     close(notification[1]);
-    char octet;
-    ssize_t lu = read(notification[0], &octet, 1);
+    uint32_t bo = 0;
+    ssize_t lu = read(notification[0], &bo, sizeof(bo));
     close(notification[0]);
     struct requete q = {4096, 0};
     uint32_t flux_invalide = UINT32_MAX;
@@ -304,18 +349,26 @@ static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
     };
     reponse_venus reponse;
     memset(reponse, 0x5a, sizeof(reponse));
-    int isole = lu == 1 && ioctl(fd, VERSION_TAILLE, &q) == -1 && errno == EBUSY
+    int isole = lu == sizeof(bo) && ioctl(fd, VERSION_TAILLE, &q) == -1 && errno == EBUSY
                           && ioctl(fd, DEMAPPE) == -1 && errno == EBUSY
                           && ioctl(fd, DRM_EXECBUFFER, &commande) == -1 && errno == EBUSY
                           && ioctl(fd, LIT_REPONSE, reponse) == -1 && errno == EBUSY;
     for (size_t i = 0; i < sizeof(reponse) / sizeof(reponse[0]); i++)
         isole &= reponse[i] == 0x5a5a5a5a;
+    if (avec_blob) {
+        struct drm_resource_info info = {.bo = bo};
+        struct drm_gem_close ferme = {.bo = bo};
+        isole &= bo != 0 && ioctl(fd, DRM_RESOURCE_INFO, &info) == -1 && errno == EBUSY
+                         && ioctl(fd, DRM_GEM_CLOSE, &ferme) == -1 && errno == EBUSY;
+    }
     int statut;
     if (kill(enfant, SIGKILL) || waitpid(enfant, &statut, 0) != enfant
         || !WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL || !isole)
         return 3;
-    if (ioctl(fd, VERSION_TAILLE, &q) || q.version != reference || ioctl(fd, DEMAPPE))
+    if (ioctl(fd, VERSION_TAILLE, &q) || q.version != reference)
         return 4;
+    if (avec_blob && verifie_gems(fd)) return 5;
+    if (ioctl(fd, DEMAPPE)) return 6;
     puts(avec_blob ? "VIRTGPU_VENUS_PROPRIETAIRE_OK" : "VIRTGPU_VENUS_CTX_ORPHELIN_OK");
     return 0;
 }
@@ -340,6 +393,8 @@ int main(int argc, char **argv)
            reference >> 22, (reference >> 12) & 0x3ff, reference & 0xfff);
     if (argc > 1) {
         if (verifie_instances(fd)) return 16;
+        int gem = verifie_gems(fd);
+        if (gem) { printf("VIRTGPU_VENUS_DRM_GEM_ECHEC etape=%d\n", gem); return 18; }
         if (ioctl(fd, DEMAPPE)) {
             perror("VENUS_DEMAPPE");
             return 6;

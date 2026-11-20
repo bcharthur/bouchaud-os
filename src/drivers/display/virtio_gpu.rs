@@ -37,7 +37,7 @@ pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
 #[path = "virtio_gpu_venus.rs"]
 mod venus;
 #[cfg(feature = "banc-gpu-venus")]
-pub use venus::{contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
+pub use venus::{cree_gem_venus, ferme_gem_venus, info_gem_venus, contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
     initialise_contexte_venus, relis_memoire_venus, soumets_venus, version_vulkan_banc,
     OCTETS_REPONSE_VENUS, TAILLE_RELECTURE_VENUS};
 
@@ -474,6 +474,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     capset,
                     #[cfg(feature = "banc-gpu-venus")]
                     hostmem_venus,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    gems_venus: venus::Gems::neuf(),
                     #[cfg(feature = "banc-gpu-venus")]
                     capset_venus,
                     textures_rendu: rendu::TexturesRendu::neuf(),
@@ -1159,6 +1161,8 @@ struct Peripherique {
     capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     #[cfg(feature = "banc-gpu-venus")]
     hostmem_venus: Option<venus::Canal>,
+    #[cfg(feature = "banc-gpu-venus")]
+    gems_venus: venus::Gems,
     #[cfg(feature = "banc-gpu-venus")]
     capset_venus: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     textures_rendu: rendu::TexturesRendu,
