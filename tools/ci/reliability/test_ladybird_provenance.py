@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """BOUCHAUD_LADYBIRD_PROVENANCE_V2 : reutiliser, attendre, produire ou construire."""
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -197,8 +199,20 @@ class ProductionTests(unittest.TestCase):
 
         empreintes = {sha(1): AUTRE, sha(2): E}
         self.assertEqual(lp.selectionne_ref_production(api, ("topic/gpu", "main"), E, empreintes.get), "main")
-        with self.assertRaisesRegex(lp.AttenteEchec, "aucune branche"):
+        with self.assertRaisesRegex(lp.AucuneBrancheCompatible, "aucune branche"):
             lp.selectionne_ref_production(api, ("topic/gpu",), E, empreintes.get)
+
+    def test_fusion_verifie_parent_base_et_tete_du_checkout(self):
+        with tempfile.TemporaryDirectory() as dossier:
+            evenement = Path(dossier) / "event.json"
+            evenement.write_text(json.dumps({"pull_request": {
+                "base": {"sha": sha(1)}, "head": {"sha": sha(2)}}}))
+            env = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(evenement),
+                   "GITHUB_SHA": sha(3)}
+            self.assertTrue(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"{sha(1)} {sha(2)}".encode()))
+            self.assertFalse(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"{sha(1)} {sha(4)}".encode()))
+            self.assertFalse(lp.fusion_pr_verifiee(env, sha(4), lambda *args: f"{sha(1)} {sha(2)}".encode()))
+            self.assertFalse(lp.fusion_pr_verifiee(dict(env, GITHUB_EVENT_NAME="push"), sha(3), None))
 
     def test_reconstruire_ignore_tout_artefact_et_toute_production_anterieure(self):
         dec = Declencheur()
