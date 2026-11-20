@@ -6,6 +6,11 @@ if [[ $# != 2 || -z ${DISPLAY:-} ]]; then
     echo 'usage: DISPLAY=:N run_virtgpu_venus.sh BOOTIMAGE_BANC_VENUS NEW_OUTPUT_DIR' >&2
     exit 2
 fi
+smp=${BO_VIRTGPU_SMP:-2}
+if [[ $smp != 2 && $smp != 4 ]]; then
+    echo 'BO_VIRTGPU_SMP doit valoir 2 ou 4' >&2
+    exit 2
+fi
 boot=$(realpath "$1")
 sortie=$(realpath -m "$2")
 mkdir "$sortie"
@@ -47,7 +52,7 @@ RUN
 fi
 printf 'poweroff\n' >>"$sortie/scen/autorun"
 IMAGE="$sortie/guest.img" tools/userland/mkdisk.sh "$sortie/scen" >/dev/null
-timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 -vga none \
+timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp "$smp" -m 2048 -vga none \
     -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M -display gtk,gl=on -no-reboot \
     -drive "format=raw,file=$boot,snapshot=on" \
     -drive "format=raw,file=$sortie/guest.img,snapshot=on" \

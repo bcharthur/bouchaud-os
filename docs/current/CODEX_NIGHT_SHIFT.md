@@ -171,3 +171,8 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Correctif QEMU proposé dans `docs/current/patches/qemu-virtio-gpu-fenced-unmap.patch`. `git apply --check` passe sur les deux versions étudiées. La compilation et le rejeu hôte de cette proposition restent ouverts. La solution côté invité a déjà été qualifiée avec les binaires QEMU distribués.
 - Non-regression Gate 44705582786 et ladybird-sync 44705582800 verts au premier contrôle. GPU composition 44705582767 et Security Runtime 44705582731 étaient en cours.
 - Skia de contrôle compile sous GN Debian avec l'overlay local sans PIEX ni Fontconfig. Commande de syntaxe réussie pour la sonde `/workspace/work/p10/skia-vulkan-probe.cpp`. Attendre libskia, compiler la sonde et lancer une comparaison de pixels dans l'invité. Le build Ladybird reste bloqué sur ANGLE.
+
+## `abeef5367d45965ce90507e8a800fe67e5931ae2` — Venus SMP4
+
+- `BO_VIRTGPU_SMP=4` exécute le même verdict du transport et du Loader. Le test complet avec isolation, mmap et relecture passe sur QEMU 11.1.3. Les deux motifs via les fonctions publiques passent sur 11.1.3 et 11.2 RC en SMP4. Les valeurs hors 2/4 sont refusées avant le lancement.
+- À reprendre pour le premier rendu Skia isolé, utiliser `bash /workspace/work/p10/run-skia-vulkan-probe.sh /workspace/work/p10/skia-essai-neuf` après apparition de `/workspace/work/p10/skia-installed/x64-linux/lib/libskia.a`. La sonde attend 1 024 pixels exacts. Le build complet de Ladybird requiert toujours les sources protégées par le pin ANGLE et un rootfs Vulkan compatible.
