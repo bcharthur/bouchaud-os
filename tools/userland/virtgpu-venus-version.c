@@ -598,9 +598,31 @@ static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
     return 0;
 }
 
+static int verifie_profil_vulkan(int autorise)
+{
+    const char *chemin = "/dev/dri/renderD128";
+    int fd = open(chemin, O_RDWR | O_CLOEXEC);
+    if (!autorise) {
+        if (fd != -1 || errno != EACCES) return 1;
+        puts("VIRTGPU_VENUS_PROFIL_REFUSE_OK");
+        return 0;
+    }
+
+    if (fd < 0 || verifie_decouverte_drm() || verifie_version_drm(fd) || close(fd)) return 2;
+    if (open(chemin, O_WRONLY | O_TRUNC) != -1 || errno != EACCES) return 3;
+    if (unlink(chemin) != -1 || errno != EACCES) return 4;
+    if (open("/dev/input/event0", O_RDONLY) != -1 || errno != EACCES) return 5;
+    puts("VIRTGPU_VENUS_PROFIL_COMPOSITOR_OK");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc == 2 && !strcmp(argv[1], "fin")) return 0;
+    if (argc == 2) {
+        if (!strcmp(argv[1], "fin")) return 0;
+        if (!strcmp(argv[1], "profil-autorise")) return verifie_profil_vulkan(1);
+        if (!strcmp(argv[1], "profil-refuse")) return verifie_profil_vulkan(0);
+    }
     int fd = open("/dev/dri/renderD128", O_RDWR);
     int decouverte = verifie_decouverte_drm();
     if (decouverte) { printf("VIRTGPU_VENUS_DRM_DECOUVERTE_ECHEC etape=%d\n", decouverte); return 19; }

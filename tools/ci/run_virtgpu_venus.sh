@@ -31,11 +31,21 @@ RUN
 else
     musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-venus-version.c -o "$sortie/scen/version"
     if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
-        printf '/version demappe\n' > "$sortie/scen/autorun"
+        mkdir -p "$sortie/scen/usr/libexec/ladybird"
+        for chemin in usr/libexec/ladybird/Compositor usr/libexec/ladybird/WebContent usr/libexec/Compositor; do
+            cp "$sortie/scen/version" "$sortie/scen/$chemin"
+        done
+        cat >"$sortie/scen/autorun" <<'RUN'
+/version demappe
+/usr/libexec/ladybird/Compositor profil-autorise
+/usr/libexec/ladybird/WebContent profil-refuse
+/usr/libexec/Compositor profil-refuse
+RUN
     else
         printf '/version\n' > "$sortie/scen/autorun"
     fi
 fi
+printf 'poweroff\n' >>"$sortie/scen/autorun"
 IMAGE="$sortie/guest.img" tools/userland/mkdisk.sh "$sortie/scen" >/dev/null
 timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp 2 -m 2048 -vga none \
     -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M -display gtk,gl=on -no-reboot \
@@ -65,6 +75,8 @@ grep -aqF 'VIRTGPU_VENUS_DRM_CONTEXT_OK' "$sortie/serie.log"
 grep -aoE 'VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=[0-9.]+' "$sortie/serie.log"
 if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     grep -aqF 'VIRTGPU_VENUS_DRM_NON_ROOT_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_PROFIL_COMPOSITOR_OK' "$sortie/serie.log"
+    test "$(grep -acF 'VIRTGPU_VENUS_PROFIL_REFUSE_OK' "$sortie/serie.log")" -eq 2
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096' "$sortie/serie.log")" -eq 2
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_MMAP_OK octets=4096' "$sortie/serie.log")" -eq 2
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096' "$sortie/serie.log")" -eq 4

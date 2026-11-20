@@ -139,3 +139,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - La sonde Vulkan Loader/Mesa a comparé les deux motifs sur QEMU 11.1.3 et sur une reprise 11.2 RC. La première exécution RC reste comptée comme un échec de stabilité.
 - Le nœud de parcours et le périphérique synthétique ont maintenant le même mode 0666. Le banc confirme l'ouverture O_RDWR et DRM VERSION après passage à uid/gid 65534. Le pilote conserve l'isolement des handles par ouverture.
 - Le build navigateur Vulkan bloque sur le téléchargement Chromium zlib épinglé par ANGLE, réponse CONNECT 403. Le build Skia séparé a repris après reconstruction de l'archive Automake depuis Debian avec le SHA512 exact de vcpkg.
+
+## `cf355b00` — accès DRM limité au Compositor
+
+- Le profil sandboxé de l'image installée `/usr/libexec/ladybird/Compositor` peut découvrir et ouvrir l'unique nœud Venus. L'exception de lecture est limitée aux attributs libdrm. Les mutations et les périphériques privilégiés restent refusés.
+- Le banc 11.2 RC teste le chemin exact, l'accès interdit à WebContent et à un Compositor hors du répertoire prévu, la suppression, la troncature et l'accès e/s. Le banc se termine par poweroff sans raccourcir le délai de protection.
+- Campagne Loader 11.2 RC. Trois réussites sur cinq lancements connus. Un échec attendait la séquence de l'anneau au second motif et un lancement TCG a expiré avant toute série. QEMU 11.1.3 a confirmé les deux motifs lors du premier essai public.
