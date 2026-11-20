@@ -202,7 +202,10 @@ ErrorOr<int> ladybird_main(Main::Arguments)
 
     Vector<ByteString> arguments;
     arguments.append("BouchaudBrowserHost");
-    arguments.append("--force-cpu-painting");
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    if (StringView { env_ou("BOUCHAUD_SKIA_BACKEND", "cpu") } != "vulkan"sv)
+#endif
+        arguments.append("--force-cpu-painting");
     arguments.append("--force-fontconfig");
     // Pas de `--disable-sandbox` : BOUCHAUD_SANDBOX_V1. Le noyau confine
     // chaque service par profil (`src/kernel/security/profile.rs`) et chaque

@@ -16,5 +16,7 @@ python3 tools/verifie-chain-ladybird.py
 ./tools/ladybird/webcontent-qemu-bootstrap.sh
 
 echo
-printf '\033[32mArtefacts natifs : third_party/native-browser-bouchaud\033[0m\n'
-ls -lh third_party/native-browser-bouchaud
+OUT=third_party/native-browser-bouchaud
+if [[ ${BOUCHAUD_P10_GPU_VULKAN:-0} == 1 ]]; then OUT="$OUT-vulkan"; fi
+printf '\033[32mArtefacts natifs : %s\033[0m\n' "$OUT"
+ls -lh "$OUT"

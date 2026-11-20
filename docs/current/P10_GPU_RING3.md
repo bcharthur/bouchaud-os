@@ -335,3 +335,38 @@ DISPLAY=:77 BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh \
 La charge encode le protocole Venus et utilise une copie privée pour la
 relecture. L'intégration standard requiert encore GEM, mmap et Mesa.
 Le journal décrit le correctif de démappage et le périmètre HOST3D.
+
+## Loader Mesa et profil Skia expérimental
+
+La sonde des fonctions publiques Vulkan valide deux cycles indépendants
+avec un Loader glibc et Mesa Venus. Compiler
+`tools/userland/vulkan-transfert-probe.c` contre le Loader, puis placer
+`vulkan-probe`, `venus.json` et les bibliothèques de l'invité dans un
+répertoire. L'ICD sélectionné doit être Mesa Venus. Lavapipe a servi de
+renderer hôte pour les essais TCG.
+
+~~~bash
+DISPLAY=:77 BO_VENUS_LOADER_SYSROOT=/chemin/rootfs \
+  tools/ci/run_virtgpu_venus.sh BOOTIMAGE /tmp/venus-loader
+~~~
+
+Pour construire le navigateur avec le backend Skia Vulkan, utiliser
+`BOUCHAUD_P10_GPU_VULKAN=1 tools/ladybird/native-browser-final.sh --cible`.
+L'artefact expérimental est placé sous
+`third_party/native-browser-bouchaud-vulkan`. Il requiert un interpréteur
+ELF et des bibliothèques glibc compatibles avec la machine de build.
+Le profil CPU et Vulkan peuvent être mesurés avec cet artefact unique
+en changeant `BO_SMOKE_SKIA_BACKEND`.
+
+~~~bash
+DISPLAY=:77 BO_SMOKE_AFFICHAGE=venus BO_SMOKE_SKIA_BACKEND=vulkan \
+  BO_SMOKE_VENUS_SYSROOT=/chemin/rootfs \
+  tools/ci/run_ladybird_browser_host.sh BOOTIMAGE \
+    third_party/native-browser-bouchaud-vulkan
+~~~
+
+Le compositing partagé passe par un bitmap et la relecture Skia. Le
+partage DMA-BUF exige encore PRIME dans le pilote. Le verdict Vulkan
+demande une relecture Skia réussie et les vérifications visuelles du
+smoke. Le build complet reste à qualifier après résolution de l'accès
+à la dépendance zlib Chromium d'ANGLE.

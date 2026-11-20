@@ -145,3 +145,10 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le profil sandboxé de l'image installée `/usr/libexec/ladybird/Compositor` peut découvrir et ouvrir l'unique nœud Venus. L'exception de lecture est limitée aux attributs libdrm. Les mutations et les périphériques privilégiés restent refusés.
 - Le banc 11.2 RC teste le chemin exact, l'accès interdit à WebContent et à un Compositor hors du répertoire prévu, la suppression, la troncature et l'accès e/s. Le banc se termine par poweroff sans raccourcir le délai de protection.
 - Campagne Loader 11.2 RC. Trois réussites sur cinq lancements connus. Un échec attendait la séquence de l'anneau au second motif et un lancement TCG a expiré avant toute série. QEMU 11.1.3 a confirmé les deux motifs lors du premier essai public.
+
+## `0136863390da0ab3cc9f5794b9dae06587455576` — profil Skia du navigateur
+
+- Le vrai Loader/Mesa a confirmé les deux motifs avec le binaire de sonde exécuté sous l'identité sandboxée du Compositor. Cette vérification couvre l'accès DRM et le transport, indépendamment de Skia.
+- Le profil de build Vulkan sépare les binaires dynamiques et maintient un profil CPU dans le même artefact. Le chemin Skia vérifie le succès de readPixels avant de marquer une relecture. Le repli à l'allocation dessine dans le bitmap partagé. Le smoke exige la relecture Vulkan et les preuves visuelles existantes.
+- Préparateurs testés deux fois sur Ladybird cdfe5f858eb5, diff stable, scripts Bash vérifiés, 22/22 contrats Ladybird, mauvais mode du smoke refusé. Le build complet ne peut pas encore fournir un binaire, car ANGLE n'a pas accès à la source zlib Chromium épinglée. Skia séparé en cours via archives dont les empreintes vcpkg sont conservées et le miroir Git FreType épinglé.
+- Suite. Finir le build Skia, résoudre le téléchargement ANGLE, puis lancer les deux bras du smoke avec le même artefact et relever `[LB:SKIA]`. L'échec RC de l'anneau Mesa et le rendu Vulkan de pages restent à qualifier.

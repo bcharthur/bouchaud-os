@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Configure the opt-in Bouchaud Skia/Vulkan compositor in the pinned worktree."""
+from pathlib import Path
+import sys
+
+
+def remplace(root: Path, chemin: str, source: str, cible: str) -> None:
+    fichier = root / chemin
+    texte = fichier.read_text(encoding="utf-8")
+    if cible in texte:
+        return
+    if texte.count(source) != 1:
+        raise SystemExit(f"Ancre Vulkan introuvable dans {chemin}")
+    fichier.write_text(texte.replace(source, cible, 1), encoding="utf-8")
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: prepare-vulkan-bouchaud.py LADYBIRD_WORKTREE")
+    root = Path(sys.argv[1])
+    deps = "Meta/CMake/check_for_dependencies.cmake"
+    remplace(
+        root, deps,
+        "        if (((LINUX AND NOT ANDROID) OR BSD) AND GLSLANG_VALIDATOR)",
+        "        if (NOT BOUCHAUD_VULKAN_COMPOSITOR AND ((LINUX AND NOT ANDROID) OR BSD) AND GLSLANG_VALIDATOR)",
+    )
+    remplace(
+        root, deps, "\nfind_package(CURL REQUIRED)",
+        """
+if (BOUCHAUD_VULKAN_COMPOSITOR AND NOT HAS_VULKAN)
+    message(FATAL_ERROR "Bouchaud Vulkan compositor requires Vulkan Loader, headers and VMA")
+endif()
+if (BOUCHAUD_VULKAN_COMPOSITOR)
+    add_cxx_compile_definitions(BOUCHAUD_VULKAN_COMPOSITOR=1)
+endif()
+
+find_package(CURL REQUIRED)""",
+    )
+
+    # The platform selects CPU if optional Vulkan initialisation fails.
+    remplace(
+        root, "Libraries/LibGfx/SkiaBackendContext.cpp",
+        """    backend_context.fMemoryAllocator = create_skia_vulkan_memory_allocator(vulkan_context);
+    VERIFY(backend_context.fMemoryAllocator);
+
+    sk_sp<GrDirectContext> ctx = GrDirectContexts::MakeVulkan(backend_context);
+    VERIFY(ctx);""",
+        """    backend_context.fMemoryAllocator = create_skia_vulkan_memory_allocator(vulkan_context);
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    sk_sp<GrDirectContext> ctx;
+    if (backend_context.fMemoryAllocator)
+        ctx = GrDirectContexts::MakeVulkan(backend_context);
+    if (!ctx) {
+        backend_context.fMemoryAllocator.reset();
+        vkDestroyDevice(vulkan_context.logical_device, nullptr);
+        vkDestroyInstance(vulkan_context.instance, nullptr);
+        return {};
+    }
+#else
+    VERIFY(backend_context.fMemoryAllocator);
+    sk_sp<GrDirectContext> ctx = GrDirectContexts::MakeVulkan(backend_context);
+    VERIFY(ctx);
+#endif""",
+    )
+    remplace(
+        root, "Libraries/LibGfx/VulkanContext.cpp",
+        """    auto* instance = TRY(create_instance(api_version));
+    auto* physical_device = TRY(pick_physical_device(instance));
+
+    uint32_t graphics_queue_family = 0;
+    auto* logical_device = TRY(create_logical_device(physical_device, &graphics_queue_family));""",
+        """    auto* instance = TRY(create_instance(api_version));
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    auto physical = pick_physical_device(instance);
+    if (physical.is_error()) {
+        vkDestroyInstance(instance, nullptr);
+        return physical.release_error();
+    }
+    auto* physical_device = physical.release_value();
+    uint32_t graphics_queue_family = 0;
+    auto device = create_logical_device(physical_device, &graphics_queue_family);
+    if (device.is_error()) {
+        vkDestroyInstance(instance, nullptr);
+        return device.release_error();
+    }
+    auto* logical_device = device.release_value();
+#else
+    auto* physical_device = TRY(pick_physical_device(instance));
+    uint32_t graphics_queue_family = 0;
+    auto* logical_device = TRY(create_logical_device(physical_device, &graphics_queue_family));
+#endif""",
+    )
+    remplace(
+        root, "Services/Compositor/main.cpp",
+        "    auto skia_backend_context = Gfx::SkiaBackendContext::the_main_thread_context();",
+        """    auto skia_backend_context = Gfx::SkiaBackendContext::the_main_thread_context();
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    dbgln("[LB:SKIA] backend={}", skia_backend_context ? "vulkan" : "cpu");
+#endif""",
+    )
+
+    remplace(
+        root, "Libraries/LibGfx/PaintingSurface.h",
+        "    void read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;",
+        """    void read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    bool try_read_into_bitmap(Bitmap&, IntPoint source_position = {}) const;
+#endif""",
+    )
+    remplace(
+        root, "Libraries/LibGfx/PaintingSurface.cpp",
+        """void PaintingSurface::read_into_bitmap(Bitmap& bitmap, IntPoint source_position) const
+{""",
+        """void PaintingSurface::read_into_bitmap(Bitmap& bitmap, IntPoint source_position) const
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+{
+    try_read_into_bitmap(bitmap, source_position);
+}
+
+bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_position) const
+#endif
+{""",
+    )
+    remplace(
+        root, "Libraries/LibGfx/PaintingSurface.cpp",
+        "    m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());",
+        """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    return m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());
+#else
+    m_impl->surface->readPixels(pixmap, source_position.x(), source_position.y());
+#endif""",
+    )
+    remplace(
+        root, "Services/Compositor/BackingStoreManager.cpp",
+        """    auto bitmap = buffer.bitmap();
+    surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
+        surface.read_into_bitmap(*bitmap);
+    };""",
+        """    auto bitmap = buffer.bitmap();
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    // RenderTarget peut échouer après une initialisation Vulkan réussie.
+    // Le repli dessine directement dans le bitmap partagé.
+    if (!surface->skia_backend_context())
+        return Gfx::PaintingSurface::wrap_bitmap(*bitmap);
+#endif
+    surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        if (!surface.try_read_into_bitmap(*bitmap)) {
+            warnln("[LB:SKIA] readback=failed");
+            return;
+        }
+        static bool published_readback = false;
+        if (!published_readback) {
+            dbgln("[LB:SKIA] readback=vulkan");
+            published_readback = true;
+        }
+#else
+        surface.read_into_bitmap(*bitmap);
+#endif
+    };""",
+    )
+
+
+if __name__ == "__main__":
+    main()
