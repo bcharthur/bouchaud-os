@@ -129,3 +129,5 @@ jobs:
             /tmp/ladybird-vulkan-dynamic.txt
           if-no-files-found: ignore
           retention-days: 7
+
+# Second passage de qualification, recette de build identique.
