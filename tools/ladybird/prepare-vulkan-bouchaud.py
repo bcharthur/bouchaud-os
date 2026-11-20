@@ -158,7 +158,7 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
     surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
         static bool const measure = getenv("BOUCHAUD_SKIA_TIMINGS") != nullptr;
-        auto const begin = measure ? Optional { MonotonicTime::now() } : Optional<MonotonicTime> {};
+        auto const begin = measure ? Optional<MonotonicTime> { MonotonicTime::now() } : Optional<MonotonicTime> {};
         bool const copied = surface.try_read_into_bitmap(*bitmap);
         if (begin.has_value()) {
             auto const end = MonotonicTime::now();
