@@ -132,6 +132,18 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
     )
     remplace(
         root, "Services/Compositor/BackingStoreManager.cpp",
+        "#include <AK/AnyOf.h>",
+        """#include <AK/AnyOf.h>
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+#    include <AK/Array.h>
+#    include <AK/Optional.h>
+#    include <AK/StringBuilder.h>
+#    include <AK/Time.h>
+#    include <stdlib.h>
+#endif""",
+    )
+    remplace(
+        root, "Services/Compositor/BackingStoreManager.cpp",
         """    auto bitmap = buffer.bitmap();
     surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
         surface.read_into_bitmap(*bitmap);
@@ -145,7 +157,30 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
 #endif
     surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
-        if (!surface.try_read_into_bitmap(*bitmap)) {
+        static bool const measure = getenv("BOUCHAUD_SKIA_TIMINGS") != nullptr;
+        auto const begin = measure ? Optional { MonotonicTime::now() } : Optional<MonotonicTime> {};
+        bool const copied = surface.try_read_into_bitmap(*bitmap);
+        if (begin.has_value()) {
+            auto const end = MonotonicTime::now();
+            auto const elapsed = (end - *begin).to_microseconds();
+            struct ReadbackSample {
+                i64 end_us;
+                i64 elapsed_us;
+                u64 bytes;
+            };
+            static thread_local Array<ReadbackSample, 16> samples {};
+            static thread_local size_t count = 0;
+            samples[count++] = { end.nanoseconds() / 1000,
+                elapsed, copied ? static_cast<u64>(bitmap->width()) * bitmap->height() * 4 : 0 };
+            if (count == samples.size()) {
+                StringBuilder line;
+                for (auto const& sample : samples)
+                    line.appendff(" {}:{}:{}", sample.end_us, sample.elapsed_us, sample.bytes);
+                dbgln("[LB:SKIA:READBACK] end_us:wall_us:bytes{}", line.string_view());
+                count = 0;
+            }
+        }
+        if (!copied) {
             warnln("[LB:SKIA] readback=failed");
             return;
         }

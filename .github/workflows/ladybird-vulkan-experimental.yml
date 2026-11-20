@@ -1,7 +1,9 @@
 name: Ladybird Vulkan experimental
 on:
   push:
-    branches: ['codex/p10-real-gpu-vulkan-20261119']
+    branches:
+      - codex/p10-real-gpu-vulkan-20261119
+      - codex/p10-ladybird-fluidity-20261120
     paths:
       - '.github/workflows/ladybird-vulkan-experimental.yml'
       - 'third_party/UPSTREAM.md'
