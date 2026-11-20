@@ -194,6 +194,21 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
                 Err(e) => erreur(e),
             }
         }
+        // Bouchaud _IOW('B', 0xae, {u64 id_memoire, u64 destination}).
+        #[cfg(feature = "banc-gpu-venus")]
+        0x4010_42ae => {
+            let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT; };
+            let id = u64::from_le_bytes(buf[..8].try_into().unwrap());
+            let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+            if !super::fault_in_user_range(adresse, virtio_gpu::TAILLE_RELECTURE_VENUS, true) {
+                return -errno::EFAULT;
+            }
+            match virtio_gpu::relis_memoire_venus(session, id) {
+                Ok(octets) if user_write(adresse, &octets) => 0,
+                Ok(_) => -errno::EFAULT,
+                Err(e) => erreur(e),
+            }
+        }
         // DRM_IOCTL_VIRTGPU_CONTEXT_INIT, sous-ensemble Venus à un anneau.
         #[cfg(feature = "banc-gpu-venus")]
         0xc010_644b => {

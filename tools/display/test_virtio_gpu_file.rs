@@ -22,7 +22,7 @@ fn conforme() -> (u16, u16, Utilise, u32, u32, u64, u64) {
 }
 
 fn juge_t(t: (u16, u16, Utilise, u32, u32, u64, u64)) -> Result<(), Violation> {
-    juge(t.0, t.1, t.2, t.3, t.4, t.5, t.6)
+    juge(t.0, t.1, t.2, t.3, t.4, t.5, Some(t.6))
 }
 
 #[test]
@@ -176,4 +176,14 @@ fn la_barriere_d_un_anneau_venus_doit_identifier_son_contexte() {
     assert!(!file::contexte_valide(0b11, 0xb105, 0xb104));
     assert!(!file::contexte_valide(0b11, 0xb105, 0));
     assert!(file::contexte_valide(0b01, 0xb105, 0));
+}
+
+
+#[test]
+fn unmap_host3d_sans_cloture_valide_uniquement_une_reponse_sans_cloture() {
+    let u = Utilise { id: 0, len: ENTETE };
+    assert_eq!(juge(1, 0, u, ENTETE, 0, 0, None), Ok(()));
+    assert_eq!(juge(1, 0, u, ENTETE, DRAPEAU_BARRIERE, 0, None), Err(Violation::BarriereInattendue));
+    assert_eq!(juge(1, 0, u, ENTETE, 0, 17, None), Err(Violation::BarriereInattendue));
+    assert_eq!(juge(2, 0, u, ENTETE, 0, 0, None), Err(Violation::TropDEntrees { avance: 2 }));
 }

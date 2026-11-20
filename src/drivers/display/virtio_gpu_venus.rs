@@ -14,6 +14,7 @@ const MAX_BLOB_REPONSE: u64 = 1024 * 1024;
 pub(super) struct Fenetre {
     adresse: usize,
     octets: u64,
+    relecture: Option<usize>,
 }
 
 pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
@@ -44,7 +45,13 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
         }
         let v = memory::mappe_mmio(base, PAGE as u64).ok()?;
         crate::serial_println!("P10_VENUS_HOSTMEM_OK octets={} page={}", taille, PAGE);
-        return Some(Fenetre { adresse: v as usize, octets: taille });
+        // Le blob de relecture ne recouvre jamais celui des réponses.
+        let relecture = if taille >= MAX_BLOB_REPONSE + PAGE as u64 {
+            memory::mappe_mmio(base + MAX_BLOB_REPONSE, PAGE as u64).ok().map(|ptr| ptr as usize)
+        } else {
+            None
+        };
+        return Some(Fenetre { adresse: v as usize, octets: taille, relecture });
     }
     None
 }
@@ -252,6 +259,53 @@ pub fn copie_reponse_venus(session: &Arc<()>) -> Result<[u8; OCTETS_REPONSE_VENU
     Ok(octets)
 }
 
+pub const TAILLE_RELECTURE_VENUS: usize = PAGE;
+
+pub fn relis_memoire_venus(session: &Arc<()>, id_memoire: u64) -> Result<alloc::vec::Vec<u8>, ErreurRendu> {
+    if id_memoire == 0 { return Err(ErreurRendu::Invalide); }
+    let mut sortie = alloc::vec::Vec::new();
+    sortie.try_reserve_exact(PAGE).map_err(|_| ErreurRendu::Plein)?;
+    sortie.resize(PAGE, 0);
+    let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
+    let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    aperture_possedee(p, session)?;
+    let Some(Canal::Ouvert(Fenetre { relecture: Some(adresse), .. }, _, _)) = &p.hostmem_venus else {
+        return Err(ErreurRendu::Indisponible);
+    };
+    match unsafe { copie_memoire_exportee(&mut p.file, *adresse, id_memoire, &mut sortie) } {
+        Ok(()) => Ok(sortie),
+        Err(etape) => {
+            // La première erreur peut avoir laissé le second blob vivant.
+            // Aucune réutilisation des deux fenêtres sans reset.
+            p.hostmem_venus = None;
+            crate::serial_println!("P10_VENUS_RELECTURE_ECHEC etape={}", etape);
+            Err(ErreurRendu::Commande)
+        }
+    }
+}
+
+unsafe fn copie_memoire_exportee(f: &mut FileControle, adresse: usize, id_memoire: u64,
+    sortie: &mut [u8]) -> Result<(), &'static str>
+{
+    if f.commande(&gpu3d::blob_memoire_venus(id_memoire, PAGE as u32), ENTETE)? != RESP_OK_NODATA {
+        return Err("export-memoire");
+    }
+    let (q, n) = gpu3d::mappe_memoire_venus(true, MAX_BLOB_REPONSE);
+    if f.commande(&q[..n], 32)? != RESP_OK_MAP_INFO {
+        let _ = libere(f, gpu3d::RESSOURCE_RELECTURE_VENUS);
+        return Err("map-memoire");
+    }
+    fence(Ordering::SeqCst);
+    let mem = adresse as *const u8;
+    for (i, octet) in sortie.iter_mut().enumerate() {
+        *octet = read_volatile(mem.add(i));
+    }
+    let (q, n) = gpu3d::mappe_memoire_venus(false, 0);
+    if f.commande(&q[..n], ENTETE).map_err(|_| "unmap-memoire-sans-reponse")? != RESP_OK_NODATA { return Err("unmap-memoire"); }
+    if libere(f, gpu3d::RESSOURCE_RELECTURE_VENUS)? != RESP_OK_NODATA { return Err("unref-memoire"); }
+    Ok(())
+}
+
 unsafe fn ferme_objets(f: &mut FileControle, blob: bool) -> Result<(), &'static str> {
     if !blob { return ferme_contexte(f, false); }
     let (q, n) = gpu3d::mappe_reponse_venus(false);
@@ -264,10 +318,10 @@ unsafe fn ferme_objets(f: &mut FileControle, blob: bool) -> Result<(), &'static 
 }
 
 unsafe fn ferme_contexte(f: &mut FileControle, blob: bool) -> Result<(), &'static str> {
-    let (q, n) = gpu3d::contexte_venus(false);
-    if f.commande(&q[..n], ENTETE) != Ok(RESP_OK_NODATA) { return Err("ctx-destroy"); }
     if blob && libere(f, gpu3d::RESSOURCE_REPONSE_VENUS) != Ok(RESP_OK_NODATA) {
         return Err("blob-unref");
     }
+    let (q, n) = gpu3d::contexte_venus(false);
+    if f.commande(&q[..n], ENTETE) != Ok(RESP_OK_NODATA) { return Err("ctx-destroy"); }
     Ok(())
 }

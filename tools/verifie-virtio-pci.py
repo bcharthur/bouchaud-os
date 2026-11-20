@@ -62,7 +62,7 @@ GARDE_PANNES_IRQ = '#[cfg(feature = "banc-virtio-gpu-irq-pannes")]\nmod pannes {
 GARDE_ETRANGERE = '#[cfg(feature = "' + OPTION_ETRANGERE + '")]\n        if lit_genre(requete) == CMD_TRANSFER_TO_HOST_2D'
 POSE = "file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);"
 SONNETTE = "write_volatile(self.sonnette as *mut u16, 0);"
-JUGE = "if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {"
+JUGE = "if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, cloture) {"
 JUGE_CORPS = "if !file::corps_valide(lit_genre(requete), genre, utilise.len, longueur_reponse as u32) {"
 AVANCE = "self.dernier_util = dernier.wrapping_add(1);"
 DEPLACEMENT = "<barriere deplacee apres la sonnette>"
@@ -193,6 +193,16 @@ def verifie(s: str, readme: str, banc: str, cargo: str = "", flux: str = "", tro
     # 9. Barriere, une commande en vol, reponse jugee
     c = corps(s, "commande")
     i_pose, i_sonnette = c.find(POSE), c.find(SONNETTE)
+    exception = "let unmap_host3d = gpu3d::unmap_host3d_qemu(requete);"
+    choix = "let cloture = (!unmap_host3d).then_some(attendue);"
+    if exception not in c or "if !unmap_host3d {\n            " + POSE not in c or choix not in c:
+        fautes.append("virtio_gpu.rs : exception sans clôture non limitée à l'UNMAP HOST3D du banc.")
+    unmap = corps(trois_d, "unmap_host3d_qemu")
+    if ('#[cfg(feature = "banc-gpu-venus")]' not in unmap
+            or "mappe_reponse_venus(false)" not in unmap or "mappe_memoire_venus(false, 0)" not in unmap
+            or "requete == &reponse[..n_reponse] || requete == &memoire[..n_memoire]" not in unmap
+            or not re.search(r'cfg\(not\(feature = "banc-gpu-venus"\)\)\]\s*\{\s*let _ = requete;\s*false', unmap)):
+        fautes.append("virtio_gpu_3d.rs : seule la correspondance exacte aux deux commandes UNMAP du banc est admise.")
     if c.count(POSE) != 1 or i_sonnette < 0 or i_pose > i_sonnette:
         fautes.append("virtio_gpu.rs : une commande part sans barriere (VIRTIO_GPU_FLAG_FENCE posee apres la sonnette ou absente).")
     if s.count(SONNETTE) != 1 or SONNETTE not in c:
@@ -261,9 +271,12 @@ def main() -> int:
         # attendre l'indice exact (une avance de deux entrees passerait inapercue)
         ("|| read_volatile(util.add(1)) != dernier)", "|| read_volatile(util.add(1)) == dernier.wrapping_add(1))"),
         # commande sans barriere
-        ("        " + POSE + "\n", ""),
+        ("            " + POSE + "\n", ""),
         # barriere posee apres la sonnette (le peripherique a pu lire la requete)
         (DEPLACEMENT, ""),
+        # exception sans clôture étendue à toutes les commandes
+        ("let unmap_host3d = gpu3d::unmap_host3d_qemu(requete);", "let unmap_host3d = true;"),
+        ("let cloture = (!unmap_host3d).then_some(attendue);", "let cloture = None;"),
         # reponse non jugee
         (JUGE, "if let Err(v) = Ok::<(), file::Violation>(()) {"),
         (JUGE_CORPS, "if false {"),
@@ -289,7 +302,7 @@ def main() -> int:
         if a == DEPLACEMENT:
             if POSE not in s or SONNETTE not in s:
                 return None
-            t = s.replace("        " + POSE + "\n", "", 1)
+            t = s.replace("            " + POSE + "\n", "", 1)
             return t.replace(SONNETTE, SONNETTE + "\n        " + POSE, 1)
         return s.replace(a, b, 1) if a in s else None
 
@@ -318,7 +331,7 @@ def main() -> int:
             print(f"virtio-PCI : la mutation de {nom} ne rougit pas -- garde inoperant")
             return 1
     print(f"[OK] virtio-PCI : VERSION_1 (+ VIRGL propose et servi), FEATURES_OK relu, attentes bornees, DMA rendue seulement si sure, "
-          f"verrou dormant, barriere sur chaque commande et reponse jugee, une seule commande en vol, "
+          f"verrou dormant, barriere de production et reponse jugee, une seule commande en vol, "
           f"injections confinees et passees en CI, P10 non pretendu (negatifs={len(negatifs) + len(autres)})")
     return 0
 

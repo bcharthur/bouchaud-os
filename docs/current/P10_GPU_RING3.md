@@ -319,3 +319,19 @@ Le banc injecte une file cassée et exige un redémarrage pour retrouver
 VirtIO après ce type de perte. Sur un des lancements QEMU 10.0.13/GTK,
 le processus a échoué sur EGL_BAD_ACCESS avant le scanout de l’invité.
 Le premier écran noir de la campagne antérieure reste à isoler.
+
+## Relecture Vulkan du banc expérimental
+
+Avec `banc-gpu-venus`, le banc complet soumet deux `vkCmdFillBuffer`
+et compare les 4 096 octets de chaque motif côté application. Les
+deux essais passent sous QEMU 11.1.3 et 11.2 RC, TCG et Lavapipe.
+
+~~~bash
+cargo bootimage --features banc-gpu-venus
+DISPLAY=:77 BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh \
+  target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin /tmp/venus-complet
+~~~
+
+La charge encode le protocole Venus et utilise une copie privée pour la
+relecture. L'intégration standard requiert encore GEM, mmap et Mesa.
+Le journal décrit le correctif de démappage et le périmètre HOST3D.

@@ -38,7 +38,8 @@ pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
 mod venus;
 #[cfg(feature = "banc-gpu-venus")]
 pub use venus::{contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
-    initialise_contexte_venus, soumets_venus, version_vulkan_banc, OCTETS_REPONSE_VENUS};
+    initialise_contexte_venus, relis_memoire_venus, soumets_venus, version_vulkan_banc,
+    OCTETS_REPONSE_VENUS, TAILLE_RELECTURE_VENUS};
 
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -767,7 +768,10 @@ impl FileControle {
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
         self.barriere = self.barriere.wrapping_add(1);
-        file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);
+        let unmap_host3d = gpu3d::unmap_host3d_qemu(requete);
+        if !unmap_host3d {
+            file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);
+        }
         core::ptr::write_bytes(tampon.add(REPONSE), 0, longueur_reponse);
         let desc = self.desc as *mut u8;
         let pose = |i: usize, adresse: u64, longueur: u32, drapeaux: u16, suivant: u16| {
@@ -840,7 +844,8 @@ impl FileControle {
             crate::serial_println!("VIRTIO_GPU_INJECTION reponse_etrangere (transfert du bureau juge contre une autre barriere)");
             attendue = attendue.wrapping_add(1);
         }
-        if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {
+        let cloture = (!unmap_host3d).then_some(attendue);
+        if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, cloture) {
             // La file ne sert plus : rien de ce qu'elle rendrait ensuite ne
             // pourrait etre rattache a une commande.
             self.cassee = true;

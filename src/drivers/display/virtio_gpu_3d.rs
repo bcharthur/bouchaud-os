@@ -120,6 +120,42 @@ pub fn mappe_reponse_venus(mappe: bool) -> ([u8; 40], usize) {
 const VENUS_ENUMERATE_INSTANCE_VERSION: u32 = 137;
 
 #[cfg(feature = "banc-gpu-venus")]
+pub const RESSOURCE_RELECTURE_VENUS: u32 = 0xB108;
+
+#[cfg(feature = "banc-gpu-venus")]
+pub fn blob_memoire_venus(id_memoire: u64, octets: u32) -> [u8; 56] {
+    let mut q = blob_reponse_venus(octets);
+    put32(&mut q, 24, RESSOURCE_RELECTURE_VENUS);
+    q[40..48].copy_from_slice(&id_memoire.to_le_bytes());
+    q
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+pub fn mappe_memoire_venus(mappe: bool, offset: u64) -> ([u8; 40], usize) {
+    let (mut q, n) = mappe_reponse_venus(mappe);
+    put32(&mut q, 24, RESSOURCE_RELECTURE_VENUS);
+    if mappe { q[32..40].copy_from_slice(&offset.to_le_bytes()); }
+    (q, n)
+}
+
+/// QEMU 11.1/11.2 déplace l'UNMAP suspendu vers la file de clôtures
+/// avant d'en créer une. Sans FENCE il reste dans cmdq jusqu'au rappel RCU.
+/// Les deux ressources sont HOST3D, sans pages DMA prêtées par l'invité.
+pub fn unmap_host3d_qemu(requete: &[u8]) -> bool {
+    #[cfg(feature = "banc-gpu-venus")]
+    {
+        let (reponse, n_reponse) = mappe_reponse_venus(false);
+        let (memoire, n_memoire) = mappe_memoire_venus(false, 0);
+        requete == &reponse[..n_reponse] || requete == &memoire[..n_memoire]
+    }
+    #[cfg(not(feature = "banc-gpu-venus"))]
+    {
+        let _ = requete;
+        false
+    }
+}
+
+#[cfg(feature = "banc-gpu-venus")]
 pub fn entete_soumission_venus(octets: usize) -> Option<[u8; 32]> {
     let mut q = submit_header(octets)?;
     put32(&mut q, 4, 2); // INFO_RING_IDX, anneau de contrôle 0

@@ -72,8 +72,11 @@ static int execute(int fd, uint32_t *flux, uint32_t octets, reponse_venus repons
     return ioctl(fd, DRM_EXECBUFFER, &req) || ioctl(fd, LIT_REPONSE, reponse);
 }
 
+struct relecture { uint64_t id_memoire, destination; };
+#define RELIT_MEMOIRE _IOW('B', 0xae, struct relecture)
+
 static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
-                          uint32_t buffer, uint32_t besoin, uint32_t types)
+                          uint32_t buffer, uint32_t besoin, uint32_t types, uint32_t motif)
 {
     reponse_venus r;
     uint32_t proprietes[] = {179, 0, 0, 0, 8, 1, appareil, 0, 1, 0, 32, 0, 16, 0};
@@ -120,7 +123,7 @@ static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
     };
     if (execute(fd, debut, sizeof(debut), r) || r[0] != 90 || r[1]) return 8;
     uint32_t remplissage[] = {
-        179, 0, 0, 0, 118, 1, COMMANDE, 0, buffer, 0, 0, 0, 4096, 0, 0x5a1740d3
+        179, 0, 0, 0, 118, 1, COMMANDE, 0, buffer, 0, 0, 0, 4096, 0, motif
     };
     if (execute(fd, remplissage, sizeof(remplissage), r) || r[0] != 118) return 9;
     uint32_t fin[] = {179, 0, 0, 0, 91, 1, COMMANDE, 0};
@@ -141,6 +144,21 @@ static int remplit_buffer(int fd, uint32_t appareil, uint32_t device,
     };
     if (execute(fd, attends, sizeof(attends), r) || r[0] != 39 || r[1]) return 13;
     puts("VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096");
+    uint32_t donnees[1024] = {0};
+    struct relecture relit = {MEMOIRE, 1};
+    if (!ioctl(fd, RELIT_MEMOIRE, &relit) || errno != EFAULT) return 16;
+    relit.destination = (uintptr_t)donnees;
+    if (ioctl(fd, RELIT_MEMOIRE, &relit)) {
+        perror("VENUS_RELIT_MEMOIRE");
+        return 17;
+    }
+    for (size_t i = 0; i < sizeof(donnees) / sizeof(donnees[0]); ++i) {
+        if (donnees[i] != motif) {
+            printf("VENUS_REMPLISSAGE indice=%zu lu=%08x attendu=%08x\n", i, donnees[i], motif);
+            return 18;
+        }
+    }
+    printf("VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096 motif=%08x\n", motif);
     uint32_t detruit_fence[] = {179, 0, 0, 0, 36, 1, device, 0, FENCE, 0, 0, 0};
     if (execute(fd, detruit_fence, sizeof(detruit_fence), r) || r[0] != 36) return 14;
     uint32_t detruit_pool[] = {179, 0, 0, 0, 86, 1, device, 0, POOL, 0, 0, 0};
@@ -185,7 +203,7 @@ static int verifie_buffer(int fd, uint32_t appareil)
     if (execute(fd, besoins, sizeof(besoins), r) || r[0] != 30 || r[1] != 1
         || r[2] || r[3] < 4096 || r[4] || !r[5] || r[6] || !r[7])
         return 4;
-    int fill = remplit_buffer(fd, appareil, device, buffer, r[3], r[7]);
+    int fill = remplit_buffer(fd, appareil, device, buffer, r[3], r[7], 0x5a174000 | appareil);
     if (fill) {
         printf("VIRTGPU_VENUS_VKFILL_ECHEC etape=%d\n", fill);
         return 7;
