@@ -39,6 +39,35 @@ static int verifie_capset(int fd)
     return 0;
 }
 
+struct drm_version {
+    int32_t majeur, mineur, patch;
+    size_t taille_nom;
+    char *nom;
+    size_t taille_date;
+    char *date;
+    size_t taille_description;
+    char *description;
+};
+#define DRM_VERSION _IOWR('d', 0, struct drm_version)
+
+static int verifie_version_drm(int fd)
+{
+    struct drm_version version = {0};
+    if (ioctl(fd, DRM_VERSION, &version) || version.majeur != 0 || version.mineur != 1
+        || version.patch != 0 || version.taille_nom != strlen("virtio_gpu")
+        || version.taille_description == 0) return 1;
+    char nom[11] = {0};
+    version.nom = nom;
+    version.taille_nom = 3;
+    if (ioctl(fd, DRM_VERSION, &version) || strcmp(nom, "vir")
+        || version.taille_nom != strlen("virtio_gpu")) return 2;
+    if (ioctl(fd, DRM_VERSION, &version) || strcmp(nom, "virtio_gpu")) return 3;
+    version.nom = (char *)(uintptr_t)1;
+    if (ioctl(fd, DRM_VERSION, &version) != -1 || errno != EFAULT) return 4;
+    puts("VIRTGPU_VENUS_DRM_VERSION_OK");
+    return 0;
+}
+
 static int verifie_contexte(int fd)
 {
     struct drm_context_param params[] = {{1, 4}, {2, 2}};
@@ -377,7 +406,7 @@ int main(int argc, char **argv)
 {
     (void)argv;
     int fd = open("/dev/dri/renderD128", O_RDWR);
-    if (fd < 0 || verifie_capset(fd) || verifie_contexte(fd)) return 1;
+    if (fd < 0 || verifie_capset(fd) || verifie_version_drm(fd) || verifie_contexte(fd)) return 1;
     if (!ioctl(fd, VERSION_VENUS, (void *)1) || errno != EFAULT) return 2;
     uint32_t reference = 0;
     for (unsigned i = 0; i < 3; ++i) {

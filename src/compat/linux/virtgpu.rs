@@ -65,8 +65,31 @@ fn erreur(e: ErreurRendu) -> i64 {
     })
 }
 
+// DRM_IOCTL_VERSION, la structure x86_64 de libdrm a trois couples
+// (longueur, pointeur). La longueur rendue exclut le NUL.
+fn version_drm(arg: u64) -> i64 {
+    let Some(mut buf) = user_read(arg, 64) else { return -errno::EFAULT; };
+    if !super::fault_in_user_range(arg, 64, true) { return -errno::EFAULT; }
+    let textes: [&[u8]; 3] = [b"virtio_gpu", b"", b"Bouchaud OS VirtIO GPU"];
+    for (index, texte) in textes.iter().enumerate() {
+        let pos = 16 + 16 * index;
+        let maximum = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        let adresse = u64::from_le_bytes(buf[pos + 8..pos + 16].try_into().unwrap());
+        let copie = maximum.min(texte.len() as u64) as usize;
+        if adresse != 0 && copie != 0 && !user_write(adresse, &texte[..copie]) {
+            return -errno::EFAULT;
+        }
+        buf[pos..pos + 8].copy_from_slice(&(texte.len() as u64).to_le_bytes());
+    }
+    // VERSION 0.1.0 pour le pilote VirtIO.
+    buf[..12].fill(0);
+    buf[4..8].copy_from_slice(&1u32.to_le_bytes());
+    if user_write(arg, &buf) { 0 } else { -errno::EFAULT }
+}
+
 pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
     match request {
+        0xc040_6400 => version_drm(arg),
         GETPARAM => {
             let Some(buf) = user_read(arg, 16) else { return -errno::EFAULT };
             let param = u64::from_le_bytes(buf[..8].try_into().unwrap());
