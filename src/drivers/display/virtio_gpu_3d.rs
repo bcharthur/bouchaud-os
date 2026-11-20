@@ -150,7 +150,7 @@ pub fn mappe_blob_venus(id: u32, mappe: bool, offset: u64) -> ([u8; 40], usize) 
 
 /// QEMU 11.1/11.2 déplace l'UNMAP suspendu vers la file de clôtures
 /// avant d'en créer une. Sans FENCE il reste dans cmdq jusqu'au rappel RCU.
-/// Les deux ressources sont HOST3D, sans pages DMA prêtées par l'invité.
+/// Les ressources admissibles sont HOST3D, sans pages DMA prêtées par l'invité.
 pub fn unmap_host3d_qemu(requete: &[u8]) -> bool {
     #[cfg(feature = "banc-gpu-venus")]
     {

@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <stdint.h>
 #include <string.h>
 #include <sched.h>
@@ -294,6 +295,41 @@ static int relit_vkmemoire_gem(int fd, uint64_t memoire, uint32_t motif)
     return 0;
 }
 
+struct sync_fence_info {
+    char object[32], driver[32];
+    int32_t status;
+    uint32_t flags;
+    uint64_t timestamp;
+};
+struct sync_file_info {
+    char name[32];
+    int32_t status;
+    uint32_t flags, count, pad;
+    uint64_t fence_info;
+};
+#define SYNC_FILE_INFO _IOWR('>', 4, struct sync_file_info)
+
+static int verifie_fence_exportee(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+    if (flags == -1 || !(flags & FD_CLOEXEC)) return 1;
+    struct pollfd pollfd = {.fd = fd, .events = POLLIN};
+    if (poll(&pollfd, 1, 0) != 1 || pollfd.revents != POLLIN) return 2;
+    struct sync_file_info info = {0};
+    if (ioctl(fd, SYNC_FILE_INFO, &info) || info.status != 1 || info.count != 1) return 3;
+    info.fence_info = 1;
+    if (ioctl(fd, SYNC_FILE_INFO, &info) != -1 || errno != EFAULT) return 4;
+    struct sync_fence_info fence = {0};
+    info.fence_info = (uintptr_t)&fence;
+    if (ioctl(fd, SYNC_FILE_INFO, &info) || fence.status != 1 || !fence.timestamp
+        || strcmp(fence.driver, "virtio_gpu")) return 5;
+    uint64_t lecture;
+    if (read(fd, &lecture, sizeof(lecture)) != -1 || errno != EINVAL) return 6;
+    if (close(fd)) return 7;
+    puts("VIRTGPU_VENUS_SYNC_FILE_OK");
+    return 0;
+}
+
 static int verifie_reponse_client(int fd, uint32_t reference)
 {
     struct drm_context_param params[] = {{1, 4}, {2, 64}, {3, 0}};
@@ -315,7 +351,13 @@ static int verifie_reponse_client(int fd, uint32_t reference)
     req.anneau = 64;
     if (ioctl(fd, DRM_EXECBUFFER, &req) != -1 || errno != EINVAL) return 6;
     req.anneau = 0;
+    req.flags = 7;
+    if (ioctl(fd, DRM_EXECBUFFER, &req) != -1 || errno != EINVAL) return 12;
+    req.flags = 6;
+    req.fence = -1;
     if (ioctl(fd, DRM_EXECBUFFER, &req)) return 7;
+    int fence = verifie_fence_exportee(req.fence);
+    if (fence) { printf("VIRTGPU_VENUS_SYNC_FILE_ECHEC etape=%d\n", fence); return 13; }
     for (unsigned i = 0; i < 10000 && r[4] == UINT32_MAX; i++) sched_yield();
     if (r[0] != 137 || r[1] || r[2] != 1 || r[3] || r[4] != reference) return 8;
     reponse_venus privee;

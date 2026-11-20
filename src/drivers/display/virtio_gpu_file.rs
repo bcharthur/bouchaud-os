@@ -44,7 +44,7 @@
 //!     : la file est cassee et l'issue tenue pour INCONNUE -- la memoire
 //!     concernee n'est pas rendue.
 //!
-//! Le banc Venus seul accepte un UNMAP de ses deux blobs HOST3D sans
+//! Le banc Venus seul accepte un UNMAP de ses blobs HOST3D sans
 //! clôture, pour QEMU qui perd les UNMAP asynchrones clôturés. L'indice,
 //! l'identifiant, la longueur et l'absence de clôture restent vérifiés.
 //! Aucune ressource n'est recyclée sur ce retour : UNREF clôturé est requis.

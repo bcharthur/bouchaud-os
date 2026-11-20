@@ -45,8 +45,11 @@ pub enum FdKind {
     Random,
     /// `/dev/fb0`.
     Framebuffer,
-    /// Noeud de decouverte VirtIO-GPU, sans soumission utilisateur.
+    /// Nœud de rendu VirtIO-GPU et identité de son ouverture.
     GpuRender(Arc<()>),
+    /// sync_file d'une clôture déjà confirmée par VirtIO.
+    #[cfg(feature = "banc-gpu-venus")]
+    GpuFence(u64),
     /// `/dev/input/event0` (clavier).
     InputKeyboard,
     /// `/dev/input/event1` (souris).

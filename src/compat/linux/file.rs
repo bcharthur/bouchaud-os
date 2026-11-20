@@ -374,6 +374,8 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
         }
         FdKind::Dir(_) => -errno::EISDIR,
         FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
+        #[cfg(feature = "banc-gpu-venus")]
+        FdKind::GpuFence(_) => -errno::EINVAL,
         FdKind::InputKeyboard => read_input(buffer, count, input::Device::Keyboard),
         FdKind::InputMouse => read_input(buffer, count, input::Device::Mouse),
         FdKind::Pipe(shared, readable) => {
@@ -743,6 +745,8 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
         }
         FdKind::Dir(_) => -errno::EISDIR,
         FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
+        #[cfg(feature = "banc-gpu-venus")]
+        FdKind::GpuFence(_) => -errno::EINVAL,
         FdKind::InputKeyboard | FdKind::InputMouse => count as i64,
         FdKind::Pipe(shared, readable) => {
             if readable {
@@ -2435,6 +2439,8 @@ pub fn sys_ioctl(fd: i32, request: u64, arg: u64) -> i64 {
 
     match kind {
         FdKind::GpuRender(session) => super::virtgpu::ioctl(&session, request as u32, arg),
+        #[cfg(feature = "banc-gpu-venus")]
+        FdKind::GpuFence(instant) => super::virtgpu::ioctl_fence(instant, request as u32, arg),
         // --- Sortie audio, protocole OSS -------------------------------------
         //
         // OSS plutot qu'ALSA : quatre ioctls suffisent a regler un flux, alors
@@ -3118,6 +3124,8 @@ fn readable(fd: i32) -> bool {
             input::mouse_pending()
         }
         FdKind::EventFd(state) => state.lock().counter > 0,
+        #[cfg(feature = "banc-gpu-venus")]
+        FdKind::GpuFence(_) => true,
         FdKind::TimerFd(state) => {
             let mut state = state.lock();
             refresh_timerfd(&mut state);

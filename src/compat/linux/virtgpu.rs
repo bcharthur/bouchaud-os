@@ -87,6 +87,42 @@ fn version_drm(arg: u64) -> i64 {
     if user_write(arg, &buf) { 0 } else { -errno::EFAULT }
 }
 
+#[cfg(feature = "banc-gpu-venus")]
+pub(super) fn ioctl_fence(instant: u64, requete: u32, arg: u64) -> i64 {
+    // SYNC_IOC_FILE_INFO des sync_file Linux x86_64.
+    if requete != 0xc038_3e04 { return -errno::ENOTTY; }
+    let Some(mut buf) = user_read(arg, 56) else { return -errno::EFAULT; };
+    if mot(&buf, 36) != 0 || mot(&buf, 44) != 0 { return -errno::EINVAL; }
+    if !super::fault_in_user_range(arg, 56, true) { return -errno::EFAULT; }
+    if mot(&buf, 40) != 0 {
+        let adresse = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+        let mut cloture = [0u8; 80];
+        cloture[..5].copy_from_slice(b"venus");
+        cloture[32..42].copy_from_slice(b"virtio_gpu");
+        cloture[64..68].copy_from_slice(&1u32.to_le_bytes());
+        cloture[72..80].copy_from_slice(&instant.to_le_bytes());
+        if !user_write(adresse, &cloture) { return -errno::EFAULT; }
+    }
+    buf[..32].fill(0);
+    buf[..5].copy_from_slice(b"venus");
+    buf[32..36].copy_from_slice(&1u32.to_le_bytes());
+    buf[40..44].copy_from_slice(&1u32.to_le_bytes());
+    if user_write(arg, &buf) { 0 } else { -errno::EFAULT }
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+fn rend_fence(arg: u64, buf: &mut [u8]) -> i64 {
+    use crate::kernel::fd::{FdKind, FileDesc};
+    let process = super::processus_courant();
+    let mut descripteur = FileDesc::new(FdKind::GpuFence(crate::kernel::timer::monotonic_ns()));
+    descripteur.cloexec = true;
+    let fd = process.files.lock().insert(descripteur);
+    buf[28..32].copy_from_slice(&fd.to_le_bytes());
+    if user_write(arg, buf) { return 0; }
+    process.files.lock().close(fd);
+    -errno::EFAULT
+}
+
 pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
     match request {
         0xc040_6400 => version_drm(arg),
@@ -248,11 +284,12 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
         // Pas de liste GEM ni de syncobj dans ce profil.
         #[cfg(feature = "banc-gpu-venus")]
         0xc040_6442 => {
-            let Some(buf) = user_read(arg, 64) else { return -errno::EFAULT; };
+            let Some(mut buf) = user_read(arg, 64) else { return -errno::EFAULT; };
             let taille = mot(&buf, 4) as usize;
             let flags = mot(&buf, 0);
             let anneau = if flags & 4 != 0 { mot(&buf, 32) } else { 0 };
-            if !matches!(flags, 0 | 4) || taille == 0 || taille > 2016
+            let exporte_fence = flags & 2 != 0;
+            if !matches!(flags, 0 | 2 | 4 | 6) || taille == 0 || taille > 2016
                 || taille % 4 != 0 || anneau >= 64
                 || buf[16..28].iter().chain(&buf[36..]).any(|b| *b != 0)
             {
@@ -260,7 +297,11 @@ pub(super) fn ioctl(session: &Arc<()>, request: u32, arg: u64) -> i64 {
             }
             let adresse = u64::from_le_bytes(buf[8..16].try_into().unwrap());
             let Some(flux) = user_read(adresse, taille) else { return -errno::EFAULT; };
-            virtio_gpu::soumets_venus(session, &flux, anneau as u8).map_or_else(erreur, |()| 0)
+            if exporte_fence && !super::fault_in_user_range(arg, 64, true) { return -errno::EFAULT; }
+            if let Err(e) = virtio_gpu::soumets_venus(session, &flux, anneau as u8) {
+                return erreur(e);
+            }
+            if exporte_fence { rend_fence(arg, &mut buf) } else { 0 }
         }
         #[cfg(feature = "banc-gpu-venus")]
         0x8040_42ad | 0x8200_42ad => {

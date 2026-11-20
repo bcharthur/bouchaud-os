@@ -189,3 +189,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - La sonde publie le résultat dans le tampon partagé du bureau, avec dommage de 128 × 128 pixels. Le banc optionnel `BO_VENUS_SKIA_WINDOW=1` exige la scène Vulkan calculée et compare la capture GTK. Il accepte l'échelle entière observée et exclut les arêtes interpolées.
 - QEMU 11.1.3 et 11.2 RC avec TCG/Lavapipe. 1 024 pixels source vérifiés via Skia/Ganesh, plus 2 500 pixels intérieurs exacts dans chaque capture (zone affichée 64 × 64). Une capture noire est rejetée.
 - Captures dans `/workspace/work/p10/skia-window-banc-qemu11/capture.png` et `/workspace/work/p10/skia-window-banc-qemu112/capture.png`. Suite. Relancer le build natif complet sur un environnement autorisant le transport du zlib Chromium épinglé. Exécuter le même artefact avec le bras Skia CPU et le bras Vulkan. Les résultats actuels portent sur la scène native et la validation du transport.
+
+## `e6620947` — export des clôtures DRM
+
+- `EXECBUFFER` accepte `FENCE_FD_OUT` et renvoie un descripteur pollable, fermé à l’exécution d’un nouveau programme. Son état reflète la clôture VirtIO déjà acquittée et `SYNC_IOC_FILE_INFO` expose son horodatage monotone. L’import de clôtures et les syncobj restent à implémenter.
+- Le banc Venus passe sous QEMU 11.1.3 et 11.2 RC avec TCG/Lavapipe. Il vérifie `poll`, `FD_CLOEXEC`, les métadonnées, `EFAULT`, le refus de l’import et la relecture des motifs après clôture.
+- Reprise. Reconstituer le rootfs du banc Loader à partir de `docs/current/P10_GPU_RING3.md`. Rejouer ensuite `BOUCHAUD_P10_GPU_VULKAN=1 bash tools/ladybird/browser-vcpkg.sh` sur un environnement pouvant télécharger le zlib Chromium épinglé par ANGLE, SHA `4028ebf8710ee39d2286cb0f847f9b95c59f84d8`. Le proxy Cloud a refusé ce téléchargement trois fois par HTTP 403. Une fois l’artefact produit, comparer les bras Skia CPU et Vulkan avec la même page et vérifier le chemin de repli.
