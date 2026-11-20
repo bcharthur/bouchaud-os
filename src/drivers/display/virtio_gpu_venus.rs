@@ -11,6 +11,12 @@ const RESP_OK_MAP_INFO: u32 = 0x1106;
 const MAX_BLOB_REPONSE: u64 = 1024 * 1024;
 const BASE_GEMS: u64 = 2 * MAX_BLOB_REPONSE;
 const MAX_GEM_VENUS: u64 = 16 * 1024 * 1024;
+const SECOND_CONTEXTE: u32 = 0xB109;
+
+pub(super) struct SecondContexte {
+    proprietaire: Weak<()>,
+    anneaux: u8,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Fenetre {
@@ -61,8 +67,12 @@ pub(super) fn mappe_fenetre(dev: &PciDevice) -> Option<Fenetre> {
 
 impl Fenetre {
     fn octets_par_gem(self) -> u64 {
-        let possible = self.octets.saturating_sub(BASE_GEMS) / gpu3d::NOMBRE_GEMS_VENUS as u64;
+        let possible = self.octets.saturating_sub(BASE_GEMS) / gpu3d::GEMS_VENUS_PRIMAIRE as u64;
         possible.min(MAX_GEM_VENUS) & !(PAGE as u64 - 1)
+    }
+
+    fn permet_second(self) -> bool {
+        self.octets >= BASE_GEMS + self.octets_par_gem() * gpu3d::NOMBRE_GEMS_VENUS as u64
     }
 }
 
@@ -86,6 +96,7 @@ pub struct BailGem {
 
 struct ObjetGem {
     gem: Gem,
+    contexte: u32,
     ferme: bool,
     mappe: bool,
     bail: Weak<BailGem>,
@@ -101,8 +112,8 @@ impl Gems {
         Self { objets: [const { None }; gpu3d::NOMBRE_GEMS_VENUS], prochain: 1 }
     }
 
-    fn cherche(&self, handle: u32) -> Result<usize, ErreurRendu> {
-        self.objets.iter().position(|objet| objet.as_ref().is_some_and(|o| !o.ferme && o.gem.handle == handle))
+    fn cherche(&self, contexte: u32, handle: u32) -> Result<usize, ErreurRendu> {
+        self.objets.iter().position(|objet| objet.as_ref().is_some_and(|o| !o.ferme && o.contexte == contexte && o.gem.handle == handle))
             .ok_or(ErreurRendu::Inconnue)
     }
 
@@ -124,28 +135,47 @@ impl Gems {
         Ok(())
     }
 
-    unsafe fn ferme(&mut self, file: &mut FileControle) -> Result<(), &'static str> {
+    fn baux_actifs(&self, contexte: u32) -> bool {
+        self.objets.iter().flatten().any(|objet| objet.contexte == contexte && objet.bail.strong_count() != 0)
+    }
+
+    unsafe fn ferme(&mut self, file: &mut FileControle, contexte: u32) -> Result<(), &'static str> {
         for i in 0..self.objets.len() {
-            self.retire(file, i)?;
+            if self.objets[i].as_ref().is_some_and(|objet| objet.contexte == contexte) {
+                self.retire(file, i)?;
+            }
         }
         Ok(())
     }
 }
 
-fn possede_contexte(p: &Peripherique, session: &Arc<()>) -> Result<Fenetre, ErreurRendu> {
-    let Some(Canal::Ouvert(fenetre, _, proprietaire)) = &p.hostmem_venus else {
-        return Err(ErreurRendu::Invalide);
+fn possede_contexte(p: &Peripherique, session: &Arc<()>) -> Result<(Fenetre, u32, u8, bool), ErreurRendu> {
+    let cherche = Arc::downgrade(session);
+    let fenetre = match &p.hostmem_venus {
+        Some(Canal::Ouvert(fenetre, blob, proprietaire)) => {
+            if proprietaire.ptr_eq(&cherche) {
+                return Ok((*fenetre, gpu3d::CONTEXTE_VENUS, p.anneaux_venus, blob.is_some()));
+            }
+            *fenetre
+        }
+        Some(Canal::Nouveau(fenetre)) => *fenetre,
+        None => return Err(ErreurRendu::Indisponible),
     };
-    if !proprietaire.ptr_eq(&Arc::downgrade(session)) {
+    if let Some(contexte) = &p.second_venus {
+        if contexte.proprietaire.ptr_eq(&cherche) {
+            return Ok((fenetre, SECOND_CONTEXTE, contexte.anneaux, false));
+        }
+    }
+    if matches!(p.hostmem_venus, Some(Canal::Ouvert(..))) || p.second_venus.is_some() {
         return Err(ErreurRendu::Occupe);
     }
-    Ok(*fenetre)
+    Err(ErreurRendu::Invalide)
 }
 
 pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result<Gem, ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let fenetre = possede_contexte(p, session)?;
+    let (fenetre, contexte, _, _) = possede_contexte(p, session)?;
     if octets < PAGE as u64 || octets % PAGE as u64 != 0 || octets > fenetre.octets_par_gem() {
         return Err(ErreurRendu::Invalide);
     }
@@ -158,19 +188,27 @@ pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result
             return Err(ErreurRendu::Commande);
         }
     }
-    let i = gems.objets.iter().position(Option::is_none).ok_or(ErreurRendu::Plein)?;
+    // Les deux pools matériels ne se recouvrent pas, même si un client
+    // utilise tous ses slots. Le slot du canal principal conserve sa taille.
+    let plage = if contexte == SECOND_CONTEXTE {
+        gpu3d::GEMS_VENUS_PRIMAIRE..gpu3d::NOMBRE_GEMS_VENUS
+    } else {
+        0..gpu3d::GEMS_VENUS_PRIMAIRE
+    };
+    let i = plage.into_iter().find(|&i| gems.objets[i].is_none()).ok_or(ErreurRendu::Plein)?;
     // Le slot matériel est recyclé après UNREF. Le handle visible ne l'est pas.
     let gem = Gem { handle: gems.prochain, ressource: gpu3d::PREMIER_GEM_VENUS + i as u32, octets: octets as u32 };
     gems.prochain = gem.handle.checked_add(1).ok_or(ErreurRendu::Plein)?;
-    let requete = gpu3d::blob_memoire_venus(gem.ressource, id_memoire, gem.octets);
+    let mut requete = gpu3d::blob_memoire_venus(gem.ressource, id_memoire, gem.octets);
+    requete[16..20].copy_from_slice(&contexte.to_le_bytes());
     match unsafe { p.file.commande(&requete, ENTETE) } {
         Ok(RESP_OK_NODATA) => {
-            gems.objets[i] = Some(ObjetGem { gem, ferme: false, mappe: false, bail: Weak::new() });
+            gems.objets[i] = Some(ObjetGem { gem, contexte, ferme: false, mappe: false, bail: Weak::new() });
             Ok(gem)
         }
         Ok(_) => Err(ErreurRendu::Commande),
         Err(_) => {
-            gems.objets[i] = Some(ObjetGem { gem, ferme: false, mappe: false, bail: Weak::new() });
+            gems.objets[i] = Some(ObjetGem { gem, contexte, ferme: false, mappe: false, bail: Weak::new() });
             p.hostmem_venus = None;
             Err(ErreurRendu::Commande)
         }
@@ -180,15 +218,15 @@ pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result
 pub fn info_gem_venus(session: &Arc<()>, handle: u32) -> Result<Gem, ErreurRendu> {
     let garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_ref().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    possede_contexte(p, session)?;
-    p.gems_venus.objets[p.gems_venus.cherche(handle)?].as_ref().map(|o| o.gem).ok_or(ErreurRendu::Inconnue)
+    let (_, contexte, _, _) = possede_contexte(p, session)?;
+    p.gems_venus.objets[p.gems_venus.cherche(contexte, handle)?].as_ref().map(|o| o.gem).ok_or(ErreurRendu::Inconnue)
 }
 
 pub fn ferme_gem_venus(session: &Arc<()>, handle: u32) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    possede_contexte(p, session)?;
-    let i = p.gems_venus.cherche(handle)?;
+    let (_, contexte, _, _) = possede_contexte(p, session)?;
+    let i = p.gems_venus.cherche(contexte, handle)?;
     let objet = p.gems_venus.objets[i].as_mut().ok_or(ErreurRendu::Inconnue)?;
     objet.ferme = true;
     if objet.bail.strong_count() != 0 { return Ok(()); }
@@ -208,10 +246,10 @@ pub fn mappe_gem_venus(session: &Arc<()>, offset: u64, taille: u64) -> Result<(u
     let handle = u32::try_from(offset / MAX_GEM_VENUS).map_err(|_| ErreurRendu::Invalide)?;
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let fenetre = possede_contexte(p, session)?;
+    let (fenetre, contexte, _, _) = possede_contexte(p, session)?;
     let fente = fenetre.octets_par_gem();
     if fente == 0 { return Err(ErreurRendu::Indisponible); }
-    let i = p.gems_venus.cherche(handle)?;
+    let i = p.gems_venus.cherche(contexte, handle)?;
     let objet = p.gems_venus.objets[i].as_mut().ok_or(ErreurRendu::Inconnue)?;
     if taille > u64::from(objet.gem.octets) { return Err(ErreurRendu::Invalide); }
     let offset_bar = BASE_GEMS + i as u64 * fente;
@@ -252,6 +290,8 @@ pub fn version_vulkan_banc(session: &Arc<()>, octets: u32) -> Result<u32, Erreur
         return Err(ErreurRendu::Invalide);
     }
     let proprietaire = Arc::downgrade(session);
+    recupere_second(p)?;
+    if p.second_venus.is_some() { return Err(ErreurRendu::Occupe); }
     let (existe, precedent) = prepare_canal(p, &proprietaire)?;
     if precedent.is_some_and(|existant| existant != octets) {
         return Err(ErreurRendu::Invalide);
@@ -289,7 +329,7 @@ fn prepare_canal(p: &mut Peripherique, proprietaire: &Weak<()>) -> Result<(bool,
     if ancien.strong_count() != 0 { return Err(ErreurRendu::Occupe); }
     let (fenetre, blob) = (*fenetre, *blob);
     p.hostmem_venus = None;
-    if let Err(etape) = unsafe { p.gems_venus.ferme(&mut p.file).and_then(|()| ferme_objets(&mut p.file, blob.is_some())) } {
+    if let Err(etape) = unsafe { p.gems_venus.ferme(&mut p.file, gpu3d::CONTEXTE_VENUS).and_then(|()| ferme_objets(&mut p.file, blob.is_some())) } {
         crate::serial_println!("P10_VENUS_ORPHELIN_ECHEC etape={}", etape);
         return Err(ErreurRendu::Commande);
     }
@@ -298,11 +338,57 @@ fn prepare_canal(p: &mut Peripherique, proprietaire: &Weak<()>) -> Result<(bool,
     Ok((false, None))
 }
 
+fn ferme_second(p: &mut Peripherique) -> Result<(), ErreurRendu> {
+    if p.gems_venus.baux_actifs(SECOND_CONTEXTE) { return Err(ErreurRendu::Occupe); }
+    let (q, n) = gpu3d::contexte_venus_id(SECOND_CONTEXTE, false);
+    if unsafe { p.gems_venus.ferme(&mut p.file, SECOND_CONTEXTE) }.is_err()
+        || unsafe { p.file.commande(&q[..n], ENTETE) } != Ok(RESP_OK_NODATA)
+    {
+        p.hostmem_venus = None;
+        return Err(ErreurRendu::Commande);
+    }
+    p.second_venus = None;
+    Ok(())
+}
+
+fn recupere_second(p: &mut Peripherique) -> Result<(), ErreurRendu> {
+    if p.hostmem_venus.is_none() { return Err(ErreurRendu::Indisponible); }
+    if p.second_venus.as_ref().is_some_and(|c| c.proprietaire.strong_count() == 0) {
+        ferme_second(p)?;
+        crate::serial_println!("P10_VENUS_SECOND_ORPHELIN_RECUPERE");
+    }
+    Ok(())
+}
+
 pub fn initialise_contexte_venus(session: &Arc<()>, anneaux: u8) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
     let proprietaire = Arc::downgrade(session);
-    if prepare_canal(p, &proprietaire)?.0 { return Err(ErreurRendu::Existe); }
+    recupere_second(p)?;
+    if p.second_venus.as_ref().is_some_and(|c| c.proprietaire.ptr_eq(&proprietaire)) {
+        return Err(ErreurRendu::Existe);
+    }
+    match prepare_canal(p, &proprietaire) {
+        Ok((true, _)) => return Err(ErreurRendu::Existe),
+        Ok((false, _)) => {}
+        Err(ErreurRendu::Occupe) if p.second_venus.is_none()
+            && matches!(p.hostmem_venus, Some(Canal::Ouvert(fenetre, None, _)) if fenetre.permet_second()) =>
+        {
+            let (q, n) = gpu3d::contexte_venus_id(SECOND_CONTEXTE, true);
+            return match unsafe { p.file.commande(&q[..n], ENTETE) } {
+                Ok(RESP_OK_NODATA) => {
+                    p.second_venus = Some(SecondContexte { proprietaire, anneaux });
+                    Ok(())
+                }
+                Ok(_) => Err(ErreurRendu::Commande),
+                Err(_) => {
+                    p.hostmem_venus = None;
+                    Err(ErreurRendu::Commande)
+                }
+            };
+        }
+        Err(e) => return Err(e),
+    }
     let Some(Canal::Nouveau(fenetre)) = p.hostmem_venus.take() else {
         return Err(ErreurRendu::Indisponible);
     };
@@ -337,13 +423,23 @@ pub fn contexte_venus_disponible() -> bool {
 pub fn ferme_vulkan_banc(session: &Arc<()>) -> Result<(), ErreurRendu> {
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
+    if p.hostmem_venus.is_none() { return Err(ErreurRendu::Indisponible); }
+    if let Some(contexte) = &p.second_venus {
+        if contexte.proprietaire.ptr_eq(&Arc::downgrade(session)) {
+            return ferme_second(p);
+        }
+        if matches!(p.hostmem_venus, Some(Canal::Nouveau(_))) {
+            return Err(ErreurRendu::Occupe);
+        }
+    }
+    if p.gems_venus.baux_actifs(gpu3d::CONTEXTE_VENUS) { return Err(ErreurRendu::Occupe); }
     if let Some(Canal::Ouvert(_, _, ancien)) = &p.hostmem_venus {
         if !ancien.ptr_eq(&Arc::downgrade(session)) { return Err(ErreurRendu::Occupe); }
     }
     let canal = p.hostmem_venus.take().ok_or(ErreurRendu::Indisponible)?;
     let fenetre = match canal {
         Canal::Nouveau(fenetre) => fenetre,
-        Canal::Ouvert(fenetre, blob, _) => match unsafe { p.gems_venus.ferme(&mut p.file).and_then(|()| ferme_objets(&mut p.file, blob.is_some())) } {
+        Canal::Ouvert(fenetre, blob, _) => match unsafe { p.gems_venus.ferme(&mut p.file, gpu3d::CONTEXTE_VENUS).and_then(|()| ferme_objets(&mut p.file, blob.is_some())) } {
             Ok(()) => fenetre,
             Err(etape) => {
                 crate::serial_println!("P10_VENUS_DEMAPPE_ECHEC etape={}", etape);
@@ -413,20 +509,17 @@ fn aperture_possedee(p: &Peripherique, session: &Arc<()>) -> Result<usize, Erreu
 }
 
 pub fn soumets_venus(session: &Arc<()>, flux: &[u8], anneau: u8) -> Result<(), ErreurRendu> {
-    let entete = gpu3d::entete_soumission_venus(flux.len(), anneau).ok_or(ErreurRendu::Invalide)?;
     let mut q = alloc::vec::Vec::new();
-    q.try_reserve_exact(entete.len() + flux.len()).map_err(|_| ErreurRendu::Plein)?;
-    q.extend_from_slice(&entete);
-    q.extend_from_slice(flux);
+    q.try_reserve_exact(32 + flux.len()).map_err(|_| ErreurRendu::Plein)?;
     let mut garde = verrou().ok_or(ErreurRendu::Indisponible)?;
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
-    let fenetre = possede_contexte(p, session)?;
-    if anneau >= p.anneaux_venus { return Err(ErreurRendu::Invalide); }
+    let (fenetre, contexte, anneaux, blob_prive) = possede_contexte(p, session)?;
+    if anneau >= anneaux { return Err(ErreurRendu::Invalide); }
+    let entete = gpu3d::entete_soumission_venus(contexte, flux.len(), anneau).ok_or(ErreurRendu::Invalide)?;
+    q.extend_from_slice(&entete);
+    q.extend_from_slice(flux);
 
-    let memo = match p.hostmem_venus {
-        Some(Canal::Ouvert(_, Some(_), _)) => Some(fenetre.adresse as *mut u32),
-        _ => None,
-    };
+    let memo = blob_prive.then_some(fenetre.adresse as *mut u32);
     unsafe {
         if let Some(memo) = memo {
             for i in 0..OCTETS_REPONSE_VENUS / 4 { write_volatile(memo.add(i), u32::MAX); }

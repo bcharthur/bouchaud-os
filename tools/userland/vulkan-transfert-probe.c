@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #define ESSAIE(appel) do { \
@@ -14,7 +17,7 @@
     } \
 } while (0)
 
-static int transfert(int cpu, uint32_t motif)
+static int transfert(int cpu, uint32_t motif, int rendezvous)
 {
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
@@ -78,6 +81,12 @@ static int transfert(int cpu, uint32_t motif)
         .pQueueCreateInfos = &file,
     };
     ESSAIE(vkCreateDevice(physique, &dev_info, NULL, &device));
+    if (rendezvous >= 0) {
+        char signal;
+        if (send(rendezvous, "p", 1, MSG_NOSIGNAL) != 1
+            || read(rendezvous, &signal, 1) != 1 || signal != 'g')
+            goto fin;
+    }
     VkQueue queue;
     vkGetDeviceQueue(device, famille, 0, &queue);
     const VkBufferCreateInfo buf_info = {
@@ -159,12 +168,65 @@ fin:
 }
 
 
+static int parallele(const uint32_t motifs[2])
+{
+    int canaux[2];
+    pid_t enfants[2];
+    int lances = 0;
+    int code = 1;
+    for (int i = 0; i < 2; ++i) {
+        int paire[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, paire) != 0)
+            goto fin;
+        pid_t enfant = fork();
+        if (enfant == 0) {
+            close(paire[0]);
+            for (int j = 0; j < i; ++j)
+                close(canaux[j]);
+            int verdict = transfert(1, motifs[i], paire[1]);
+            fflush(NULL);
+            close(paire[1]);
+            _exit(verdict);
+        }
+        close(paire[1]);
+        if (enfant < 0) {
+            close(paire[0]);
+            goto fin;
+        }
+        enfants[i] = enfant;
+        canaux[i] = paire[0];
+        ++lances;
+    }
+    char signal[2];
+    if (read(canaux[0], &signal[0], 1) != 1 || signal[0] != 'p'
+        || read(canaux[1], &signal[1], 1) != 1 || signal[1] != 'p')
+        goto fin;
+    if (send(canaux[0], "g", 1, MSG_NOSIGNAL) == 1
+        && send(canaux[1], "g", 1, MSG_NOSIGNAL) == 1)
+        code = 0;
+
+fin:
+    for (int i = 0; i < lances; ++i)
+        close(canaux[i]);
+    for (int i = 0; i < lances; ++i) {
+        int statut;
+        if (waitpid(enfants[i], &statut, 0) != enfants[i] || !WIFEXITED(statut) || WEXITSTATUS(statut))
+            code = 1;
+    }
+    if (!code)
+        puts("VULKAN_TRANSFERT_DEUX_PROCESSUS_OK");
+    return code;
+}
+
 int main(int argc, char **argv)
 {
+    const uint32_t motifs[] = { UINT32_C(0x5a17c3e9), UINT32_C(0xa18e3c16) };
+    if (argc == 2 && !strcmp(argv[1], "--allow-cpu-deux-processus"))
+        return parallele(motifs);
+
     const int cpu = argc == 2 && !strcmp(argv[1], "--allow-cpu");
     if (argc > 1 && !cpu)
         return 2;
-
-    int code = transfert(cpu, UINT32_C(0x5a17c3e9));
-    return code ? code : transfert(cpu, UINT32_C(0xa18e3c16));
+    int code = transfert(cpu, motifs[0], -1);
+    return code ? code : transfert(cpu, motifs[1], -1);
 }

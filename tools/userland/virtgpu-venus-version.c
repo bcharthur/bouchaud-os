@@ -640,6 +640,76 @@ static int verifie_proprietaire(int fd, uint32_t reference, int avec_blob)
     return 0;
 }
 
+static int verifie_contextes_independants(int fd)
+{
+    const char *noeud = "/dev/dri/renderD128";
+    if (verifie_contexte(fd)) return 1;
+    struct drm_blob principal = {.mem = 2, .flags = 1, .taille = 4096};
+    if (ioctl(fd, DRM_CREATE_BLOB, &principal)) return 2;
+    struct drm_virtgpu_map map = {.handle = principal.bo};
+    if (ioctl(fd, DRM_MAP, &map)) return 3;
+    uint8_t *memoire = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+    if (memoire == MAP_FAILED) return 4;
+    memoire[0] = 37;
+    if (ioctl(fd, DEMAPPE) != -1 || errno != EBUSY) return 11;
+
+    int canal[2];
+    if (pipe(canal)) return 5;
+    pid_t enfant = fork();
+    if (enfant < 0) return 6;
+    if (enfant == 0) {
+        close(canal[0]);
+        if (munmap(memoire, 4096) || close(fd)) _exit(1);
+        int secondaire = open(noeud, O_RDWR | O_CLOEXEC);
+        if (secondaire < 0 || verifie_contexte(secondaire)) _exit(2);
+        struct drm_resource_info etranger = {.bo = principal.bo};
+        if (ioctl(secondaire, DRM_RESOURCE_INFO, &etranger) != -1 || errno != ENOENT) _exit(3);
+        struct drm_blob blob = {.mem = 2, .flags = 1, .taille = 4096};
+        if (ioctl(secondaire, DRM_CREATE_BLOB, &blob) || blob.res == principal.res) _exit(4);
+        struct drm_virtgpu_map bo_map = {.handle = blob.bo};
+        if (ioctl(secondaire, DRM_MAP, &bo_map) || bo_map.offset == map.offset) _exit(5);
+        uint8_t *partage = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, secondaire, bo_map.offset);
+        if (partage == MAP_FAILED) _exit(6);
+        partage[0] = 53;
+        if (write(canal[1], &blob.bo, sizeof(blob.bo)) != sizeof(blob.bo)) _exit(7);
+        for (;;) pause();
+    }
+
+    close(canal[1]);
+    uint32_t handle = 0;
+    ssize_t lu = read(canal[0], &handle, sizeof(handle));
+    close(canal[0]);
+    int tiers = open(noeud, O_RDWR | O_CLOEXEC);
+    struct drm_context_param param = {1, 4};
+    struct drm_context_init init = {1, 0, (uintptr_t)&param};
+    struct drm_gem_close ferme = {.bo = handle};
+    int isole = lu == sizeof(handle) && memoire[0] == 37 && tiers >= 0
+        && ioctl(tiers, DRM_CONTEXT_INIT, &init) == -1 && errno == EBUSY
+        && ioctl(fd, DRM_GEM_CLOSE, &ferme) == -1 && errno == ENOENT;
+    int statut;
+    if (kill(enfant, SIGKILL) || waitpid(enfant, &statut, 0) != enfant
+        || !WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL || !isole)
+        return 7;
+    if (close(tiers)) return 8;
+    // Le registre réutilise l'emplacement du fil mort lors du prochain fork.
+    // Le pilote attend jusque-là la retraite du bail de son mapping.
+    pid_t remplacant = fork();
+    if (remplacant == 0) {
+        if (munmap(memoire, 4096) || close(fd)) _exit(1);
+        int nouveau = open(noeud, O_RDWR | O_CLOEXEC);
+        if (nouveau < 0 || ioctl(nouveau, DRM_CONTEXT_INIT, &init)) _exit(2);
+        if (ioctl(nouveau, DEMAPPE) || close(nouveau)) _exit(3);
+        _exit(0);
+    }
+    if (remplacant < 0 || waitpid(remplacant, &statut, 0) != remplacant
+        || !WIFEXITED(statut) || WEXITSTATUS(statut) || verifie_gem(fd, &principal)
+        || memoire[0] != 37)
+        return 9;
+    if (munmap(memoire, 4096) || ioctl(fd, DEMAPPE)) return 10;
+    puts("VIRTGPU_VENUS_CONTEXTES_ISOLES_OK");
+    return 0;
+}
+
 static int verifie_profil_vulkan(int autorise)
 {
     const char *chemin = "/dev/dri/renderD128";
@@ -720,6 +790,8 @@ int main(int argc, char **argv)
         if (verifie_proprietaire(fd, reference, 0)) return 17;
         int client = verifie_reponse_client(fd, reference);
         if (client) { printf("VIRTGPU_VENUS_REPONSE_CLIENT_ECHEC etape=%d\n", client); return 22; }
+        int contextes = verifie_contextes_independants(fd);
+        if (contextes) { printf("VIRTGPU_VENUS_CONTEXTES_ECHEC etape=%d\n", contextes); return 25; }
         puts("VIRTGPU_VENUS_DEMAPPE_OK");
     }
     return close(fd) != 0;

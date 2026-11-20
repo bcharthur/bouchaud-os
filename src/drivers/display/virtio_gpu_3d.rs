@@ -65,9 +65,14 @@ pub fn fonctionnalites_venus(offertes: u64) -> u64 {
 
 #[cfg(any(feature = "banc-gpu-venus", test))]
 pub fn contexte_venus(cree: bool) -> ([u8; 96], usize) {
+    contexte_venus_id(CONTEXTE_VENUS, cree)
+}
+
+#[cfg(any(feature = "banc-gpu-venus", test))]
+pub fn contexte_venus_id(contexte: u32, cree: bool) -> ([u8; 96], usize) {
     let mut q = [0u8; 96];
     put32(&mut q, 0, if cree { CMD_CTX_CREATE } else { CMD_CTX_DESTROY });
-    put32(&mut q, 16, CONTEXTE_VENUS);
+    put32(&mut q, 16, contexte);
     if !cree { return (q, 24); }
     let nom = b"bouchaud-venus";
     put32(&mut q, 24, nom.len() as u32);
@@ -138,7 +143,9 @@ pub fn mappe_memoire_venus(mappe: bool, offset: u64) -> ([u8; 40], usize) {
 #[cfg(feature = "banc-gpu-venus")]
 pub const PREMIER_GEM_VENUS: u32 = 0xb110;
 #[cfg(feature = "banc-gpu-venus")]
-pub const NOMBRE_GEMS_VENUS: usize = 8;
+pub const GEMS_VENUS_PRIMAIRE: usize = 8;
+#[cfg(feature = "banc-gpu-venus")]
+pub const NOMBRE_GEMS_VENUS: usize = GEMS_VENUS_PRIMAIRE + 7;
 
 #[cfg(feature = "banc-gpu-venus")]
 pub fn mappe_blob_venus(id: u32, mappe: bool, offset: u64) -> ([u8; 40], usize) {
@@ -173,10 +180,10 @@ pub fn unmap_host3d_qemu(requete: &[u8]) -> bool {
 }
 
 #[cfg(feature = "banc-gpu-venus")]
-pub fn entete_soumission_venus(octets: usize, anneau: u8) -> Option<[u8; 32]> {
+pub fn entete_soumission_venus(contexte: u32, octets: usize, anneau: u8) -> Option<[u8; 32]> {
     let mut q = submit_header(octets)?;
     put32(&mut q, 4, 2); // INFO_RING_IDX
-    put32(&mut q, 16, CONTEXTE_VENUS);
+    put32(&mut q, 16, contexte);
     q[20] = anneau;
     Some(q)
 }

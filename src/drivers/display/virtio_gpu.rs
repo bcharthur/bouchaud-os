@@ -481,6 +481,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     #[cfg(feature = "banc-gpu-venus")]
                     anneaux_venus: 1,
                     #[cfg(feature = "banc-gpu-venus")]
+                    second_venus: None,
+                    #[cfg(feature = "banc-gpu-venus")]
                     capset_venus,
                     textures_rendu: rendu::TexturesRendu::neuf(),
                     textures: [None; cg::TEXTURES_MAX],
@@ -1172,6 +1174,8 @@ struct Peripherique {
     gems_venus: venus::Gems,
     #[cfg(feature = "banc-gpu-venus")]
     anneaux_venus: u8,
+    #[cfg(feature = "banc-gpu-venus")]
+    second_venus: Option<venus::SecondContexte>,
     #[cfg(feature = "banc-gpu-venus")]
     capset_venus: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
     textures_rendu: rendu::TexturesRendu,

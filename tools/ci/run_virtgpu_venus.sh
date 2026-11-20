@@ -28,6 +28,14 @@ case $fenetre in
     1) [[ $sonde == skia-vulkan-probe ]] || { echo "La fenêtre exige BO_VENUS_SKIA_PROBE=1" >&2; exit 2; } ;;
     *) echo "BO_VENUS_SKIA_WINDOW doit valoir 0 ou 1" >&2; exit 2 ;;
 esac
+parallele=${BO_VENUS_DEUX_PROCESSUS:-0}
+case "$parallele" in
+    0) ;;
+    1) [[ -n $sysroot && $sonde == vulkan-probe ]] || {
+           echo 'Deux processus exigent la sonde publique Vulkan et son rootfs' >&2; exit 2;
+       } ;;
+    *) echo 'BO_VENUS_DEUX_PROCESSUS doit valoir 0 ou 1' >&2; exit 2 ;;
+esac
 if [[ -n $sysroot ]]; then
     # Rootfs préparé avec la sonde publique, le loader, le vrai ICD Venus
     # et ses dépendances. Aucun téléchargement ni installation implicite.
@@ -48,6 +56,8 @@ RUN
         printf 'export BO_AUTOSTART_APP=/skia-vulkan-probe\ndesktop\n' >>"$sortie/scen/autorun"
     elif [[ $sonde == skia-vulkan-probe ]]; then
         printf '/skia-vulkan-probe\n' >>"$sortie/scen/autorun"
+    elif [[ $parallele == 1 ]]; then
+        printf '/vulkan-probe --allow-cpu-deux-processus\n' >>"$sortie/scen/autorun"
     else
         printf '/vulkan-probe --allow-cpu\n' >>"$sortie/scen/autorun"
     fi
@@ -107,6 +117,9 @@ if [[ -n $sysroot ]]; then
     fi
     grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=5a17c3e9' "$sortie/serie.log"
     grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=a18e3c16' "$sortie/serie.log"
+    if [[ $parallele == 1 ]]; then
+        grep -aqF 'VULKAN_TRANSFERT_DEUX_PROCESSUS_OK' "$sortie/serie.log"
+    fi
     exit 0
 fi
 grep -aqF 'P10_VENUS_HOSTMEM_OK' "$sortie/serie.log"
@@ -135,5 +148,7 @@ if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
     grep -aqF 'P10_VENUS_ORPHELIN_RECUPERE' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_SYNC_FILE_OK' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_REPONSE_CLIENT_OK anneaux=64' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_CONTEXTES_ISOLES_OK' "$sortie/serie.log"
+    grep -aqF 'P10_VENUS_SECOND_ORPHELIN_RECUPERE' "$sortie/serie.log"
     grep -aqF 'VIRTGPU_VENUS_DEMAPPE_OK' "$sortie/serie.log"
 fi
