@@ -370,3 +370,18 @@ partage DMA-BUF exige encore PRIME dans le pilote. Le verdict Vulkan
 demande une relecture Skia réussie et les vérifications visuelles du
 smoke. Le build complet reste à qualifier après résolution de l'accès
 à la dépendance zlib Chromium d'ANGLE.
+
+### Correctif proposé côté QEMU
+
+Le [patch QEMU](patches/qemu-virtio-gpu-fenced-unmap.patch) conserve une
+commande suspendue dans `cmdq` jusqu'à la reprise du backend, même si elle
+porte FENCE. L'application du patch a été vérifiée sur les sources de
+QEMU 11.1.3 et 11.2.0-rc0.
+
+Pour qualifier le correctif côté hôte, compiler QEMU avec le patch, puis
+construire une image de test Bouchaud dans un worktree avec
+`unmap_host3d_qemu` forcé à `false`. Relancer le banc Venus complet avec
+la trace `virtio_gpu_cmd_*` et les événements `virtio_gpu_fence_*`.
+Les démappages asynchrones doivent passer par les états 0 puis 2 et
+produire une réponse clôturée. Les deux motifs doivent être comparés et
+la destruction répétée. L'exécutable QEMU patché reste à valider.

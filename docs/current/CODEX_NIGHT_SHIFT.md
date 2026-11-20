@@ -164,3 +164,10 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le banc A/B enregistre URL, ordre, interactions, paramètres, résultats et tentatives échouées dans `campagne.json`. Il vérifie les empreintes de QEMU et des deux fichiers OVMF, en plus des images invitées à disque initial en snapshot.
 - PowerShell 7 sur Linux, prévisualisation sans interaction avec QEMU et simulation des six bras. L'alternance et le refus d'un firmware différent ont été vérifiés. WHPX et RTX restent à exécuter sur Windows.
 - Skia isolé. GN Debian passe le téléchargement CIPD bloqué, puis le fetch de piex AOSP a bloqué. Tentative locale sans DNG/PIEX pour une scène Ganesh de contrôle, sans changer le manifeste du navigateur.
+
+## `6aa2920c9b94fb56147532ee147112ed6ed193e8` — qualification des pannes et correctif QEMU
+
+- Les bancs TCG d'attache DMA sans réponse et de clôture étrangère passent. Le premier conserve 3 686 400 octets en état Inconnue. Le second abandonne le scanout au premier échec (clôture 19 au lieu de 20) puis publie deux relevés du compositeur.
+- Correctif QEMU proposé dans `docs/current/patches/qemu-virtio-gpu-fenced-unmap.patch`. `git apply --check` passe sur les deux versions étudiées. La compilation et le rejeu hôte de cette proposition restent ouverts. La solution côté invité a déjà été qualifiée avec les binaires QEMU distribués.
+- Non-regression Gate 44705582786 et ladybird-sync 44705582800 verts au premier contrôle. GPU composition 44705582767 et Security Runtime 44705582731 étaient en cours.
+- Skia de contrôle compile sous GN Debian avec l'overlay local sans PIEX ni Fontconfig. Commande de syntaxe réussie pour la sonde `/workspace/work/p10/skia-vulkan-probe.cpp`. Attendre libskia, compiler la sonde et lancer une comparaison de pixels dans l'invité. Le build Ladybird reste bloqué sur ANGLE.
