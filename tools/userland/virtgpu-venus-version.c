@@ -1,9 +1,12 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
@@ -36,6 +39,33 @@ static int verifie_capset(int fd)
     p.param = 6;
     if (ioctl(fd, DRM_GETPARAM, &p) || masque != 1) return 4;
     puts("VIRTGPU_VENUS_DRM_CAPS_OK");
+    return 0;
+}
+
+static int verifie_decouverte_drm(void)
+{
+    DIR *dri = opendir("/dev/dri");
+    if (!dri) return 1;
+    int trouve = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dri)) != NULL)
+        if (!strcmp(entry->d_name, "renderD128")) trouve = 1;
+    if (closedir(dri) || !trouve) return 2;
+
+    struct stat st;
+    if (stat("/dev/dri/renderD128", &st) || !S_ISCHR(st.st_mode)
+        || major(st.st_rdev) != 226 || minor(st.st_rdev) != 128) return 3;
+    if (stat("/sys/dev/char/226:128/device/drm", &st) || !S_ISDIR(st.st_mode)) return 4;
+    char sous_systeme[32] = {0};
+    if (readlink("/sys/dev/char/226:128/device/subsystem", sous_systeme,
+                 sizeof(sous_systeme) - 1) != 12 || strcmp(sous_systeme, "/sys/bus/pci")) return 5;
+
+    FILE *event = fopen("/sys/dev/char/226:128/device/uevent", "r");
+    if (!event) return 6;
+    unsigned int domaine, bus, slot, fonction;
+    int lus = fscanf(event, "PCI_SLOT_NAME=%x:%x:%x.%u", &domaine, &bus, &slot, &fonction);
+    if (fclose(event) || lus != 4 || domaine != 0 || bus > 255 || slot > 31 || fonction > 7) return 7;
+    puts("VIRTGPU_VENUS_DRM_DECOUVERTE_OK");
     return 0;
 }
 
@@ -406,6 +436,8 @@ int main(int argc, char **argv)
 {
     (void)argv;
     int fd = open("/dev/dri/renderD128", O_RDWR);
+    int decouverte = verifie_decouverte_drm();
+    if (decouverte) { printf("VIRTGPU_VENUS_DRM_DECOUVERTE_ECHEC etape=%d\n", decouverte); return 19; }
     if (fd < 0 || verifie_capset(fd) || verifie_version_drm(fd) || verifie_contexte(fd)) return 1;
     if (!ioctl(fd, VERSION_VENUS, (void *)1) || errno != EFAULT) return 2;
     uint32_t reference = 0;

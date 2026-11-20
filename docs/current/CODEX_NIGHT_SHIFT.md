@@ -103,3 +103,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Ajout de VERSION x86_64 avec lecture des longueurs, copie bornée et contrôle EFAULT. Vérifié en ring 3 sous QEMU 11.2 RC, avec le banc complet relecture et GEM.
 - Le Vulkan Loader Debian 1.4.309 s'exécute dans l'invité, charge le manifeste puis le vrai ICD Mesa Venus. vkCreateInstance réussit. vkEnumeratePhysicalDevices échoue avec VK_ERROR_INITIALIZATION_FAILED car libdrm ne peut pas encore énumérer le nœud DRM. La reproduction locale est `bash /workspace/work/p10/run-loader-guest.sh /workspace/work/p10/SORTIE_NEUVE`.
 - Suite. Exposer la découverte du nœud par libdrm à partir de l'identité PCI réelle, puis traiter les paramètres requis, les mappings et les synchronisations. La preuve retenue exige toujours la lecture complète du buffer via les fonctions publiques Vulkan.
+
+## `48674045` — découverte libdrm
+
+- Le banc expose à libdrm le nœud de rendu et la vue PCI de la fonction réellement sondée. La sonde ring 3 vérifie getdents, stat, readlink et PCI_SLOT_NAME. Le banc Vue PCI, GEM et relecture Vulkan passe sous QEMU 11.2 RC.
+- Avec le vrai Loader et l'ICD Debian, Mesa écrit désormais `using DRM device /dev/dri/renderD128`, puis `required kernel param 3 is missing`. Le point bloquant est passé de l'énumération du nœud au support de l'ABI blobs et mappings.
+- Suite. Ajouter les baux GEM détenus par les VMA avec transfert du bail à la retraite TLB lors du dernier retrait de la VMA. Vérifier explicitement munmap partiel, MAP_FIXED, fork, exec et destruction avant d'activer HOST_VISIBLE. Rejouer la sonde publique `tools/userland/vulkan-transfert-probe.c` avec l'ICD Mesa.

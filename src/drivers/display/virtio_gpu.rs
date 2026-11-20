@@ -462,6 +462,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             }
         }
         if file.cassee { autotest_ok = false; }
+        #[cfg(feature = "banc-gpu-venus")]
+        let publie_drm = !file.cassee && capset.is_some() && capset_venus.is_some();
         match verrou() {
             Some(mut garde) => {
                 *garde = Some(Peripherique {
@@ -483,6 +485,9 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     bureau_attache: false,
                     entrees: None,
                 });
+                drop(garde);
+                #[cfg(feature = "banc-gpu-venus")]
+                if publie_drm { crate::kernel::sysroot::installe_drm_pci(dev); }
             }
             // Impossible au demarrage (personne d'autre ne le tient) ; si
             // cela arrivait, le peripherique est oublie -- jamais un blocage.

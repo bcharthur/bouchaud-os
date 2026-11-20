@@ -1937,7 +1937,7 @@ pub fn sys_access(path_addr: u64, _mode: u32) -> i64 {
     }
 }
 
-/// `readlink` : le RAMFS n'a pas de liens symboliques, sauf `/proc/self/exe`.
+/// `readlink` pour les liens fournis par les vues /proc et /sys.
 pub fn sys_readlink(path_addr: u64, buffer: u64, size: usize) -> i64 {
     let path = match crate::kernel::abi::resolve_user_path(path_addr) {
         Some(path) => absolute(&path),
@@ -1951,6 +1951,14 @@ pub fn sys_readlink(path_addr: u64, buffer: u64, size: usize) -> i64 {
             return -errno::EFAULT;
         }
         return len as i64;
+    }
+    #[cfg(feature = "banc-gpu-venus")]
+    if path == "/sys/dev/char/226:128/device/subsystem"
+        && resolve("/sys/dev/char/226:128/device/drm").is_some()
+    {
+        let cible = b"/sys/bus/pci";
+        let len = size.min(cible.len());
+        return if user_write(buffer, &cible[..len]) { len as i64 } else { -errno::EFAULT };
     }
     -errno::EINVAL
 }
