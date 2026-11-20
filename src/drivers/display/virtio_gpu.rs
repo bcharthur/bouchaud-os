@@ -2143,6 +2143,12 @@ pub fn presente_trame_gpu(plan: &trame::Plan, couches: &[CoucheGpu]) -> bool {
                 return Err("injection-banc");
             }
         }
+        #[cfg(feature = "banc-gpu-perte-scanout")]
+        if trame_n >= 120 && plan.nb == 0 && !couches.is_empty() {
+            crate::serial_println!("GPU_PERTE_SCANOUT_INJECTION trame={} plan_2d=0", trame_n);
+            p.file.cassee = true;
+            return Err("perte-scanout-banc");
+        }
         let mut commandes = 0u64;
         let mut flush = cg::R::default();
         // 1. Le bureau.
