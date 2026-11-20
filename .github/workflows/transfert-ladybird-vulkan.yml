@@ -1,0 +1,132 @@
+name: Transfert de l'artefact Ladybird Vulkan
+on:
+  push:
+    branches: [codex/p10-vulkan-artifact-44731438812]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Vérifier et découper le ZIP publié
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/bcharthur/bouchaud-os/actions/artifacts/14631118879/zip > ladybird.zip
+          echo 'f3be070ceb6eda60d616156ecd1751c5948a4044c0dd282b7ff3410a4c0efc8b  ladybird.zip' | sha256sum -c
+          split -b 24MiB -d -a 2 ladybird.zip partie-
+          test "$(find . -maxdepth 1 -name 'partie-*' | wc -l)" = 16
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-00
+          path: partie-00
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-01
+          path: partie-01
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-02
+          path: partie-02
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-03
+          path: partie-03
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-04
+          path: partie-04
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-05
+          path: partie-05
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-06
+          path: partie-06
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-07
+          path: partie-07
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-08
+          path: partie-08
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-09
+          path: partie-09
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-10
+          path: partie-10
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-11
+          path: partie-11
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-12
+          path: partie-12
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-13
+          path: partie-13
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-14
+          path: partie-14
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-vulkan-partie-15
+          path: partie-15
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
