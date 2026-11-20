@@ -121,6 +121,15 @@ class Moniteur:
 
 # --- banc -------------------------------------------------------------------
 
+def percentiles_us(valeurs):
+    valeurs = sorted(valeurs)
+    n = len(valeurs)
+    return {
+        nom: valeurs[(p * n + 99) // 100 - 1] if n else None
+        for nom, p in (("p50_us", 50), ("p95_us", 95), ("p99_us", 99), ("max_us", 100))
+    }
+
+
 def port_libre() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -340,6 +349,7 @@ class Banc:
             "mesures": len(lat),
             "bouton_a_ouverture_us": [a for a, _ in lat],
             "bouton_a_presentation_us": [b for _, b in lat],
+            "quantiles_bouton_a_presentation": percentiles_us(b for _, b in lat),
         }
         rx = re.compile(r"BOUCHAUD_PERF_TRAME t_ms=(\d+) us=(\d+) fenetres_us=(\d+) "
                         r"presentation_us=(\d+) pci_acces=(\d+) cmos_lectures=(\d+)")
@@ -352,14 +362,14 @@ class Banc:
             c["cpu"] += [int(v) for v in re.findall(r"\[PROC-SAMPLE\][^\n]* name=desktop cpu_pct=(\d+)", t)]
             c["hid"] += [int(v) for v in re.findall(r"HID_LATENCY_SPIKE delta_us=(\d+)", t)]
         for nom, c in cumul.items():
-            us = sorted(f[1] for f in c["trames"])
-            n = len(us)
-            q = (lambda p: us[min(n, max(1, -(-p * n // 100))) - 1]) if n else (lambda p: None)
+            n = len(c["trames"])
+            presentation = percentiles_us(f[3] for f in c["trames"])
             moy = (lambda i: round(sum(f[i] for f in c["trames"]) / n, 1)) if n else (lambda i: None)
             resultat["phases"][nom] = {
                 "trames": n, "duree_s": round(c["duree"], 2),
                 "fps": round(n / c["duree"], 1) if c["duree"] else None,
-                "p50_us": q(50), "p95_us": q(95), "p99_us": q(99), "max_us": us[-1] if n else None,
+                **percentiles_us(f[1] for f in c["trames"]),
+                **{f"presentation_{k}": v for k, v in presentation.items()},
                 "moy_us": moy(1), "fenetres_moy_us": moy(2), "presentation_moy_us": moy(3),
                 "pci_acces_par_trame": moy(4), "cmos_lectures_par_trame": moy(5),
                 # Totaux ENTIERS : c'est sur eux que porte --exige-sans-es. Une

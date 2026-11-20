@@ -482,7 +482,15 @@ duration_us={} lock_hold_us={} max_lock_hold_us={} attente_us={} contentions={}"
 pub fn sys_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> i64 {
     let frame = match prepare_execve(path_addr, argv_addr, envp_addr) {
         Ok(frame) => frame,
-        Err(erreur) => return erreur,
+        Err(erreur) => {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "EXECVE_SYSCALL_ERR t={} pid={} errno={}",
+                crate::kernel::timer::monotonic_ms(),
+                task::current_process_local().map_or(0, |p| p.pid),
+                -erreur,
+            ));
+            return erreur;
+        }
     };
     // Le garde de tache est deja rendu (`prepare_execve`) : le conserver
     // laisserait l'emplacement marque exclusif pour toujours.
