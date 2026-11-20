@@ -96,6 +96,9 @@ Write-Host "INPUT=$InputMode POINTER=$Pointer ACCEL=$Accel SMP=$Smp MIMALLOC=$Mi
 $JournalQemu = [System.IO.Path]::ChangeExtension($Serial, '.qemu.stderr.log')
 if ($QualificationJson -and -not $DryRun) {
     $QemuVersion = (& $QemuExe -version | Select-Object -First 1)
+    $QemuHash = (Get-FileHash -LiteralPath $QemuExe -Algorithm SHA256).Hash
+    $OvmfCodeHash = (Get-FileHash -LiteralPath $Ovmf.Code -Algorithm SHA256).Hash
+    $OvmfVarsHash = (Get-FileHash -LiteralPath $Ovmf.Vars -Algorithm SHA256).Hash
     $NoyauHash = (Get-FileHash -LiteralPath $Image -Algorithm SHA256).Hash
     $LadybirdHash = (Get-FileHash -LiteralPath $LadybirdImage -Algorithm SHA256).Hash
 }
@@ -124,7 +127,8 @@ if ($SerieExiste) {
 if ($QualificationJson) {
     [ordered]@{
         verdict = $VerdictGpu; code_sortie = $rc; renderer_hote = 'non-verifie'
-        qemu = $QemuExe; version_qemu = $QemuVersion; arguments = $ArgsQemu
+        qemu = $QemuExe; version_qemu = $QemuVersion; qemu_sha256 = $QemuHash; arguments = $ArgsQemu
+        ovmf_code_sha256 = $OvmfCodeHash; ovmf_vars_sha256 = $OvmfVarsHash
         noyau_sha256 = $NoyauHash; ladybird_sha256 = $LadybirdHash
         serie = $Serial; stderr = $JournalQemu; mesures = $Resume
         duree_hote_s = $DureeHoteS

@@ -158,3 +158,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Le profil Vulkan installe explicitement `vulkan-loader`. L'overlay upstream `vulkan` est vide. Le profil CPU continue d'exclure le Loader, les headers et VMA. Les deux manifestes ont été vérifiés sur le vrai arbre Ladybird épinglé.
 - La campagne locale finale a réussi trois lancements sur trois pour chaque QEMU 11.1.3 et 11.2 RC, avec deux motifs exacts par lancement. Les échecs RC de la première série restent recensés. Non-regression Gate 44704736289 vert.
 - Skia isolé. Après Automake/bzip2 avec empreintes d'origine, le miroir FreType et une variante sans Fontconfig ont passé les dépendances concernées. La récupération de GN via CIPD est bloquée. Une tentative avec le vrai GN Debian 487f835 est lancée dans un overlay local, sans changer les outils épinglés du dépôt.
+
+## `d4654249` — continuité Windows
+
+- Le banc A/B enregistre URL, ordre, interactions, paramètres, résultats et tentatives échouées dans `campagne.json`. Il vérifie les empreintes de QEMU et des deux fichiers OVMF, en plus des images invitées à disque initial en snapshot.
+- PowerShell 7 sur Linux, prévisualisation sans interaction avec QEMU et simulation des six bras. L'alternance et le refus d'un firmware différent ont été vérifiés. WHPX et RTX restent à exécuter sur Windows.
+- Skia isolé. GN Debian passe le téléchargement CIPD bloqué, puis le fetch de piex AOSP a bloqué. Tentative locale sans DNG/PIEX pour une scène Ganesh de contrôle, sans changer le manifeste du navigateur.
