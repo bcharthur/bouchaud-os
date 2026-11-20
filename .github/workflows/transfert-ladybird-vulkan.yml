@@ -23,12 +23,16 @@ jobs:
             if [[ $(jq -r .status <<< "$etat") == completed ]]; then break; fi
             sleep 30
           done
-          jq -e '.status == "completed" and .conclusion == "success"' <<< "$etat" >/dev/null
+          jq -e '.status == "completed" and .event == "workflow_dispatch"' <<< "$etat" >/dev/null
+          gh api "repos/$depot/actions/runs/$run/jobs" | jq -e '
+            any(.jobs[]; .id == 136277759225 and .name == "ladybird / build once" and .conclusion == "success")' >/dev/null
           artefact=$(gh api "repos/$depot/actions/runs/$run/artifacts" | jq -cer '
             [.artifacts[] | select(.name == "bouchaud-ladybird-native-browser" and .expired == false)]
             | if length == 1 then .[0] else error("archive Vulkan non unique ou absente") end')
           aid=$(jq -r .id <<< "$artefact")
+          test "$aid" = 14632551451
           digest=$(jq -er '.digest | sub("^sha256:"; "") | select(test("^[0-9a-f]{64}$"))' <<< "$artefact")
+          test "$digest" = 297d8dc9267b86d496b4bca5db7cc9bd2744e6b089950b2a8dd3776f23b6e55c
           gh api "repos/$depot/actions/artifacts/$aid/zip" > ladybird.zip
           echo "$digest  ladybird.zip" | tee "$RUNNER_TEMP/ladybird.sha256" | sha256sum -c
           octets=$(stat -c %s ladybird.zip)
