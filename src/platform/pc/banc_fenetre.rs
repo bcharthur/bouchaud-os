@@ -121,6 +121,19 @@ fn fil() -> ! {
         cible = (cible + 1) % coeurs;
         crate::kernel::scheduler::preempt::demande_ciblee(cible);
         if lot % SOMMEIL_TOUS_LES == (rang as u64) % SOMMEIL_TOUS_LES {
+            // Une demande ne livre pas elle-même d'IRQ. En SMP2, les tirs
+            // périodiques peuvent tous tomber dans les fenêtres protégées.
+            // Exercer aussi l'IRQ réelle ici, hors verrou, avant de dormir.
+            use crate::arch::x86_64::smp;
+            use crate::kernel::scheduler::preempt;
+            preempt::demande_ciblee(smp::cpu_index());
+            smp::ipi_vers_soi(smp::RESCHEDULE_VECTOR);
+            let limite_irq = crate::kernel::timer::monotonic_ns().saturating_add(1_000_000);
+            while preempt::demande_ciblee_pendante()
+                && crate::kernel::timer::monotonic_ns() < limite_irq
+            {
+                core::hint::spin_loop();
+            }
             crate::kernel::task::sleep_ticks(1);
             let reveil = crate::arch::x86_64::smp::cpu_index();
             if reveil != coeur {
