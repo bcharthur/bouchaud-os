@@ -183,3 +183,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - La sonde réelle `tools/userland/skia-vulkan-probe` dessine puis relit les 1 024 pixels RGBA d'une surface Vulkan. Avec le Loader 1.4.350 et Mesa Venus elle passe sur QEMU 11.1.3 et 11.2 RC. Elle ne dépend pas de Ladybird ni d'un chemin de rendu CPU dans l'invité.
 - Commandes. `cmake -S tools/userland/skia-vulkan-probe -B /tmp/skia-probe -DCMAKE_PREFIX_PATH=SKIA_PREFIX` puis `cmake --build /tmp/skia-probe`. Placer la sonde dans le rootfs Venus et lancer `BO_VENUS_SKIA_PROBE=1 BO_VENUS_LOADER_SYSROOT=ROOTFS DISPLAY=:N tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`.
 - Les 216 garde-fous passent à la tête SMP4. Le rendu HTML par le Compositor Ladybird reste bloqué sur la construction ANGLE complète.
+
+## `0dee5691` — scène Skia Vulkan dans une fenêtre native
+
+- La sonde publie le résultat dans le tampon partagé du bureau, avec dommage de 128 × 128 pixels. Le banc optionnel `BO_VENUS_SKIA_WINDOW=1` exige la scène Vulkan calculée et compare la capture GTK. Il accepte l'échelle entière observée et exclut les arêtes interpolées.
+- QEMU 11.1.3 et 11.2 RC avec TCG/Lavapipe. 1 024 pixels source vérifiés via Skia/Ganesh, plus 2 500 pixels intérieurs exacts dans chaque capture (zone affichée 64 × 64). Une capture noire est rejetée.
+- Captures dans `/workspace/work/p10/skia-window-banc-qemu11/capture.png` et `/workspace/work/p10/skia-window-banc-qemu112/capture.png`. Suite. Relancer le build natif complet sur un environnement autorisant le transport du zlib Chromium épinglé. Exécuter le même artefact avec le bras Skia CPU et le bras Vulkan. Les résultats actuels portent sur la scène native et la validation du transport.

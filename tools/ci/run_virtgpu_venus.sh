@@ -22,6 +22,12 @@ case ${BO_VENUS_SKIA_PROBE:-0} in
        [[ -n $sysroot ]] || { echo "La sonde Skia exige BO_VENUS_LOADER_SYSROOT" >&2; exit 2; } ;;
     *) echo "BO_VENUS_SKIA_PROBE doit valoir 0 ou 1" >&2; exit 2 ;;
 esac
+fenetre=${BO_VENUS_SKIA_WINDOW:-0}
+case $fenetre in
+    0) ;;
+    1) [[ $sonde == skia-vulkan-probe ]] || { echo "La fenêtre exige BO_VENUS_SKIA_PROBE=1" >&2; exit 2; } ;;
+    *) echo "BO_VENUS_SKIA_WINDOW doit valoir 0 ou 1" >&2; exit 2 ;;
+esac
 if [[ -n $sysroot ]]; then
     # Rootfs préparé avec la sonde publique, le loader, le vrai ICD Venus
     # et ses dépendances. Aucun téléchargement ni installation implicite.
@@ -38,7 +44,9 @@ export VK_DRIVER_FILES=/venus.json
 export VK_LOADER_DEBUG=error,warn,driver
 export VN_DEBUG=init
 RUN
-    if [[ $sonde == skia-vulkan-probe ]]; then
+    if [[ $fenetre == 1 ]]; then
+        printf 'export BO_AUTOSTART_APP=/skia-vulkan-probe\ndesktop\n' >>"$sortie/scen/autorun"
+    elif [[ $sonde == skia-vulkan-probe ]]; then
         printf '/skia-vulkan-probe\n' >>"$sortie/scen/autorun"
     else
         printf '/vulkan-probe --allow-cpu\n' >>"$sortie/scen/autorun"
@@ -60,19 +68,35 @@ RUN
         printf '/version\n' > "$sortie/scen/autorun"
     fi
 fi
-printf 'poweroff\n' >>"$sortie/scen/autorun"
+if [[ $fenetre == 0 ]]; then printf 'poweroff\n' >>"$sortie/scen/autorun"; fi
 IMAGE="$sortie/guest.img" tools/userland/mkdisk.sh "$sortie/scen" >/dev/null
-timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp "$smp" -m 2048 -vga none \
-    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M -display gtk,gl=on -no-reboot \
-    -drive "format=raw,file=$boot,snapshot=on" \
-    -drive "format=raw,file=$sortie/guest.img,snapshot=on" \
-    -serial "file:$sortie/serie.log" -d guest_errors -trace 'enable=virtio_gpu_cmd_*' >"$sortie/qemu.log" 2>&1 || {
-    rc=$?
-    if [[ $rc != 124 ]]; then
-        cat "$sortie/qemu.log" >&2
-        exit "$rc"
-    fi
-}
+qemu=(timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp "$smp" -m 2048 -vga none
+    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M -display gtk,gl=on -no-reboot
+    -drive "format=raw,file=$boot,snapshot=on"
+    -drive "format=raw,file=$sortie/guest.img,snapshot=on"
+    -serial "file:$sortie/serie.log" -d guest_errors -trace 'enable=virtio_gpu_cmd_*')
+if [[ $fenetre == 1 ]]; then
+    "${qemu[@]}" >"$sortie/qemu.log" 2>&1 &
+    pid=$!
+    trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+    for ((fin = SECONDS + 38; SECONDS < fin; )); do
+        if grep -aqF 'SKIA_VULKAN_FENETRE_PRETE' "$sortie/serie.log" 2>/dev/null; then break; fi
+        kill -0 "$pid"
+        sleep .5
+    done
+    grep -aqF 'SKIA_VULKAN_FENETRE_PRETE' "$sortie/serie.log"
+    sleep 2
+    import -window root "$sortie/capture.png"
+    python3 tools/ci/verifie_capture_skia_venus.py "$sortie/capture.png"
+else
+    "${qemu[@]}" >"$sortie/qemu.log" 2>&1 || {
+        rc=$?
+        if [[ $rc != 124 ]]; then
+            cat "$sortie/qemu.log" >&2
+            exit "$rc"
+        fi
+    }
+fi
 if grep -aEq 'PANIC|panicked at|DOUBLE FAULT|TRIPLE FAULT' "$sortie/serie.log"; then exit 1; fi
 if [[ -n $sysroot ]]; then
     grep -aqF 'Found ICD manifest file /venus.json' "$sortie/serie.log"
