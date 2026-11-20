@@ -370,7 +370,8 @@ def fusion_pr_verifiee(env, courant, git):
         pr = json.load(evenement)["pull_request"]
     if env.get("GITHUB_SHA") != courant:
         return False
-    parents = git("show", "-s", "--format=%P", courant).decode().split()
+    entete = git("cat-file", "commit", courant).split(b"\n\n", 1)[0]
+    parents = [ligne[7:].decode("ascii") for ligne in entete.splitlines() if ligne.startswith(b"parent ")]
     return parents == [pr["base"]["sha"], pr["head"]["sha"]]
 
 

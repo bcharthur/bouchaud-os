@@ -209,9 +209,9 @@ class ProductionTests(unittest.TestCase):
                 "base": {"sha": sha(1)}, "head": {"sha": sha(2)}}}))
             env = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": str(evenement),
                    "GITHUB_SHA": sha(3)}
-            self.assertTrue(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"{sha(1)} {sha(2)}".encode()))
-            self.assertFalse(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"{sha(1)} {sha(4)}".encode()))
-            self.assertFalse(lp.fusion_pr_verifiee(env, sha(4), lambda *args: f"{sha(1)} {sha(2)}".encode()))
+            self.assertTrue(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"tree {sha(0)}\nparent {sha(1)}\nparent {sha(2)}\n\nmessage".encode()))
+            self.assertFalse(lp.fusion_pr_verifiee(env, sha(3), lambda *args: f"parent {sha(1)}\nparent {sha(4)}".encode()))
+            self.assertFalse(lp.fusion_pr_verifiee(env, sha(4), lambda *args: f"tree {sha(0)}\nparent {sha(1)}\nparent {sha(2)}\n\nmessage".encode()))
             self.assertFalse(lp.fusion_pr_verifiee(dict(env, GITHUB_EVENT_NAME="push"), sha(3), None))
 
     def test_reconstruire_ignore_tout_artefact_et_toute_production_anterieure(self):
