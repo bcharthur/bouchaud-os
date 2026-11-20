@@ -996,6 +996,20 @@ fn une_fenetre_se_ferme() {
 }
 
 #[test]
+fn une_fenetre_superposee_se_ferme() {
+    let avant = bureau_deux_fenetres();
+
+    for (index, autre_focus) in [(1, Some(avant.fenetres[0].empreinte())), (0, None)] {
+        let mut apres = avant.clone();
+        let retiree = apres.fenetres.remove(index);
+        let degats = liste(transition::fenetre_ajoutee_ou_retiree(
+            Some(retiree.empreinte()), autre_focus, barre_taches(),
+        ));
+        oracle("fermeture avec recouvrement", &avant, &apres, &degats);
+    }
+}
+
+#[test]
 fn une_fenetre_apparait() {
     let a = bureau_une_fenetre();
     let mut b = a.clone();
