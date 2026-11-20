@@ -134,10 +134,29 @@ pub fn canonical_at(dirfd: i32, raw_path: &str) -> Option<String> {
     Some(canonical_from_node(node, raw_path))
 }
 
+#[cfg(feature = "banc-gpu-venus")]
+fn chemin_rendu_venus(chemin: &str) -> bool {
+    if matches!(chemin, "/dev/dri" | "/dev/dri/renderD128"
+        | "/sys/dev/char/226:128/device" | "/sys/bus/pci")
+    {
+        return true;
+    }
+    chemin.strip_prefix("/sys/dev/char/226:128/device/").is_some_and(|attribut| {
+        matches!(attribut, "drm" | "subsystem" | "uevent" | "vendor" | "device"
+            | "subsystem_vendor" | "subsystem_device" | "revision")
+    })
+}
+
 fn sandbox_path_allowed(security: Snapshot, canonical: &str, write: bool) -> bool {
     // Le predicat vient du profil lui-meme : reconstruire la liste ici ferait
     // qu'un profil ajoute plus tard serait oublie dans l'un des controles.
     if super::profile::sandboxe(security.profile) {
+        #[cfg(feature = "banc-gpu-venus")]
+        if !write && chemin_rendu_venus(canonical) && super::policy::compositor_venus(security.pid)
+            && crate::drivers::virtio_gpu::host_visible_venus()
+        {
+            return true;
+        }
         // Les predicats dependent du PROFIL, et pas seulement du chemin : le
         // profil persistant du navigateur appartient a RequestServer et a lui
         // seul. Voir `chemins.rs`.
@@ -264,7 +283,14 @@ pub fn open_allowed(
     }
 
     let write = wants_write(flags);
-    if !sandbox_path_allowed(security, canonical.as_str(), write) {
+    #[cfg(not(feature = "banc-gpu-venus"))]
+    let ouvre_rendu_venus = false;
+    #[cfg(feature = "banc-gpu-venus")]
+    let ouvre_rendu_venus = canonical == "/dev/dri/renderD128"
+        && flags & (O_CREAT | O_TRUNC) == 0
+        && super::policy::compositor_venus(security.pid)
+        && crate::drivers::virtio_gpu::host_visible_venus();
+    if !ouvre_rendu_venus && !sandbox_path_allowed(security, canonical.as_str(), write) {
         return Err(FsDeny::SandboxPath);
     }
 

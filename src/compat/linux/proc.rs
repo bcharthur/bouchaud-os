@@ -273,10 +273,14 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
     let (entry, interp_base) = match image.interp.as_deref() {
         None => (image.entry, 0),
         Some(interp_path) => {
-            let fs = crate::fs::ramfs::fs();
-            let interp_node = match fs.resolve(interp_path, cwd) {
-                Some(node) => node,
-                None => return Err(-errno::ENOENT),
+            // load_node_lazy reprend le verrou VFS pour lire l'ELF.
+            let interp_node = {
+                let fs = crate::fs::ramfs::fs();
+                match fs.resolve(interp_path, cwd) {
+                    Some(node) if fs.nodes[node].kind == crate::fs::ramfs::NodeKind::File => node,
+                    Some(_) => return Err(-errno::ENOEXEC),
+                    None => return Err(-errno::ENOENT),
+                }
             };
             match elf::load_node_lazy(interp_node, vmm::user_interp_base(), &mut new_promises) {
                 Ok(interp) => (interp.entry, interp.base),

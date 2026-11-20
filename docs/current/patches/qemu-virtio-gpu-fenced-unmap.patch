@@ -1,0 +1,42 @@
+diff --git a/include/hw/virtio/virtio-gpu.h b/include/hw/virtio/virtio-gpu.h
+--- a/include/hw/virtio/virtio-gpu.h
++++ b/include/hw/virtio/virtio-gpu.h
+@@ -152,6 +152,7 @@
+     struct virtio_gpu_ctrl_hdr cmd_hdr;
+     uint32_t error;
+     bool finished;
++    bool suspended;
+     QTAILQ_ENTRY(virtio_gpu_ctrl_command) next;
+ };
+
+diff --git a/hw/display/virtio-gpu-virgl.c b/hw/display/virtio-gpu-virgl.c
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -1149,7 +1149,8 @@
+         break;
+     }
+
+-    if (cmd_suspended || cmd->finished) {
++    cmd->suspended = cmd_suspended;
++    if (cmd->suspended || cmd->finished) {
+         return;
+     }
+     if (cmd->error) {
+diff --git a/hw/display/virtio-gpu.c b/hw/display/virtio-gpu.c
+--- a/hw/display/virtio-gpu.c
++++ b/hw/display/virtio-gpu.c
+@@ -1267,10 +1267,12 @@
+         }
+
+         /* process command */
++        cmd->suspended = false;
+         vgc->process_cmd(g, cmd);
+
+-        /* command suspended */
+-        if (!cmd->finished && !(cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_FENCE)) {
++        /* A suspended command has not armed its fence yet. */
++        if (cmd->suspended ||
++            (!cmd->finished && !(cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_FENCE))) {
+             trace_virtio_gpu_cmd_suspended(cmd->cmd_hdr.type);
+             break;
+         }

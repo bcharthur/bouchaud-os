@@ -25,7 +25,7 @@
 //!
 //! # Ce que le pilote en tire
 //!
-//!   * TOUTE commande part avec `VIRTIO_GPU_FLAG_FENCE` et un `fence_id`
+//!   * Toute commande de production part avec `VIRTIO_GPU_FLAG_FENCE` et un `fence_id`
 //!     croissant : sa reponse prouve que le traitement est fini. Sans cela,
 //!     un `DETACH_BACKING` accepte ne prouverait pas que le peripherique a
 //!     lache la memoire, et un `TRANSFER_TO_HOST_2D` rendu pourrait encore
@@ -43,6 +43,11 @@
 //!     reponse tardive d'une commande precedente, peripherique non conforme)
 //!     : la file est cassee et l'issue tenue pour INCONNUE -- la memoire
 //!     concernee n'est pas rendue.
+//!
+//! Le banc Venus seul accepte un UNMAP de ses blobs HOST3D sans
+//! clôture, pour QEMU qui perd les UNMAP asynchrones clôturés. L'indice,
+//! l'identifiant, la longueur et l'absence de clôture restent vérifiés.
+//! Aucune ressource n'est recyclée sur ce retour : UNREF clôturé est requis.
 //!
 //! Module pur : `tools/display/test_virtio_gpu_file.rs`.
 
@@ -76,6 +81,8 @@ pub enum Violation {
     /// Reponse sans `VIRTIO_GPU_FLAG_FENCE` : rien ne dit que le traitement
     /// est fini.
     BarriereAbsente,
+    /// Réponse marquée ou numérotée malgré une requête sans clôture.
+    BarriereInattendue,
     /// Reponse d'une autre commande (tardive, ou rejouee).
     BarriereDifferente { attendue: u64, recue: u64 },
 }
@@ -88,6 +95,7 @@ impl Violation {
             Violation::ReponseCourte { .. } => "reponse-courte",
             Violation::ReponseTropLongue { .. } => "reponse-trop-longue",
             Violation::BarriereAbsente => "barriere-absente",
+            Violation::BarriereInattendue => "barriere-inattendue",
             Violation::BarriereDifferente { .. } => "barriere-differente",
         }
     }
@@ -98,7 +106,7 @@ impl Violation {
 /// `avance` : `used.idx - dernier_util` (modulo 2^16) ; `tete` : la tete de
 /// chaine de la commande ; `capacite` : la longueur du descripteur
 /// ecrivable ; `drapeaux` et `barriere` : relus dans la reponse ;
-/// `barriere_attendue` : le `fence_id` envoye.
+/// `barriere_attendue` : le `fence_id` envoyé (ou aucune clôture pour UNMAP HOST3D).
 pub fn juge(
     avance: u16,
     tete: u16,
@@ -106,7 +114,7 @@ pub fn juge(
     capacite: u32,
     drapeaux: u32,
     barriere: u64,
-    barriere_attendue: u64,
+    barriere_attendue: Option<u64>,
 ) -> Result<(), Violation> {
     if avance != 1 {
         return Err(Violation::TropDEntrees { avance });
@@ -120,11 +128,15 @@ pub fn juge(
     if u.len > capacite {
         return Err(Violation::ReponseTropLongue { len: u.len, capacite });
     }
-    if drapeaux & DRAPEAU_BARRIERE == 0 {
-        return Err(Violation::BarriereAbsente);
-    }
-    if barriere != barriere_attendue {
-        return Err(Violation::BarriereDifferente { attendue: barriere_attendue, recue: barriere });
+    if let Some(attendue) = barriere_attendue {
+        if drapeaux & DRAPEAU_BARRIERE == 0 {
+            return Err(Violation::BarriereAbsente);
+        }
+        if barriere != attendue {
+            return Err(Violation::BarriereDifferente { attendue, recue: barriere });
+        }
+    } else if drapeaux != 0 || barriere != 0 {
+        return Err(Violation::BarriereInattendue);
     }
     Ok(())
 }
@@ -144,6 +156,12 @@ pub fn corps_valide(commande: u32, reponse: u32, taille: u32, capacite: u32) -> 
         _ => 0x1100,      // OK_NODATA
     };
     reponse == attendu && taille == if attendu == 0x1100 { ENTETE } else { capacite }
+}
+
+/// QEMU renvoie ctx_id avec la clôture mais pas nécessairement le ring_idx.
+pub fn contexte_valide(drapeaux: u32, attendu: u32, recu: u32) -> bool {
+    const INFO_RING_IDX: u32 = 1 << 1;
+    drapeaux & INFO_RING_IDX == 0 || attendu == recu
 }
 
 /// Pose le drapeau et le `fence_id` dans l'en-tete d'une requete.

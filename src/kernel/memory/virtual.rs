@@ -964,6 +964,17 @@ pub struct AddressSpace {
     /// Compteurs exacts mis a jour lors de la publication/retrait des PTE.
     /// Une lecture de RSS est ainsi O(1), quel que soit le nombre de pages.
     resident: ResidentStats,
+    #[cfg(feature = "banc-gpu-venus")]
+    baux_gpu: Vec<BailGpuVma>,
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+#[derive(Clone)]
+struct BailGpuVma {
+    id: u64,
+    debut: u64,
+    fin: u64,
+    bail: Arc<crate::drivers::virtio_gpu::BailGem>,
 }
 
 /// Stable CR3 identity shared with `Mm`'s context-switch fast path.
@@ -1081,6 +1092,8 @@ impl TlbInvalidation {
 pub struct UnmapRetirement {
     invalidation: TlbInvalidation,
     frames: Vec<u64>,
+    #[cfg(feature = "banc-gpu-venus")]
+    _baux_gpu: Vec<Arc<crate::drivers::virtio_gpu::BailGem>>,
 }
 
 impl UnmapRetirement {
@@ -1219,6 +1232,8 @@ impl AddressSpace {
             tables: Vec::new(),
             pages: BTreeSet::new(),
             resident: ResidentStats::default(),
+            #[cfg(feature = "banc-gpu-venus")]
+            baux_gpu: Vec::new(),
         })
     }
 
@@ -1426,8 +1441,10 @@ impl AddressSpace {
             if let Some(entry) = self.entry_mut(page, false) {
                 if *entry & PTE_PRESENT != 0 {
                     // Les droits changent, pas l'origine comptable de la page.
-                    let new = (*entry & (ADDR_MASK | PTE_RSS_KIND_MASK))
-                        | flags | PTE_PRESENT;
+                    let masque = ADDR_MASK | PTE_RSS_KIND_MASK;
+                    #[cfg(feature = "banc-gpu-venus")]
+                    let masque = masque | PTE_NO_CACHE | PTE_WRITE_THROUGH;
+                    let new = (*entry & masque) | flags | PTE_PRESENT;
                     if *entry != new {
                         *entry = new;
                         flush(page);
@@ -1438,6 +1455,22 @@ impl AddressSpace {
             page += PAGE_SIZE;
         }
         changed.then(|| self.invalidation(start, end.saturating_sub(start)))
+    }
+
+    #[cfg(feature = "banc-gpu-venus")]
+    pub fn retient_bail_gpu(
+        &mut self, id: u64, debut: u64, fin: u64, bail: Arc<crate::drivers::virtio_gpu::BailGem>,
+    ) {
+        self.baux_gpu.push(BailGpuVma { id, debut, fin, bail });
+    }
+
+    #[cfg(feature = "banc-gpu-venus")]
+    pub fn retire_baux_gpu_sans_vma(&mut self, promesses: &[crate::kernel::vma::Vma]) {
+        // UnmapRetirement conserve les baux intersectés, même pour un
+        // retrait partiel, jusqu'au dernier ACK TLB de ce retrait.
+        self.baux_gpu.retain(|bail| promesses.iter().any(|vma| {
+            matches!(vma.backing, crate::kernel::vma::Backing::GemGpu { bail_id, .. } if bail_id == bail.id)
+        }));
     }
 
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
@@ -1474,6 +1507,9 @@ impl AddressSpace {
         UnmapRetirement {
             invalidation: self.invalidation(start, end.saturating_sub(start)),
             frames: retired,
+            #[cfg(feature = "banc-gpu-venus")]
+            _baux_gpu: self.baux_gpu.iter().filter(|bail| bail.debut < end && bail.fin > start)
+                .map(|bail| Arc::clone(&bail.bail)).collect(),
         }
     }
 
@@ -1616,6 +1652,8 @@ impl AddressSpace {
     /// d'un `MAP_SHARED`.
     pub fn duplicate(&self) -> Option<(AddressSpace, DuplicationCompte)> {
         let mut child = AddressSpace::new()?;
+        #[cfg(feature = "banc-gpu-venus")]
+        child.baux_gpu.clone_from(&self.baux_gpu);
         let mut compte = DuplicationCompte::default();
         // Le parcours construit d'abord la liste complete des PTE utilisateur.
         // Sur un espace de plusieurs centaines de mebioctets cette liste EST un
