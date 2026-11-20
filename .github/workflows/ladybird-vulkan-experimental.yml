@@ -4,20 +4,36 @@ on:
     branches:
       - codex/p10-real-gpu-vulkan-20261119
       - codex/p10-ladybird-fluidity-20261120
+      - codex/ladybird-ci-provenance-20261120
     paths:
       - '.github/workflows/ladybird-vulkan-experimental.yml'
       - 'third_party/UPSTREAM.md'
       - 'tools/ladybird/**'
+      - 'tools/ci/apt-installe.sh'
+      - 'tools/ci/ladybird_empreinte.py'
+      - 'tools/ci/ladybird_vulkan_provenance.py'
 
 permissions:
   contents: read
 
-concurrency:
-  group: ladybird-vulkan-experimental-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    outputs:
+      empreinte: ${{ steps.identite.outputs.empreinte }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: identite
+        run: python3 tools/ci/ladybird_vulkan_provenance.py calcule
+
   build:
+    needs: provenance
+    concurrency:
+      group: ladybird-vulkan-${{ needs.provenance.outputs.empreinte }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -25,7 +41,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Sélectionner un artefact Vulkan de provenance identique
+        id: reutilisation
+        env:
+          DEPOT: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          EMPREINTE: ${{ needs.provenance.outputs.empreinte }}
+        run: python3 tools/ci/ladybird_vulkan_provenance.py
+
+      - uses: actions/download-artifact@v4
+        if: steps.reutilisation.outputs.source_run != ''
+        with:
+          name: bouchaud-ladybird-vulkan-${{ needs.provenance.outputs.empreinte }}
+          path: ${{ runner.temp }}/ladybird-vulkan-reuse
+          run-id: ${{ steps.reutilisation.outputs.source_run }}
+          github-token: ${{ github.token }}
+
       - name: Installer la chaîne de compilation
+        if: steps.reutilisation.outputs.source_run == ''
         run: |
           tools/ci/apt-installe.sh \
             build-essential pkg-config python3 python3-dev python3-venv perl \
@@ -42,9 +75,17 @@ jobs:
           fi
 
       - name: Construire le navigateur et son compositeur Vulkan
+        if: steps.reutilisation.outputs.source_run == ''
         run: |
           set -o pipefail
           bash tools/ladybird/native-browser-final.sh --cible 2>&1 | tee /tmp/ladybird-vulkan.log
+
+      - name: Restaurer les modes des fichiers Vulkan
+        if: steps.reutilisation.outputs.source_run != ''
+        run: |
+          mkdir -p third_party/native-browser-bouchaud-vulkan
+          (cd "$RUNNER_TEMP/ladybird-vulkan-reuse" && sha256sum -c browser.tar.sha256)
+          tar -xf "$RUNNER_TEMP/ladybird-vulkan-reuse/browser.tar" -C third_party/native-browser-bouchaud-vulkan
 
       - name: Vérifier le lien Vulkan du compositeur
         run: |
@@ -58,6 +99,23 @@ jobs:
         with:
           name: bouchaud-ladybird-vulkan-experimental
           path: third_party/native-browser-bouchaud-vulkan/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Empaqueter l'artefact canonique Vulkan
+        if: steps.reutilisation.outputs.source_run == ''
+        run: |
+          tar -C third_party/native-browser-bouchaud-vulkan -cf "$RUNNER_TEMP/browser.tar" .
+          (cd "$RUNNER_TEMP" && sha256sum browser.tar > browser.tar.sha256)
+
+      - name: Publier l'artefact Vulkan par empreinte
+        if: steps.reutilisation.outputs.source_run == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouchaud-ladybird-vulkan-${{ needs.provenance.outputs.empreinte }}
+          path: |
+            ${{ runner.temp }}/browser.tar
+            ${{ runner.temp }}/browser.tar.sha256
           if-no-files-found: error
           retention-days: 7
 
