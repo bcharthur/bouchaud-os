@@ -384,4 +384,21 @@ construire une image de test Bouchaud dans un worktree avec
 la trace `virtio_gpu_cmd_*` et les événements `virtio_gpu_fence_*`.
 Les démappages asynchrones doivent passer par les états 0 puis 2 et
 produire une réponse clôturée. Les deux motifs doivent être comparés et
-la destruction répétée. L'exécutable QEMU patché reste à valider.
+la destruction répétée.
+
+Ce test a été exécuté avec deux binaires compilés à partir de la même
+source Debian QEMU 11.1.3, avec la même configuration et le même
+virglrenderer 1.1.0. Les deux bras ont démarré la même image invitée
+avec le démappage clôturé forcé, sous TCG SMP2, SDL/OpenGL dans Xvfb et
+Vulkan Lavapipe. Le seul changement entre les binaires est le patch
+ci-dessus.
+
+| Bras | États de mapping observés | Réponses de clôture UNMAP | Banc Venus |
+|---|---|---:|---|
+| Témoin | Premier UNMAP à l'état 0 | 0 | Premier motif de 4 096 octets exact, puis expiration du démappage à 1 s |
+| Correctif | 17 passages de 0 à 2 | 17/17 | 4 remplissages vérifiés, isolation DRM et nettoyage validés |
+
+Sur les dix démappages du blob de réponse mesurés par l'invité dans le
+bras corrigé, l'intervalle observé est de 9,370 à 29,570 ms. Les
+journaux de l'essai local sont sous `/workspace/work/p10/qemu-identique-fence-*`.
+L'exécution du patch hôte sous QEMU 11.2 RC reste à qualifier.
