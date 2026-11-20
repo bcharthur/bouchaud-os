@@ -95,8 +95,16 @@ if [[ $fenetre == 1 ]]; then
         sleep .5
     done
     grep -aqF 'SKIA_VULKAN_FENETRE_PRETE' "$sortie/serie.log"
-    sleep 2
-    import -window root "$sortie/capture.png"
+    # La publication du dommage précède le scanout. La destruction des
+    # ressources Vulkan peut encore détenir la controlq après ce marqueur.
+    # Garder le délai global et exiger les mêmes pixels de la capture.
+    while kill -0 "$pid" 2>/dev/null && ((SECONDS < fin)); do
+        if import -window root "$sortie/capture.png" \
+            && python3 tools/ci/verifie_capture_skia_venus.py "$sortie/capture.png" > "$sortie/capture-verdict.log" 2>&1; then
+            break
+        fi
+        sleep .5
+    done
     python3 tools/ci/verifie_capture_skia_venus.py "$sortie/capture.png"
 else
     "${qemu[@]}" >"$sortie/qemu.log" 2>&1 || {
