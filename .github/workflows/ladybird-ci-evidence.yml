@@ -1,0 +1,28 @@
+name: Ladybird evidence CPU and Vulkan
+on:
+  push:
+    branches: [codex/ladybird-ci-evidence-20261120]
+    paths: ['.github/workflows/ladybird-ci-evidence.yml']
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute qualification without changing production verdicts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          python3 -u tools/ci/ladybird_ci_evidence.py | tee "$RUNNER_TEMP/ladybird-evidence.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ladybird-ci-evidence
+          path: ${{ runner.temp }}/ladybird-evidence.log
+          if-no-files-found: error
