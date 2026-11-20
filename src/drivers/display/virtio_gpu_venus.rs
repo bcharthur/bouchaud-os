@@ -71,8 +71,18 @@ impl Fenetre {
         possible.min(MAX_GEM_VENUS) & !(PAGE as u64 - 1)
     }
 
+    fn slots_primaires(self) -> usize {
+        if self.octets >= BASE_GEMS + MAX_GEM_VENUS * gpu3d::NOMBRE_GEMS_VENUS as u64 {
+            gpu3d::GEMS_VENUS_PRIMAIRE_ETENDU
+        } else {
+            gpu3d::GEMS_VENUS_PRIMAIRE
+        }
+    }
+
     fn permet_second(self) -> bool {
-        self.octets >= BASE_GEMS + self.octets_par_gem() * gpu3d::NOMBRE_GEMS_VENUS as u64
+        let slots = self.slots_primaires() + gpu3d::GEMS_VENUS_SECONDAIRE;
+        let fente = self.octets_par_gem();
+        fente != 0 && self.octets >= BASE_GEMS + fente * slots as u64
     }
 }
 
@@ -177,6 +187,7 @@ pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result
     let p = garde.as_mut().filter(|p| !p.file.cassee).ok_or(ErreurRendu::Indisponible)?;
     let (fenetre, contexte, _, _) = possede_contexte(p, session)?;
     if octets < PAGE as u64 || octets % PAGE as u64 != 0 || octets > fenetre.octets_par_gem() {
+        crate::serial_println!("P10_VENUS_GEM_REFUSE ctx={:#x} octets={} raison=taille limite={}", contexte, octets, fenetre.octets_par_gem());
         return Err(ErreurRendu::Invalide);
     }
     let gems = &mut p.gems_venus;
@@ -190,12 +201,16 @@ pub fn cree_gem_venus(session: &Arc<()>, id_memoire: u64, octets: u64) -> Result
     }
     // Les deux pools matériels ne se recouvrent pas, même si un client
     // utilise tous ses slots. Le slot du canal principal conserve sa taille.
+    let primaires = fenetre.slots_primaires();
     let plage = if contexte == SECOND_CONTEXTE {
-        gpu3d::GEMS_VENUS_PRIMAIRE..gpu3d::NOMBRE_GEMS_VENUS
+        primaires..primaires + gpu3d::GEMS_VENUS_SECONDAIRE
     } else {
-        0..gpu3d::GEMS_VENUS_PRIMAIRE
+        0..primaires
     };
-    let i = plage.into_iter().find(|&i| gems.objets[i].is_none()).ok_or(ErreurRendu::Plein)?;
+    let Some(i) = plage.into_iter().find(|&i| gems.objets[i].is_none()) else {
+        crate::serial_println!("P10_VENUS_GEM_REFUSE ctx={:#x} octets={} raison=quota", contexte, octets);
+        return Err(ErreurRendu::Plein);
+    };
     // Le slot matériel est recyclé après UNREF. Le handle visible ne l'est pas.
     let gem = Gem { handle: gems.prochain, ressource: gpu3d::PREMIER_GEM_VENUS + i as u32, octets: octets as u32 };
     gems.prochain = gem.handle.checked_add(1).ok_or(ErreurRendu::Plein)?;

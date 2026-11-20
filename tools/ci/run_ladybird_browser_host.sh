@@ -54,8 +54,8 @@ case "$AFFICHAGE" in
         AFFICHE=(-display sdl,gl=on)
         CAPTURE_X=1 ;;
     venus)
-        ECRAN=(-vga none -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M)
-        AFFICHE=(-display gtk,gl=on)
+        ECRAN=(-vga none -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=512M)
+        AFFICHE=(-display sdl,gl=on)
         CAPTURE_X=1
         VENUS_SYSROOT=${BO_SMOKE_VENUS_SYSROOT:?Le smoke Venus exige un rootfs ICD Mesa}
         for entree in lib/libvulkan.so.1 lib/libvulkan_virtio.so lib64/ld-linux-x86-64.so.2 venus.json; do

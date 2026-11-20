@@ -145,7 +145,11 @@ pub const PREMIER_GEM_VENUS: u32 = 0xb110;
 #[cfg(feature = "banc-gpu-venus")]
 pub const GEMS_VENUS_PRIMAIRE: usize = 8;
 #[cfg(feature = "banc-gpu-venus")]
-pub const NOMBRE_GEMS_VENUS: usize = GEMS_VENUS_PRIMAIRE + 7;
+pub const GEMS_VENUS_PRIMAIRE_ETENDU: usize = 24;
+#[cfg(feature = "banc-gpu-venus")]
+pub const GEMS_VENUS_SECONDAIRE: usize = 7;
+#[cfg(feature = "banc-gpu-venus")]
+pub const NOMBRE_GEMS_VENUS: usize = GEMS_VENUS_PRIMAIRE_ETENDU + GEMS_VENUS_SECONDAIRE;
 
 #[cfg(feature = "banc-gpu-venus")]
 pub fn mappe_blob_venus(id: u32, mappe: bool, offset: u64) -> ([u8; 40], usize) {
