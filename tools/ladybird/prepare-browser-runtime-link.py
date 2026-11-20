@@ -139,7 +139,11 @@ def append_runtime_link_options(path: Path, target: str) -> None:
         start = data.index(marker)
         prefix = data[:start].rstrip()
         data = prefix + "\n"
-    block = f'''\n{marker}\nif (BOUCHAUD_PORT)\n    target_link_options({target} PRIVATE {OPTIONS_LIEN})\n\n    # A glibc static PIE relocates itself before normal libc/TLS startup. Its\n    # elf_get_dynamic_info() path asserts that static PIE binaries do not carry\n    # DT_RPATH or DT_RUNPATH. CMake otherwise injects the vcpkg build directory\n    # as RUNPATH even though every dependency is linked statically. Keep the\n    # link-time search path in LIBRARY_PATH/CMAKE_LIBRARY_PATH, but emit no\n    # runtime search path in the Bouchaud executable.\n    set_target_properties({target} PROPERTIES\n        SKIP_BUILD_RPATH TRUE\n        BUILD_WITH_INSTALL_RPATH FALSE\n        INSTALL_RPATH \"\"\n    )\nendif()\n'''
+    block = f'''\n{marker}\nif (BOUCHAUD_PORT)\n    if (BOUCHAUD_VULKAN_COMPOSITOR)
+        target_link_options({target} PRIVATE -pie LINKER:--allow-multiple-definition)
+    else()
+        target_link_options({target} PRIVATE {OPTIONS_LIEN})
+    endif()\n\n    # A glibc static PIE relocates itself before normal libc/TLS startup. Its\n    # elf_get_dynamic_info() path asserts that static PIE binaries do not carry\n    # DT_RPATH or DT_RUNPATH. CMake otherwise injects the vcpkg build directory\n    # as RUNPATH even though every dependency is linked statically. Keep the\n    # link-time search path in LIBRARY_PATH/CMAKE_LIBRARY_PATH, but emit no\n    # runtime search path in the Bouchaud executable.\n    set_target_properties({target} PROPERTIES\n        SKIP_BUILD_RPATH TRUE\n        BUILD_WITH_INSTALL_RPATH FALSE\n        INSTALL_RPATH \"\"\n    )\nendif()\n'''
     path.write_text(data.rstrip() + "\n" + block)
 
 

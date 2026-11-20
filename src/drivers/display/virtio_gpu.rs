@@ -28,6 +28,19 @@
 //! sur BGA. Ne s'execute que si QEMU expose `-device virtio-gpu-pci`
 //! (1af4:1050) ; sans lui, une ligne et rien d'autre.
 
+#[path = "virtio_gpu_rendu.rs"]
+mod rendu;
+pub use rendu::{blit_texture_rendu, cree_texture_rendu, detruit_texture_rendu,
+    transfert_texture_rendu, ErreurRendu, RegionRendu, TransfertRendu, OCTETS_TEXTURE};
+
+#[cfg(feature = "banc-gpu-venus")]
+#[path = "virtio_gpu_venus.rs"]
+mod venus;
+#[cfg(feature = "banc-gpu-venus")]
+pub use venus::{host_visible_venus, BailGem, cree_gem_venus, ferme_gem_venus, info_gem_venus, mappe_gem_venus, offset_gem_venus, contexte_venus_disponible, copie_reponse_venus, ferme_vulkan_banc,
+    initialise_contexte_venus, relis_memoire_venus, soumets_venus, version_vulkan_banc,
+    OCTETS_REPONSE_VENUS, TAILLE_RELECTURE_VENUS};
+
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, AtomicBool, AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
@@ -222,9 +235,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         commune.e8(DEVICE_STATUS, ACKNOWLEDGE);
         commune.e8(DEVICE_STATUS, ACKNOWLEDGE | DRIVER);
 
-        // Fonctionnalites : VERSION_1 seulement. Tout le reste est refuse,
-        // y compris ce que le peripherique propose (VIRGL, EDID, BLOB...) :
-        // un pilote n'accepte que ce qu'il sait servir.
+        // VERSION_1 et VIRGL si propose dans les images livrees.
+        // Seul le banc Venus exerce en plus BLOB et CONTEXT_INIT.
         commune.e32(DEVICE_FEATURE_SELECT, 0);
         let bas = commune.l32(DEVICE_FEATURE) as u64;
         commune.e32(DEVICE_FEATURE_SELECT, 1);
@@ -237,6 +249,8 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         // BOUCHAUD_P10_VIRGL_3D_20261109 : genuine VIRGL negotiation is
         // feature-gated and always conditional on host advertisement.
         let retenues = gpu3d::negotiated_features(proposees, true);
+        #[cfg(feature = "banc-gpu-venus")]
+        let retenues = retenues | gpu3d::fonctionnalites_venus(proposees);
         commune.e32(DRIVER_FEATURE_SELECT, 0);
         commune.e32(DRIVER_FEATURE, retenues as u32);
         commune.e32(DRIVER_FEATURE_SELECT, 1);
@@ -323,7 +337,13 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
         let mut requete = [0u8; ENTETE];
         pose32(&mut requete, 0, CMD_GET_DISPLAY_INFO);
         let longueur_reponse = ENTETE + MAX_ECRANS * 24;
-        let genre = file.commande(&requete, longueur_reponse).map_err(|_| "display-info-sans-reponse")?;
+        let genre = match file.commande(&requete, longueur_reponse) {
+            Ok(genre) => genre,
+            Err(cause) => {
+                crate::serial_println!("VIRTIO_GPU_DISPLAY_INFO echec={}", cause);
+                return Err("display-info-sans-reponse");
+            }
+        };
         let delai_us = (crate::kernel::timer::monotonic_ns() - debut) / 1000;
         if genre != RESP_OK_DISPLAY_INFO {
             crate::serial_println!("VIRTIO_GPU_DISPLAY_INFO reponse={:#06x} attendue={:#06x}", genre, RESP_OK_DISPLAY_INFO);
@@ -389,7 +409,7 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
             match p10_probe_3d(&mut file, capsets) {
                 Ok(info) => {
                     match calibre_convention(&mut file) {
-                        Ok(conv) => {
+                        Ok((conv, _)) => {
                             CONVENTION.store(if conv == cg::Convention::Brut { 1 } else { 2 }, Ordering::Release);
                             P10_VIRGL_PRET.store(true, Ordering::Release);
                             crate::serial_println!("BOUCHAUD_GPU_COMPOSITION_AUTOTEST_OK convention={:?} blit_gpu=8x3 relu_au_pixel=64/64", conv);
@@ -407,7 +427,43 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                 }
             }
         };
+        let capset = p10_virgl.and_then(|info| match p10_lit_capset(&mut file, info) {
+            Ok(octets) => {
+                crate::serial_println!("P10_GPU_CAPSET_LU id={} version={} octets={}", info.id, info.version, octets.len());
+                Some((info, octets))
+            }
+            Err(cause) => {
+                crate::serial_println!("P10_GPU_CAPSET_NON_LU id={} raison={}", info.id, cause);
+                None
+            }
+        });
+        #[cfg(feature = "banc-gpu-venus")]
+        let mut hostmem_venus = None;
+        #[cfg(feature = "banc-gpu-venus")]
+        let mut capset_venus = None;
+        #[cfg(feature = "banc-gpu-venus")]
+        if retenues & gpu3d::F_VENUS == gpu3d::F_VENUS {
+            let capsets = c.peripherique.map(|base| Region { base }.l32(12)).unwrap_or(0);
+            match sonde_contexte_venus(&mut file, capsets) {
+                Ok((info, octets)) => {
+                    let support_hostmem = octets.get(..4) == Some(&1u32.to_le_bytes())
+                        && octets.get(16..20) == Some(&1u32.to_le_bytes());
+                    capset_venus = Some((info, octets));
+                    if support_hostmem { hostmem_venus = venus::mappe_fenetre(dev).map(venus::Canal::Nouveau); }
+                    crate::serial_println!(
+                        "P10_VENUS_CONTEXTE_OK capset={} version={} octets={}", info.id, info.version, info.size
+                    );
+                    match sonde_blob_invite(&mut file) {
+                        Ok(()) => crate::serial_println!("P10_BLOB_INVITE_OK octets={}", PAGE),
+                        Err(etape) => crate::serial_println!("P10_BLOB_INVITE_ECHEC etape={}", etape),
+                    }
+                }
+                Err(cause) => crate::serial_println!("P10_VENUS_CONTEXTE_ECHEC etape={}", cause),
+            }
+        }
         if file.cassee { autotest_ok = false; }
+        #[cfg(feature = "banc-gpu-venus")]
+        let publie_drm = !file.cassee && capset.is_some() && capset_venus.is_some();
         match verrou() {
             Some(mut garde) => {
                 *garde = Some(Peripherique {
@@ -417,10 +473,25 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
                     scanout: None,
                     mire,
                     p10_virgl,
+                    capset,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    hostmem_venus,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    gems_venus: venus::Gems::neuf(),
+                    #[cfg(feature = "banc-gpu-venus")]
+                    anneaux_venus: 1,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    second_venus: None,
+                    #[cfg(feature = "banc-gpu-venus")]
+                    capset_venus,
+                    textures_rendu: rendu::TexturesRendu::neuf(),
                     textures: [None; cg::TEXTURES_MAX],
                     bureau_attache: false,
                     entrees: None,
                 });
+                drop(garde);
+                #[cfg(feature = "banc-gpu-venus")]
+                if publie_drm { crate::kernel::sysroot::installe_drm_pci(dev); }
             }
             // Impossible au demarrage (personne d'autre ne le tient) ; si
             // cela arrivait, le peripherique est oublie -- jamais un blocage.
@@ -447,6 +518,48 @@ fn initialise(dev: &PciDevice) -> Result<(), &'static str> {
 
 // BOUCHAUD_P10_VIRGL_3D_20261109: real commands on the control queue.
 // The display path is still software raster + virtio-gpu 2D.
+#[cfg(feature = "banc-gpu-venus")]
+unsafe fn sonde_contexte_venus(f: &mut FileControle, count: u32) -> Result<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>), &'static str> {
+    for idx in 0..count.min(gpu3d::MAX_CAPSETS_TO_SCAN) {
+        if f.commande(&gpu3d::get_capset_info(idx), 40) != Ok(gpu3d::RESP_OK_CAPSET_INFO) {
+            return Err("get-capset-info");
+        }
+        if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
+        let raw = core::slice::from_raw_parts(f.reponse(), 40);
+        let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
+        if info.id != gpu3d::CAPSET_VENUS { continue; }
+        let octets = p10_lit_capset(f, info).map_err(|_| "get-capset-venus")?;
+        for (cree, etape) in [(true, "ctx-create-venus"), (false, "ctx-destroy-venus")] {
+            let (commande, len) = gpu3d::contexte_venus(cree);
+            if f.commande(&commande[..len], ENTETE) != Ok(RESP_OK_NODATA) {
+                return Err(etape);
+            }
+        }
+        return Ok((info, octets));
+    }
+    Err("capset-venus-absent")
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+unsafe fn sonde_blob_invite(f: &mut FileControle) -> Result<(), &'static str> {
+    let (phys, virt) = memory::alloc_dma(PAGE).ok_or("dma-blob")?;
+    core::ptr::write_bytes(virt, 0, PAGE);
+    fence(Ordering::SeqCst);
+    let cree = f.commande(&gpu3d::blob_invite(phys, PAGE as u32), ENTETE);
+    let mut memoire = dma::apres_attache(Memoire::NonAttachee, dma::issue(cree));
+    // Le blob est la seule référence de la page côté hôte. UNREF retire
+    // cette référence en détruisant le blob. En cas de doute, on conserve.
+    let detruit = if cree == Ok(RESP_OK_NODATA) {
+        let r = libere(f, gpu3d::RESSOURCE_BLOB_BANC);
+        memoire = dma::apres_detache(memoire, dma::issue(r));
+        r == Ok(RESP_OK_NODATA)
+    } else {
+        false
+    };
+    rend_si_sur(f, 0, phys, PAGE, &mut memoire, "blob-invite-banc");
+    if detruit { Ok(()) } else { Err("cycle-create-unref") }
+}
+
 unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::CapsetInfo, &'static str> {
     if count == 0 { return Err("aucun-capset"); }
     let mut selected: Option<gpu3d::CapsetInfo> = None;
@@ -458,12 +571,9 @@ unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::Capset
         if f.derniere_reponse_len < 40 { return Err("capset-info-tronque"); }
         let raw = core::slice::from_raw_parts(f.reponse(), 40);
         let info = gpu3d::parse_capset_info(raw).ok_or("capset-info-invalide")?;
-        if gpu3d::supported(info) {
-            if info.id == gpu3d::CAPSET_VIRGL2 {
-                selected = Some(info);
-                break;
-            }
-            if selected.is_none() { selected = Some(info); }
+        crate::serial_println!("P10_GPU_CAPSET id={} version={} octets={}", info.id, info.version, info.size);
+        if gpu3d::supported(info) && (selected.is_none() || info.id == gpu3d::CAPSET_VIRGL2) {
+            selected = Some(info);
         }
     }
     let info = selected.ok_or("virgl-capset-absent")?;
@@ -496,6 +606,48 @@ unsafe fn p10_probe_3d(f: &mut FileControle, count: u32) -> Result<gpu3d::Capset
         return Err(e);
     }
     Ok(info)
+}
+
+unsafe fn p10_lit_capset(f: &mut FileControle, info: gpu3d::CapsetInfo)
+    -> Result<alloc::vec::Vec<u8>, &'static str>
+{
+    let (req, taille) = gpu3d::get_capset(info, PAGE - REPONSE).ok_or("capset-trop-grand")?;
+    if f.commande(&req, taille)? != gpu3d::RESP_OK_CAPSET {
+        return Err("capset-refuse");
+    }
+    let raw = core::slice::from_raw_parts(f.reponse(), f.derniere_reponse_len as usize);
+    let octets = gpu3d::capset_payload(raw, info.size as usize).ok_or("capset-tronque")?;
+    Ok(octets.to_vec())
+}
+
+/// Copie bornee des capacites lues a la sonde. Aucun DMA vers le processus.
+pub fn copie_capset(id: u32, version: u32, sortie: &mut [u8]) -> Option<usize> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    let choisi = p.capset.as_ref().filter(|(info, _)| info.id == id);
+    #[cfg(feature = "banc-gpu-venus")]
+    let choisi = choisi.or_else(|| p.capset_venus.as_ref().filter(|(info, _)| info.id == id));
+    let (info, octets) = choisi?;
+    if info.version != version { return None; }
+    let n = sortie.len().min(octets.len());
+    sortie[..n].copy_from_slice(&octets[..n]);
+    Some(n)
+}
+
+/// Capsets dont GET_CAPS peut effectivement copier le contenu.
+pub fn masque_capsets_rendu() -> Option<u64> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    let masque = 1u64 << p.capset.as_ref()?.0.id;
+    #[cfg(feature = "banc-gpu-venus")]
+    let masque = masque | p.capset_venus.as_ref().map_or(0, |(info, _)| 1u64 << info.id);
+    Some(masque)
+}
+
+pub fn capset_render_id() -> Option<u32> {
+    let garde = verrou()?;
+    let p = garde.as_ref().filter(|p| !p.file.cassee)?;
+    p.capset.as_ref().map(|(info, _)| info.id)
 }
 
 /// A real kernel-only VIRGL command submission entry point. No ring3 uAPI.
@@ -597,6 +749,7 @@ struct FileControle {
 
 /// La requete occupe le debut du tampon, la reponse commence a REPONSE.
 const REPONSE: usize = 2048;
+pub const CAPSET_OCTETS_MAX: usize = PAGE - REPONSE - ENTETE;
 const REQUETE_MAX: usize = REPONSE;
 
 impl FileControle {
@@ -626,7 +779,10 @@ impl FileControle {
         let tampon = self.tampon_v as *mut u8;
         core::ptr::copy_nonoverlapping(requete.as_ptr(), tampon, requete.len());
         self.barriere = self.barriere.wrapping_add(1);
-        file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);
+        let unmap_host3d = gpu3d::unmap_host3d_qemu(requete);
+        if !unmap_host3d {
+            file::pose_barriere(core::slice::from_raw_parts_mut(tampon, requete.len()), self.barriere);
+        }
         core::ptr::write_bytes(tampon.add(REPONSE), 0, longueur_reponse);
         let desc = self.desc as *mut u8;
         let pose = |i: usize, adresse: u64, longueur: u32, drapeaux: u16, suivant: u16| {
@@ -699,7 +855,8 @@ impl FileControle {
             crate::serial_println!("VIRTIO_GPU_INJECTION reponse_etrangere (transfert du bureau juge contre une autre barriere)");
             attendue = attendue.wrapping_add(1);
         }
-        if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, attendue) {
+        let cloture = (!unmap_host3d).then_some(attendue);
+        if let Err(v) = file::juge(avance, 0, utilise, longueur_reponse as u32, drapeaux, barriere, cloture) {
             // La file ne sert plus : rien de ce qu'elle rendrait ensuite ne
             // pourrait etre rattache a une commande.
             self.cassee = true;
@@ -714,6 +871,17 @@ impl FileControle {
             crate::serial_println!(
                 "VIRTIO_GPU_FILE violation=corps-incompatible commande={:#x} genre={:#x} len={}",
                 lit_genre(requete), genre, utilise.len
+            );
+            return Err(dma::REPONSE_INVALIDE);
+        }
+        let flags_requete = u32::from_le_bytes(requete[4..8].try_into().unwrap());
+        let contexte_attendu = u32::from_le_bytes(requete[16..20].try_into().unwrap());
+        let contexte_recu = read_volatile(reponse.add(16) as *const u32);
+        if !file::contexte_valide(flags_requete, contexte_attendu, contexte_recu) {
+            self.cassee = true;
+            crate::serial_println!(
+                "VIRTIO_GPU_FILE violation=contexte-incompatible attendu={:#x} recu={:#x}",
+                contexte_attendu, contexte_recu
             );
             return Err(dma::REPONSE_INVALIDE);
         }
@@ -887,13 +1055,8 @@ fn suivie(m: &mut Memoire, rendu: Result<u32, &'static str>) -> Result<u32, &'st
 /// rendre la memoire que si le peripherique ne peut plus la tenir. Sinon elle
 /// est conservee -- une fuite bornee plutot qu'une corruption -- et le journal
 /// dit pourquoi.
-unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) {
-    if ressource != 0 {
-        if *m == Memoire::Attachee {
-            *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
-        }
-        let _ = suivie(m, libere(f, ressource));
-    }
+unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: usize, m: &mut Memoire, quoi: &str) -> bool {
+    let liberee = ressource == 0 || detache_et_libere(f, ressource, m);
     if dma::peut_rendre(*m) {
         memory::free_dma(phys, octets);
     } else {
@@ -902,6 +1065,14 @@ unsafe fn rend_si_sur(f: &mut FileControle, ressource: u32, phys: u64, octets: u
             quoi, octets, *m
         );
     }
+    liberee && dma::peut_rendre(*m)
+}
+
+unsafe fn detache_et_libere(f: &mut FileControle, ressource: u32, m: &mut Memoire) -> bool {
+    if *m == Memoire::Attachee {
+        *m = dma::apres_detache(*m, dma::issue(detache(f, ressource)));
+    }
+    suivie(m, libere(f, ressource)) == Ok(RESP_OK_NODATA)
 }
 
 unsafe fn autotest_2d_etapes(
@@ -996,6 +1167,18 @@ struct Peripherique {
     /// La mire de l'autotest, a l'ecran tant que le bureau ne l'a pas pris.
     mire: Option<MireTenue>,
     p10_virgl: Option<gpu3d::CapsetInfo>,
+    capset: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
+    #[cfg(feature = "banc-gpu-venus")]
+    hostmem_venus: Option<venus::Canal>,
+    #[cfg(feature = "banc-gpu-venus")]
+    gems_venus: venus::Gems,
+    #[cfg(feature = "banc-gpu-venus")]
+    anneaux_venus: u8,
+    #[cfg(feature = "banc-gpu-venus")]
+    second_venus: Option<venus::SecondContexte>,
+    #[cfg(feature = "banc-gpu-venus")]
+    capset_venus: Option<(gpu3d::CapsetInfo, alloc::vec::Vec<u8>)>,
+    textures_rendu: rendu::TexturesRendu,
     // BOUCHAUD_GPU_COMPOSITION_V2 : textures des fenetres, ressource du
     // scanout attachee au contexte, liste DMA des pages (une fois).
     textures: [Option<TextureFenetre>; cg::TEXTURES_MAX],
@@ -2042,7 +2225,7 @@ fn convention() -> Option<cg::Convention> {
 /// textures 8x8, relu par `TRANSFER_FROM_HOST_3D` et juge au pixel, dans les
 /// deux conventions possibles. Le compositeur n'est autorise que si l'une
 /// d'elles donne EXACTEMENT la mire attendue.
-unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'static str> {
+unsafe fn calibre_convention(f: &mut FileControle) -> Result<(cg::Convention, [u32; 64]), &'static str> {
     const S: u32 = 0xB2F0;
     const D: u32 = 0xB2F1;
     const L: u32 = 8;
@@ -2061,7 +2244,7 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
     let tout = cg::R::neuf(0, 0, L as i32, H as i32);
     let mut memoire = [Memoire::NonAttachee; 2];
     let mut cree = [false; 2];
-    let resultat = (|| -> Result<cg::Convention, &'static str> {
+    let resultat = (|| -> Result<(cg::Convention, [u32; 64]), &'static str> {
         for (k, (id, phys)) in [(S, sp), (D, dp)].into_iter().enumerate() {
             let q = cg::cree_texture_liee(id, L, H, liaison).ok_or("texture")?;
             if f.commande(&q, ENTETE)? != RESP_OK_NODATA { return Err("creation-refusee"); }
@@ -2090,7 +2273,7 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
             let mut vu = [0u32; 64];
             for (i, v) in vu.iter_mut().enumerate() { *v = read_volatile(dst.as_ptr().add(i)); }
             if cg::juge_autotest(&vu, L, H, 2, 1, 3) {
-                return Ok(conv);
+                return Ok((conv, vu));
             }
         }
         Err("aucune-convention-exacte")
@@ -2108,6 +2291,21 @@ unsafe fn calibre_convention(f: &mut FileControle) -> Result<cg::Convention, &'s
         }
     }
     resultat
+}
+
+/// Sonde ring 3 bornee : un seul BLIT de reference par boot, avec buffers
+/// et commandes du noyau. Elle ne permet pas de designer une ressource DMA.
+pub fn blit_sonde() -> Result<[u32; 64], &'static str> {
+    static JOUEE: AtomicBool = AtomicBool::new(false);
+    let mut garde = verrou().ok_or("occupe")?;
+    let p = garde.as_mut().filter(|p| p.capset.is_some() && p.p10_virgl.is_some() && !p.file.cassee)
+        .ok_or("absent")?;
+    if JOUEE.swap(true, Ordering::AcqRel) { return Err("deja-jouee"); }
+    let resultat = unsafe { calibre_convention(&mut p.file) };
+    if p.file.cassee {
+        P10_VIRGL_PRET.store(false, Ordering::Release);
+    }
+    resultat.map(|(_, pixels)| pixels)
 }
 
 const ENTREES_MAX: usize = 2048;

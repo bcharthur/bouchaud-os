@@ -3,7 +3,8 @@ param(
     [ValidateRange(0, 8192)][int]$MinWidth = 0,
     [ValidateRange(0, 4320)][int]$MinHeight = 0,
     [string]$Ramdisk = "",
-    [string]$PrebootShim = ""
+    [string]$PrebootShim = "",
+    [switch]$Virgl
 )
 
 if (($MinWidth -eq 0) -xor ($MinHeight -eq 0)) { throw "MinWidth et MinHeight doivent etre tous deux nuls ou tous deux non nuls" }
@@ -14,7 +15,9 @@ function Fail([string]$Message) { Write-Host ""; Write-Host "ERREUR: $Message" -
 $UefiTarget = Join-Path $RepoRoot "targets\x86_64-bouchaud_os_uefi.json"
 
 Write-Host "=== Bouchaud OS - Stage 2 Physical Desktop ===" -ForegroundColor Cyan
-& cargo build --target "$UefiTarget" --no-default-features --features "uefi-boot,reference-bringup,reference-desktop"
+$Features = "uefi-boot,reference-bringup,reference-desktop"
+if ($Virgl) { $Features += ",p10-virgl-experimental" }
+& cargo build --target "$UefiTarget" --no-default-features --features $Features
 if ($LASTEXITCODE -ne 0) { Fail "build noyau Stage 2 en echec" }
 
 $KernelCandidates = @(
@@ -26,7 +29,10 @@ if (-not $Kernel) { Fail "ELF Stage 2 introuvable" }
 & python ".\tools\reference\verifie-reference-uefi-elf.py" "$Kernel"
 if ($LASTEXITCODE -ne 0) { Fail "le noyau Stage 2 n'est pas ET_DYN" }
 
-if (-not $Output) { $Output = Join-Path $RepoRoot "target\reference\bouchaud-reference-stage2.img" }
+if (-not $Output) {
+    $ImageName = if ($Virgl) { 'bouchaud-reference-stage2-virgl.img' } else { 'bouchaud-reference-stage2.img' }
+    $Output = Join-Path $RepoRoot "target\reference\$ImageName"
+}
 $Output = [System.IO.Path]::GetFullPath($Output)
 if ($Ramdisk) {
     $Ramdisk = [System.IO.Path]::GetFullPath($Ramdisk)
