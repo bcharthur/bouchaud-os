@@ -102,6 +102,16 @@ for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Com
       echo "$f : binaire du profil statique dans la campagne Skia" >&2
       exit 1
   fi
+  if [ "$AFFICHAGE" = venus ]; then
+      dependances=$(readelf -dW "$OUT/$f" | sed -n 's/.*(NEEDED).*\[\([^]]*\)\].*/\1/p')
+      while IFS= read -r bibliotheque; do
+          [ -z "$bibliotheque" ] && continue
+          if [ ! -f "$VENUS_SYSROOT/lib/$bibliotheque" ] && [ ! -f "$VENUS_SYSROOT/lib64/$bibliotheque" ]; then
+              echo "Rootfs Venus incomplet pour $f : $bibliotheque" >&2
+              exit 2
+          fi
+      done <<< "$dependances"
+  fi
 done
 
 rm -rf scenario-browser-host ladybird-browser-host${SUFFIXE}.img \
