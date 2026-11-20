@@ -176,3 +176,10 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 
 - `BO_VIRTGPU_SMP=4` exécute le même verdict du transport et du Loader. Le test complet avec isolation, mmap et relecture passe sur QEMU 11.1.3. Les deux motifs via les fonctions publiques passent sur 11.1.3 et 11.2 RC en SMP4. Les valeurs hors 2/4 sont refusées avant le lancement.
 - À reprendre pour le premier rendu Skia isolé, utiliser `bash /workspace/work/p10/run-skia-vulkan-probe.sh /workspace/work/p10/skia-essai-neuf` après apparition de `/workspace/work/p10/skia-installed/x64-linux/lib/libskia.a`. La sonde attend 1 024 pixels exacts. Le build complet de Ladybird requiert toujours les sources protégées par le pin ANGLE et un rootfs Vulkan compatible.
+
+## `a0aea00ecf4a76e9c2187acabbc5b3d41a015f2f` — première scène Skia Vulkan
+
+- Skia 148 Ganesh a compilé en contrôle isolé avec GN Debian et les codecs PIEX/Fontconfig hors de ce contrôle. Le Loader vcpkg 1.4.350 a aussi compilé.
+- La sonde réelle `tools/userland/skia-vulkan-probe` dessine puis relit les 1 024 pixels RGBA d'une surface Vulkan. Avec le Loader 1.4.350 et Mesa Venus elle passe sur QEMU 11.1.3 et 11.2 RC. Elle ne dépend pas de Ladybird ni d'un chemin de rendu CPU dans l'invité.
+- Commandes. `cmake -S tools/userland/skia-vulkan-probe -B /tmp/skia-probe -DCMAKE_PREFIX_PATH=SKIA_PREFIX` puis `cmake --build /tmp/skia-probe`. Placer la sonde dans le rootfs Venus et lancer `BO_VENUS_SKIA_PROBE=1 BO_VENUS_LOADER_SYSROOT=ROOTFS DISPLAY=:N tools/ci/run_virtgpu_venus.sh BOOTIMAGE SORTIE_NEUVE`.
+- Les 216 garde-fous passent à la tête SMP4. Le rendu HTML par le Compositor Ladybird reste bloqué sur la construction ANGLE complète.
