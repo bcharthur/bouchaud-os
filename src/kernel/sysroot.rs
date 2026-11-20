@@ -111,7 +111,7 @@ pub fn installe_drm_pci(dev: &crate::arch::x86_64::pci::PciDevice) {
     }
 
     // getdents découvre le nom. open et stat le résolvent via device_for_path.
-    write_file(dri, "renderD128", "", 0o444);
+    write_file(dri, "renderD128", "", 0o666);
 }
 
 /// Installe l'arborescence systeme. Idempotent.

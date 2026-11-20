@@ -100,6 +100,25 @@ static int verifie_version_drm(int fd)
     return 0;
 }
 
+static int verifie_ouverture_non_root(int fd)
+{
+    pid_t enfant = fork();
+    if (enfant < 0) return 1;
+    if (enfant == 0) {
+        close(fd);
+        if (setgid(65534) || setuid(65534) || getuid() == 0) _exit(1);
+        int rendu = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+        struct drm_version version = {0};
+        if (rendu < 0 || ioctl(rendu, DRM_VERSION, &version)) _exit(2);
+        _exit(close(rendu) != 0);
+    }
+    int statut;
+    if (waitpid(enfant, &statut, 0) != enfant || !WIFEXITED(statut) || WEXITSTATUS(statut))
+        return 2;
+    puts("VIRTGPU_VENUS_DRM_NON_ROOT_OK");
+    return 0;
+}
+
 static int verifie_contexte(int fd)
 {
     struct drm_context_param params[] = {{1, 4}, {2, 65}};
@@ -600,6 +619,7 @@ int main(int argc, char **argv)
     printf("VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=%" PRIu32 ".%" PRIu32 ".%" PRIu32 "\n",
            reference >> 22, (reference >> 12) & 0x3ff, reference & 0xfff);
     if (argc > 1) {
+        if (verifie_ouverture_non_root(fd)) return 24;
         if (verifie_instances(fd, 0) || ioctl(fd, DEMAPPE)) return 16;
         uint32_t api = 0;
         if (ioctl(fd, VERSION_VENUS, &api) || api != reference || verifie_instances(fd, 1))

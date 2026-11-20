@@ -64,6 +64,7 @@ grep -aqF 'VIRTGPU_VENUS_DRM_CAPS_OK' "$sortie/serie.log"
 grep -aqF 'VIRTGPU_VENUS_DRM_CONTEXT_OK' "$sortie/serie.log"
 grep -aoE 'VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=[0-9.]+' "$sortie/serie.log"
 if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
+    grep -aqF 'VIRTGPU_VENUS_DRM_NON_ROOT_OK' "$sortie/serie.log"
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096' "$sortie/serie.log")" -eq 2
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_MMAP_OK octets=4096' "$sortie/serie.log")" -eq 2
     test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096' "$sortie/serie.log")" -eq 4

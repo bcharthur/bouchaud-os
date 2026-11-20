@@ -133,3 +133,9 @@ BO_VENUS_DEMAPPE=1 tools/ci/run_virtgpu_venus.sh target/x86_64-bouchaud_os/debug
 - Les slots GEM sont dimensionnés dans la BAR et plafonnés à 16 Mio. L'alias noyau est créé à la première projection du blob. Une allocation de 8 Mio avec écriture aux deux extrémités, les relectures et le cycle GEM passent sur QEMU 11.1.3 et 11.2 RC.
 - Sur QEMU 11.2 RC/Lavapipe, la vraie sonde Vulkan Loader/Mesa a vérifié les 4 096 octets du motif 5a17c3e9. Au second cycle dans le même processus, le host a recréé le contexte et ses blobs. Mesa est ensuite resté en attente du numéro de séquence de l'anneau. Le banc public échoue donc encore.
 - Suite. Répliquer le blocage sur 11.1.3, tracer le second cycle autour de la publication du flux indirect et isoler la réutilisation des identifiants de contexte et des slots avant d'activer Skia.
+
+## `34ef1694` — validation publique et ouverture non privilégiée
+
+- La sonde Vulkan Loader/Mesa a comparé les deux motifs sur QEMU 11.1.3 et sur une reprise 11.2 RC. La première exécution RC reste comptée comme un échec de stabilité.
+- Le nœud de parcours et le périphérique synthétique ont maintenant le même mode 0666. Le banc confirme l'ouverture O_RDWR et DRM VERSION après passage à uid/gid 65534. Le pilote conserve l'isolement des handles par ouverture.
+- Le build navigateur Vulkan bloque sur le téléchargement Chromium zlib épinglé par ANGLE, réponse CONNECT 403. Le build Skia séparé a repris après reconstruction de l'archive Automake depuis Debian avec le SHA512 exact de vcpkg.
