@@ -8,7 +8,7 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 15
     steps:
       - name: Vérifier et découper le ZIP publié
         env:
@@ -16,10 +16,10 @@ jobs:
         run: |
           set -euo pipefail
           depot="$GITHUB_REPOSITORY"
-          run=44762232542
+          run=44781313296
           for tentative in $(seq 1 210); do
             etat=$(gh api "repos/$depot/actions/runs/$run")
-            jq -e '.head_sha | startswith("4e9c129b")' <<< "$etat" >/dev/null
+            jq -e '.head_sha == "3b09793374036f8a302d99f6174db0093dc59bbb"' <<< "$etat" >/dev/null
             if [[ $(jq -r .status <<< "$etat") == completed ]]; then break; fi
             sleep 30
           done
