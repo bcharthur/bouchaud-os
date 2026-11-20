@@ -11,6 +11,11 @@ natif=$(realpath -e "$2")
 rootfs=$(realpath -e "$3")
 sortie=$(realpath -m "$4")
 repetitions=$5
+accel=${BO_SMOKE_ACCEL:-tcg}
+case "$accel" in
+    tcg|kvm) ;;
+    *) echo 'BO_SMOKE_ACCEL doit valoir tcg ou kvm.' >&2; exit 2 ;;
+esac
 qemu=$(command -v qemu-system-x86_64)
 qemu_version=$("$qemu" --version)
 [[ -f $boot && -d $natif && -d $rootfs ]]
@@ -31,6 +36,7 @@ identite() {
 }
 identite > "$sortie/entrees.sha256"
 printf '%s\n' "$qemu_version" > "$sortie/qemu-version.txt"
+printf '%s\n' "$accel" > "$sortie/acceleration.txt"
 git rev-parse HEAD > "$sortie/source.txt"
 printf 'tour\tbackend\tcode\tetat\n' > "$sortie/verdicts.tsv"
 
@@ -43,7 +49,7 @@ for ((tour = 1; tour <= repetitions; tour++)); do
         cp --reflink=auto -- "$boot" "$dossier/amorce.bin"
         suffixe="-skia-ab-${BASHPID}-${tour}-${backend}"
         code=0
-        BO_SMOKE_AFFICHAGE=venus BO_SMOKE_SKIA_BACKEND="$backend" \
+        BO_SMOKE_ACCEL="$accel" BO_SMOKE_AFFICHAGE=venus BO_SMOKE_SKIA_BACKEND="$backend" \
             BO_SMOKE_VENUS_SYSROOT="$rootfs" BO_SMOKE_SUFFIXE="$suffixe" \
             tools/ci/run_ladybird_browser_host.sh "$dossier/amorce.bin" "$natif" \
             > "$dossier/smoke.log" 2>&1 || code=$?

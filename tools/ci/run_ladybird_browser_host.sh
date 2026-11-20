@@ -34,6 +34,18 @@ AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
 AFFICHE=(-display none)
 CAPTURE_X=0
 SKIA_BACKEND=${BO_SMOKE_SKIA_BACKEND:-cpu}
+ACCEL_QEMU=()
+case "${BO_SMOKE_ACCEL:-}" in
+    "") ;;
+    tcg) ACCEL_QEMU=(-accel tcg) ;;
+    kvm)
+        if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            echo 'Le banc KVM exige un périphérique /dev/kvm accessible.' >&2
+            exit 2
+        fi
+        ACCEL_QEMU=(-accel kvm) ;;
+    *) echo 'BO_SMOKE_ACCEL doit valoir tcg ou kvm.' >&2; exit 2 ;;
+esac
 case "$AFFICHAGE" in
     bga) ECRAN=() ;;
     virtio) ECRAN=(-vga none -device virtio-gpu-pci) ;;
@@ -359,7 +371,7 @@ SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 # `[SMP-PF] c1=0 c2=0 c3=0` -- : le navigateur saturait un coeur pendant que
 # trois autres n'existaient pas. Un test qui fait tourner le produit dans une
 # configuration que personne n'expedie ne mesure pas le produit.
-qemu-system-x86_64 \
+qemu-system-x86_64 "${ACCEL_QEMU[@]}" \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
   -m 8192 -smp 4 -cpu max "${AFFICHE[@]}" -no-reboot \
