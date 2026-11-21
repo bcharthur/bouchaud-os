@@ -973,22 +973,53 @@ fn le_focus_passe_entre_fenetres_disjointes() {
 
 #[test]
 fn une_fenetre_se_ferme() {
-    let a = bureau_deux_fenetres();
-    let mut b = a.clone();
-    b.fenetres.pop();
-    oracle("fermeture de la fenetre du dessus", &a, &b, &tout());
+    let mut a = bureau_vide();
+    a.fenetres.push(Fen::neuve(20, 30, 100, 70, 0x00_10_00));
+    a.fenetres.push(Fen::neuve(240, 150, 120, 60, 0x10_00_00));
 
-    let mut c = a.clone();
-    c.fenetres.remove(0);
-    oracle("fermeture d'une fenetre du dessous", &a, &c, &tout());
+    for (index, autre_focus) in [(1, Some(a.fenetres[0].empreinte())), (0, None)] {
+        let mut b = a.clone();
+        let retiree = b.fenetres.remove(index);
+        let degats = liste(transition::fenetre_ajoutee_ou_retiree(
+            Some(retiree.empreinte()), autre_focus, barre_taches(),
+        ));
+        oracle("fermeture d'une fenetre visible", &a, &b, &degats);
+        assert!(degats.iter().all(|r| r.intersecte(&Rect::neuf(170, 75, 1, 1)).vide()));
+    }
+
+    a.fenetres[0].min = true;
+    let mut b = a.clone();
+    b.fenetres.remove(0);
+    let degats = liste(transition::fenetre_ajoutee_ou_retiree(None, None, barre_taches()));
+    oracle("fermeture d'une fenetre minimisee", &a, &b, &degats);
+    assert!(degats == alloc::vec![barre_taches()]);
+}
+
+#[test]
+fn une_fenetre_superposee_se_ferme() {
+    let avant = bureau_deux_fenetres();
+
+    for (index, autre_focus) in [(1, Some(avant.fenetres[0].empreinte())), (0, None)] {
+        let mut apres = avant.clone();
+        let retiree = apres.fenetres.remove(index);
+        let degats = liste(transition::fenetre_ajoutee_ou_retiree(
+            Some(retiree.empreinte()), autre_focus, barre_taches(),
+        ));
+        oracle("fermeture avec recouvrement", &avant, &apres, &degats);
+    }
 }
 
 #[test]
 fn une_fenetre_apparait() {
     let a = bureau_une_fenetre();
     let mut b = a.clone();
-    b.fenetres.push(Fen::neuve(90, 120, 160, 90, 0x00_00_10));
-    oracle("nouvelle fenetre", &a, &b, &tout());
+    let nouvelle = Fen::neuve(90, 120, 160, 90, 0x00_00_10);
+    b.fenetres.push(nouvelle);
+    let degats = liste(transition::fenetre_ajoutee_ou_retiree(
+        Some(nouvelle.empreinte()), Some(a.fenetres[0].empreinte()), barre_taches(),
+    ));
+    oracle("nouvelle fenetre", &a, &b, &degats);
+    assert!(degats.iter().all(|r| r.intersecte(&Rect::neuf(390, 75, 1, 1)).vide()));
 }
 
 // ─── Client ring 3 ─────────────────────────────────────────────────────────
