@@ -123,6 +123,9 @@ pub fn install() {
         mkdir_path(path);
     }
 
+    let proc_bouchaud = mkdir_path("/proc/bouchaud");
+    write_file(proc_bouchaud, "metrics", "", 0o444);
+
     let fixtures = mkdir_path("/usr/share/bouchaud");
     write_file(fixtures, "scroll-test.html", include_str!("scroll-test.html"), 0o444);
 
