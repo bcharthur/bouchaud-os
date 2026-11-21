@@ -116,7 +116,7 @@ pub(crate) const NAV_HAUTEUR: i32 = 604;
 /// doit pas decaler silencieusement les autres vers la mauvaise application.
 pub(crate) const MENU: [(&str, usize); 14] = [
     ("Ladybird", KIND_NAVIGATEUR), ("DOOM", KIND_DOOM),
-    ("Terminal", 0), ("Fichiers", 1), ("Moniteur", 3), ("Services", KIND_SERVICES),
+    ("Terminal", 0), ("Fichiers", 1), ("Moniteur", KIND_MONITEUR), ("Services", KIND_SERVICES),
     ("Calculatrice", 4), ("Rustpad", 5), ("Journal", KIND_JOURNAL),
     ("Notes", KIND_NOTES), ("Insights", KIND_INSIGHTS),
     ("Quitter", usize::MAX),
@@ -162,6 +162,7 @@ pub(crate) const KIND_INSIGHTS: usize = 10;
 pub(crate) const KIND_DOOM: usize = 11;
 /// La Calculatrice : application ring 3 (`/bin/calculatrice-gui`), ouverte par
 /// `window_manager::lance_calculatrice`, jamais par `make_app`.
+pub(crate) const KIND_MONITEUR: usize = 3;
 pub(crate) const KIND_CALCULATRICE: usize = 4;
 
 pub(crate) enum App {
