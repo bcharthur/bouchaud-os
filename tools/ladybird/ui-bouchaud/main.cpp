@@ -21,6 +21,7 @@
 #include <LibURL/URL.h>
 #include <LibWebView/Settings.h>
 #include <UI/Bouchaud/Application.h>
+#include <UI/Bouchaud/BouchaudChrome.h>
 
 #include <cerrno>
 #include <signal.h>
@@ -292,5 +293,10 @@ ErrorOr<int> ladybird_main(Main::Arguments)
     }
     warnln("[ladybird-bouchaud] BROWSER_HOST_ARRET services fermes");
     attend_les_services();
+    if (code == 0 && BouchaudChrome::state().fermeture_volontaire) {
+        // Numéro de la fenêtre principale en little endian, comme le protocole GUI.
+        constexpr u8 fenetre[] { 1, 0, 0, 0 };
+        BouchaudChrome::send_message(BouchaudChrome::Genre::Close, fenetre, sizeof(fenetre));
+    }
     return code;
 }

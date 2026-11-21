@@ -477,3 +477,34 @@ replace_once(
 }""",
     "trace de refus du worker",
 )
+
+# CPU Skia ne désactive pas WebGL. Sans plateforme EGL, chaque demande
+# WebGL pouvait relancer l'initialisation ANGLE dans le même Compositor.
+replace_once(
+    root / "Services/Compositor/OpenGLContext.cpp",
+    """    EGLint major, minor;
+    if (!eglInitialize(display, &major, &minor)) {
+        dbgln("Failed to initialize EGL");
+        return {};
+    }""",
+    """    EGLint major, minor;
+    if (!eglInitialize(display, &major, &minor)) {
+        auto error = eglGetError();
+        if (use_cpu_painting_surface && error == EGL_NOT_INITIALIZED)
+            bouchaud_cpu_egl_unavailable = true;
+        dbgln("Failed to initialize EGL (error={}, cached={})", error, bouchaud_cpu_egl_unavailable);
+        return {};
+    }""",
+    "mémoriser une plateforme EGL CPU indisponible",
+)
+replace_once(
+    root / "Services/Compositor/OpenGLContext.cpp",
+    """    auto display = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE,""",
+    """    // Les demandes WebGL passent par la boucle IPC du Compositor.
+    static thread_local bool bouchaud_cpu_egl_unavailable = false;
+    if (use_cpu_painting_surface && bouchaud_cpu_egl_unavailable)
+        return {};
+
+    auto display = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE,""",
+    "repli WebGL CPU après un échec permanent d'initialisation",
+)
