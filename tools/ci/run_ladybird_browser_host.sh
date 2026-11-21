@@ -34,6 +34,7 @@ AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
 AFFICHE=(-display none)
 CAPTURE_X=0
 SKIA_BACKEND=${BO_SMOKE_SKIA_BACKEND:-cpu}
+EXIGE_RENDU_SKIA=${BO_SMOKE_EXIGE_RENDU_SKIA:-0}
 ACCEL_QEMU=()
 case "${BO_SMOKE_ACCEL:-}" in
     "") ;;
@@ -229,6 +230,9 @@ echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 if [ "$AFFICHAGE" = venus ]; then
   sed -i "1i export LD_LIBRARY_PATH=/lib\nexport VK_DRIVER_FILES=/usr/share/vulkan/icd.d/bouchaud_venus.json\nexport BOUCHAUD_SKIA_BACKEND=$SKIA_BACKEND" "$SCENARIO/autorun"
+  if [ "$SKIA_BACKEND" = vulkan ] && [ "${BO_SMOKE_SKIA_PARTIAL_READBACK:-0}" = 1 ]; then
+    sed -i '1i export BOUCHAUD_SKIA_PARTIAL_READBACK=1' "$SCENARIO/autorun"
+  fi
 fi
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
@@ -1058,6 +1062,20 @@ fi
 if [ "$AFFICHAGE" = venus ] && [ "$SKIA_BACKEND" = vulkan ]; then
   if ! grep -aFq '[LB:SKIA] readback=vulkan' "$LOG" || grep -aFq '[LB:SKIA] readback=failed' "$LOG"; then
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=readback_skia" >&2
+    exit 1
+  fi
+fi
+
+# For the completed-frame qualification, also require the new compositor
+# marker. Older artifacts can still run the pre-existing smoke.
+if [ "$AFFICHAGE" = venus ] && [ "$EXIGE_RENDU_SKIA" = 1 ]; then
+  rendu_vulkan=0
+  if grep -aFq 'LADYBIRD_RENDER_BACKEND=vulkan' "$LOG"; then
+    rendu_vulkan=1
+  fi
+  if { [ "$SKIA_BACKEND" = vulkan ] && [ "$rendu_vulkan" = 0 ]; } ||
+     { [ "$SKIA_BACKEND" = cpu ] && [ "$rendu_vulkan" = 1 ]; }; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=trame_skia_achevee attendu=$SKIA_BACKEND" >&2
     exit 1
   fi
 fi
