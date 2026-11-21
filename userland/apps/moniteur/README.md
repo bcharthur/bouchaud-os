@@ -42,3 +42,8 @@ Le Moniteur est un client BOGU. Il lit l’instantané par `/proc`, dessine son
 contenu dans la surface héritée et publie ses trames via le canal hérité.
 Le gestionnaire de fenêtres continue de fournir la géométrie et les
 décorations. Cette fenêtre indépendante est optionnelle.
+
+Pour ouvrir ce client depuis **Démarrer → Moniteur**, exporter
+`BO_MONITEUR_RING3=1` avant `desktop`. Le bureau ouvre son Moniteur intégré
+si le lancement du programme échoue. Le même réglage s’applique à
+`BO_ATELIER_OUVRE=3` pour les démarrages automatisés.
