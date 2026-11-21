@@ -235,6 +235,20 @@ def empreinte(commit: str = "HEAD") -> dict:
     return {"commit": sha, "empreinte": h.hexdigest(), "fichiers": len(fichiers)}
 
 
+def empreinte_vulkan(commit: str = "HEAD") -> str:
+    sha = resout(commit)
+    workflow = lit(sha, ".github/workflows/ladybird-vulkan-experimental.yml").decode()
+    entete, etapes_build = etapes(jobs(workflow)["build"])
+    productrices = {"Installer la chaîne de compilation", "Construire le navigateur et son compositeur Vulkan"}
+    producteurs = [e for e in etapes_build if e["nom"] in productrices and e["run"]]
+    if {e["nom"] for e in producteurs} != productrices or len(producteurs) != len(productrices):
+        raise EmpreinteErreur("recette Vulkan incomplète ou ambiguë")
+    environnement = [l for l in entete if l.startswith(("    runs-on:", "      BOUCHAUD_P10_GPU_VULKAN:"))]
+    contenu = ["BOUCHAUD_LADYBIRD_VULKAN_V1", blobs(sha), environnement,
+               [[l for l in e["lignes"] if not ORCHESTRATION.match(l)] for e in producteurs]]
+    return hashlib.sha256(json.dumps(contenu).encode()).hexdigest()
+
+
 # --- garde statique ---------------------------------------------------------
 
 REFERENCE = re.compile(r"(?<![A-Za-z0-9_./-])(?:\./)?(tools/[A-Za-z0-9_./-]+\.(?:sh|py|ps1|cmake|json))")
