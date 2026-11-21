@@ -73,8 +73,7 @@ fn rassemble_snapshot() -> Vec<SnapshotEntree> {
     let retenues = ecarte_les_caches_qui_debordent(rassemble_sous(&systeme), zone);
     let mut out = Vec::with_capacity(retenues.len());
     for entree in retenues {
-        let mut contenu = vec![0u8; entree.longueur];
-        contenu.copy_from_slice(&systeme.nodes[entree.noeud].content[..entree.longueur]);
+        let contenu = systeme.nodes[entree.noeud].content[..entree.longueur].to_vec();
         out.push(SnapshotEntree { chemin: entree.chemin, contenu, meta: entree.meta });
     }
     out
