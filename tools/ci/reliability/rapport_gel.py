@@ -266,11 +266,14 @@ def rapport(texte: str, elf: str | None = None) -> list:
         if n and n.mode == "k" and n.rip in sym:
             samples = {sample.ech: sample for sample in qemu if sample.cpu == a.proprio}
             function = s(n.rip).split(" (", 1)[0]
-            if all(
+            # The first capture can interrupt the holder in an IRQ. Use
+            # the final interval of the existing capture series.
+            last = max(samples, default=0)
+            if last >= 2 and all(
                 (sample := samples.get(index)) is not None
                 and sample.cpl == 0 and sample.hlt == 0
                 and s(sample.rip).split(" (", 1)[0] == function
-                for index in (1, 2)
+                for index in (last - 1, last)
             ):
                 out.append(f"RAPPORT_GEL qemu_detenteur_confirme coeur={a.proprio} [{function}]")
 

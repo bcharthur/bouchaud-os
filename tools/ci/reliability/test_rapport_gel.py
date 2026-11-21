@@ -129,6 +129,11 @@ class Qemu(unittest.TestCase):
             report = rg.rapport(text, "temoin")
             self.assertTrue(any("qemu_verdict=boucle_noyau coeur=0" in line for line in report))
             self.assertIn("RAPPORT_GEL qemu_detenteur_confirme coeur=1 [os::banc_souffrance::detenteur]", report)
+            interrupted = text.replace("ech=1 cpu=1 rip=0x9cd642", "ech=1 cpu=1 rip=0xab84cd")
+            interrupted += "[QEMU-CPU] ech=3 cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=0 rsp=0x1803c41ff70 pile=[]\n"
+            self.assertTrue(any("qemu_detenteur_confirme coeur=1" in line for line in rg.rapport(interrupted, "temoin")))
+            missing = interrupted.replace("ech=2 cpu=1", "ech=4 cpu=2")
+            self.assertFalse(any("qemu_detenteur_confirme" in line for line in rg.rapport(missing, "temoin")))
             for invalid in (
                 text.replace("cpu=1 rip=0x9cd647 cpl=0", "cpu=1 rip=0xab84cd cpl=0"),
                 text.replace("cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=0", "cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=1"),
