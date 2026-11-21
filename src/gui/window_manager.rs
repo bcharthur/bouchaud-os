@@ -1604,7 +1604,8 @@ fn boucle() {
                 {
                     let fin = crate::kernel::timer::monotonic_ns();
                     crate::gui::composition::note_trame(
-                        t_presentation.saturating_sub(t_trame), fin.saturating_sub(t_presentation));
+                        t_presentation.saturating_sub(t_trame), fin.saturating_sub(t_presentation),
+                        (!repli_cpu_du).then(|| plan_gpu_precedent.nombre() != 0));
                 }
 
                 crate::kernel::timer::mark_frame();

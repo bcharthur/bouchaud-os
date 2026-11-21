@@ -1,6 +1,6 @@
 //! Préfixe des lignes du journal série : heure, charge et FPS utiles.
 //!
-//!     [18:51:48][ 12%:  5%:  6%][FPS: 58] ...
+//!     [18:51:48][CPU=12% RAM=32/640MiB(5%) DISK=... GPU=...][FPS: 58] ...
 //!
 //! V16.2 construit tout le préfixe dans un tampon fixe sur pile puis l'envoie
 //! au UART d'un bloc. Auparavant chaque couleur, séparateur et nombre réentrait
@@ -8,20 +8,22 @@
 
 use crate::arch::x86_64::rtc;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::kernel::system_metrics::{Available, Sample};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 static PRET: AtomicBool = AtomicBool::new(false);
 static COULEURS: AtomicBool = AtomicBool::new(true);
-static CACHE: AtomicU32 = AtomicU32::new(0);
-static CACHE_TICK: AtomicU64 = AtomicU64::new(0);
-const VALIDITE_TICKS: u64 = 250;
 const PREFIXE_MAX: usize = 256;
+const METRIC_WORDS: usize = 24;
+const METRICS_UNAVAILABLE: &str = "CPU=N/A RAM=N/A DISK=N/A GPU=N/A";
+static METRIC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static METRIC_LENGTH: AtomicUsize = AtomicUsize::new(0);
+static METRIC_CACHE: [AtomicU64; METRIC_WORDS] =
+    [const { AtomicU64::new(0) }; METRIC_WORDS];
 
 pub fn demarre() {
     PRET.store(true, Ordering::Release);
-    crate::serial_println!(
-        "[journal] prefixe : [heure][cpu%:memoire physique%:nœuds RAMFS%][FPS:trames utiles]"
-    );
+    crate::serial_println!("[journal] [heure][CPU RAM DISK GPU][FPS:trames utiles]");
 }
 
 pub fn pose_couleurs(actif: bool) {
@@ -35,44 +37,69 @@ pub fn couleurs() -> bool {
 const RESET: &str = "\x1b[0m";
 const GRIS: &str = "\x1b[90m";
 const CYAN: &str = "\x1b[36m";
-const VERT: &str = "\x1b[32m";
-const JAUNE: &str = "\x1b[33m";
-const ROUGE: &str = "\x1b[31m";
-
-fn teinte(pourcentage: u8) -> &'static str {
-    match pourcentage {
-        0..=49 => VERT,
-        50..=79 => JAUNE,
-        _ => ROUGE,
+/// Format once per sample, then publish a bounded atomic byte snapshot. All
+/// accesses are ordered so a reader can reject a concurrent update without
+/// waiting, even if the writer was interrupted by this very log message.
+pub(crate) fn publish_metrics(sample: Sample) {
+    let mut formatted = Prefixe::neuf();
+    let rate_kib = |rate: Option<u64>| Available(rate.map(|bytes| bytes / 1024));
+    let (disk, reads, writes) = if sample.nvme_present {
+        ("NVMe", sample.nvme_read_bytes_per_sec, sample.nvme_write_bytes_per_sec)
+    } else {
+        (if sample.ata_present { "ATA" } else { "N/A" }, sample.ata_read_bytes_per_sec, None)
+    };
+    let ram_pct = sample.ram_used_pct();
+    if write!(formatted, "CPU={}{} RAM=", Available(sample.cpu_busy_pct),
+        if sample.cpu_busy_pct.is_some() { "%" } else { "" }).is_err() {
+        return;
     }
+    let ram = if ram_pct.is_some() {
+        write!(formatted, "{}/{}MiB({}%)", sample.ram_used_bytes >> 20,
+            sample.ram_total_bytes >> 20, Available(ram_pct))
+    } else {
+        formatted.write_str("N/A")
+    };
+    if ram.is_err() || write!(formatted,
+        " DISK={disk}:r{}/w{}KiB/s,p{}/b{} GPU={}:f{},p{}us,uN/A",
+        rate_kib(reads), rate_kib(writes),
+        Available(sample.persist_available.then_some(sample.persist_commits)),
+        Available(sample.persist_available.then_some(sample.persist_barriers)),
+        sample.desktop_backend, sample.virgl_frames, Available(sample.virtio_present_us)
+    ).is_err() || formatted.len > METRIC_WORDS * 8 {
+        return;
+    }
+    let sequence = METRIC_SEQUENCE.load(Ordering::SeqCst);
+    if sequence & 1 != 0 || METRIC_SEQUENCE.compare_exchange(
+        sequence, sequence.wrapping_add(1), Ordering::SeqCst, Ordering::SeqCst,
+    ).is_err() {
+        return;
+    }
+    for (word, bytes) in METRIC_CACHE.iter().zip(formatted.donnees.chunks_exact(8))
+        .take(formatted.len.div_ceil(8))
+    {
+        word.store(u64::from_ne_bytes(bytes.try_into().unwrap()), Ordering::SeqCst);
+    }
+    METRIC_LENGTH.store(formatted.len, Ordering::SeqCst);
+    METRIC_SEQUENCE.store(sequence.wrapping_add(2), Ordering::SeqCst);
 }
 
-fn charge() -> (u8, u8, u8) {
-    if !PRET.load(Ordering::Acquire) {
-        return (u8::MAX, u8::MAX, u8::MAX);
+fn ajoute_metriques(out: &mut Prefixe) {
+    let sequence = METRIC_SEQUENCE.load(Ordering::SeqCst);
+    if sequence & 1 == 0 {
+        let len = METRIC_LENGTH.load(Ordering::SeqCst);
+        if len != 0 {
+            let start = out.len;
+            for (i, word) in METRIC_CACHE.iter().take(len.div_ceil(8)).enumerate() {
+                let offset = start + i * 8;
+                out.donnees[offset..offset + 8].copy_from_slice(&word.load(Ordering::SeqCst).to_ne_bytes());
+            }
+            if METRIC_SEQUENCE.load(Ordering::SeqCst) == sequence {
+                out.len += len;
+                return;
+            }
+        }
     }
-
-    let maintenant = crate::kernel::timer::ticks();
-    let cache_tick = CACHE_TICK.load(Ordering::Relaxed);
-    if maintenant.wrapping_sub(cache_tick) < VALIDITE_TICKS && cache_tick != 0 {
-        let packed = CACHE.load(Ordering::Relaxed);
-        return (packed as u8, (packed >> 8) as u8, (packed >> 16) as u8);
-    }
-
-    let cpu = crate::kernel::timer::cpu_load_pct();
-    let (utilise, total) = crate::kernel::vmm::frame_stats_relaxed();
-    let ram = if total > 0 { (utilise * 100 / total) as u8 } else { 0 };
-    let noeuds = crate::fs::ramfs::used_nodes_relaxed();
-    let disque = if crate::fs::ramfs::MAX_NODES > 0 {
-        (noeuds * 100 / crate::fs::ramfs::MAX_NODES) as u8
-    } else {
-        0
-    };
-
-    let packed = cpu as u32 | (ram as u32) << 8 | (disque as u32) << 16;
-    CACHE.store(packed, Ordering::Relaxed);
-    CACHE_TICK.store(maintenant.max(1), Ordering::Relaxed);
-    (cpu, ram, disque)
+    let _ = out.write_str(METRICS_UNAVAILABLE);
 }
 
 // BOUCHAUD_V16_2_PREFIX_BUFFER
@@ -108,16 +135,6 @@ fn ajoute_couleur(out: &mut Prefixe, couleur: &str) {
     if couleurs() {
         let _ = out.write_str(couleur);
     }
-}
-
-fn ajoute_pourcentage(out: &mut Prefixe, valeur: u8) {
-    if valeur == u8::MAX {
-        ajoute_couleur(out, GRIS);
-        let _ = out.write_str(" --");
-        return;
-    }
-    ajoute_couleur(out, teinte(valeur));
-    let _ = out.write_fmt(format_args!("{:3}", valeur));
 }
 
 fn ajoute_fps(out: &mut Prefixe, valeur: Option<u16>) {
@@ -164,7 +181,6 @@ pub fn ecris_prefixe() {
 /// l'evenement, pas celle de son emission par le fil de vidange.
 pub fn prefixe() -> Prefixe {
     let heure = heure_locale();
-    let (cpu, ram, disque) = charge();
     let frame = if PRET.load(Ordering::Acquire) {
         Some(crate::gui::frame_clock::snapshot())
     } else {
@@ -183,16 +199,8 @@ pub fn prefixe() -> Prefixe {
     ajoute_couleur(&mut out, GRIS);
     let _ = out.write_str("][");
 
-    ajoute_pourcentage(&mut out, cpu);
-    ajoute_couleur(&mut out, GRIS);
-    let _ = out.write_str("%:");
-    ajoute_pourcentage(&mut out, ram);
-    ajoute_couleur(&mut out, GRIS);
-    let _ = out.write_str("%:");
-    ajoute_pourcentage(&mut out, disque);
-    ajoute_couleur(&mut out, GRIS);
-    let _ = out.write_str("%][FPS:");
-
+    ajoute_metriques(&mut out);
+    let _ = out.write_str("][FPS:");
     ajoute_fps(&mut out, frame.filter(|s| s.active).map(|s| s.fps_arrondi()));
     ajoute_couleur(&mut out, GRIS);
     let _ = out.write_str("] ");
