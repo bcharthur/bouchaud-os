@@ -89,13 +89,17 @@ static i64 sys6(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
 
 static u64 longueur(char const* s) { u64 n = 0; while (s[n]) ++n; return n; }
 static void ecris(char const* s) { sys3(SYS_write, 1, (i64)s, (i64)longueur(s)); }
+static char* decimal(char* fin, u64 v) {
+    *--fin = 0;
+    do {
+        *--fin = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v > 0);
+    return fin;
+}
 static void ecris_u64(u64 v) {
-    char tampon[24];
-    int i = 23;
-    tampon[i--] = 0;
-    if (v == 0) tampon[i--] = '0';
-    while (v > 0) { tampon[i--] = (char)('0' + (v % 10)); v /= 10; }
-    ecris(&tampon[i + 1]);
+    char tampon[21];
+    ecris(decimal(tampon + sizeof(tampon), v));
 }
 static void ecris_i64(i64 v) {
     if (v < 0) { ecris("-"); ecris_u64((u64)(-v)); return; }
@@ -181,13 +185,28 @@ static i64 echange(i64 fd, u32 n, u32 taille, int non_bloquant) {
     return -2;
 }
 
+static char* ajoute_texte(char* dst, char const* texte) {
+    while (*texte) *dst++ = *texte++;
+    return dst;
+}
+
 static void verdict(char const* nom, i64 resultat) {
-    ecris("TCP_PERTE_");
-    ecris(nom);
-    if (resultat >= 0) { ecris("_OK latence_ms="); ecris_u64((u64)resultat); }
-    else if (resultat == -2) { ecris("_CORROMPU"); }
-    else { ecris("_ECHEC attente_ms>="); ecris_u64(ECHEANCE_REPONSE_MS); }
-    ecris("\n");
+    // Un seul write pour que les traces noyau ne coupent pas le marqueur.
+    char ligne[80];
+    char chiffre[21];
+    char* fin = ajoute_texte(ligne, "TCP_PERTE_");
+    fin = ajoute_texte(fin, nom);
+    if (resultat >= 0) {
+        fin = ajoute_texte(fin, "_OK latence_ms=");
+        fin = ajoute_texte(fin, decimal(chiffre + sizeof(chiffre), (u64)resultat));
+    } else if (resultat == -2) {
+        fin = ajoute_texte(fin, "_CORROMPU");
+    } else {
+        fin = ajoute_texte(fin, "_ECHEC attente_ms>=");
+        fin = ajoute_texte(fin, decimal(chiffre + sizeof(chiffre), ECHEANCE_REPONSE_MS));
+    }
+    *fin++ = '\n';
+    sys3(SYS_write, 1, (i64)ligne, (i64)(fin - ligne));
 }
 
 /// Point d'entree reel : voir `dns-probe.c`. Le noyau livre une pile alignee
