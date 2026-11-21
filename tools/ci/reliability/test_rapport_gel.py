@@ -114,6 +114,32 @@ class Qemu(unittest.TestCase):
         self.assertIn("verdict=noyau_fige", out[0])
         self.assertTrue(any("qemu_verdict=boucle_noyau" in l for l in out))
 
+    def test_detenteur_mobile_distinct_du_coeur_en_attente(self):
+        from unittest.mock import patch
+
+        text = TEMOIN + "\n" + QEMU.replace(
+            "ech=2 cpu=1 rip=0x9cd642", "ech=2 cpu=1 rip=0x9cd647"
+        ).replace("ech=2 cpu=0 rip=0x94a492", "ech=2 cpu=0 rip=0xab84cd")
+        symbols = {
+            0x9cd642: "os::banc_souffrance::detenteur (banc_souffrance.rs:39)",
+            0x9cd647: "os::banc_souffrance::detenteur (banc_souffrance.rs:40)",
+            0xab84cd: "spin (spin.rs:10)",
+        }
+        with patch.object(rg, "symbolise", return_value=symbols):
+            report = rg.rapport(text, "temoin")
+            self.assertTrue(any("qemu_verdict=boucle_noyau coeur=0" in line for line in report))
+            self.assertIn("RAPPORT_GEL qemu_detenteur_confirme coeur=1 [os::banc_souffrance::detenteur]", report)
+            interrupted = text.replace("ech=1 cpu=1 rip=0x9cd642", "ech=1 cpu=1 rip=0xab84cd")
+            interrupted += "[QEMU-CPU] ech=3 cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=0 rsp=0x1803c41ff70 pile=[]\n"
+            self.assertTrue(any("qemu_detenteur_confirme coeur=1" in line for line in rg.rapport(interrupted, "temoin")))
+            missing = "\n".join(line for line in interrupted.splitlines() if "ech=2 cpu=1" not in line)
+            self.assertFalse(any("qemu_detenteur_confirme" in line for line in rg.rapport(missing, "temoin")))
+            for invalid in (
+                text.replace("cpu=1 rip=0x9cd647 cpl=0", "cpu=1 rip=0xab84cd cpl=0"),
+                text.replace("cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=0", "cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=1"),
+            ):
+                self.assertFalse(any("qemu_detenteur_confirme" in line for line in rg.rapport(invalid, "temoin")))
+
 
 if __name__ == "__main__":
     unittest.main()

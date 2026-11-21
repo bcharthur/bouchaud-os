@@ -261,6 +261,22 @@ def rapport(texte: str, elf: str | None = None) -> list:
         ou = f"{n.rip:#x} [{s(n.rip)}]" if n else "inconnu (pas de reponse NMI)"
         out.append(f"RAPPORT_GEL fautif coeur{a.proprio} tient verrou={a.verrou:#x} pris_en={a.site_detenteur} "
                    f"attendu_par=coeur{c} depuis={age}tics ; le detenteur s'execute en {ou}")
+        # A spin can cover multiple instructions. Correlate the lock owner
+        # with both QEMU samples by symbol, independently of RIP immobility.
+        if n and n.mode == "k" and n.rip in sym:
+            samples = {sample.ech: sample for sample in qemu if sample.cpu == a.proprio}
+            function = s(n.rip).split(" (", 1)[0]
+            # The first capture can interrupt the holder in an IRQ. Use
+            # the final interval of the existing capture series.
+            last = max(samples, default=0)
+            if last >= 2 and all(
+                (sample := samples.get(index)) is not None
+                and sample.cpl == 0 and sample.hlt == 0
+                and s(sample.rip).split(" (", 1)[0] == function
+                for index in (last - 1, last)
+            ):
+                out.append(f"RAPPORT_GEL qemu_detenteur_confirme coeur={a.proprio} [{function}]")
+
     else:
         out.append("RAPPORT_GEL fautif=inconnu aucune attente de verrou publiee "
                    "(boucle sans verrou, ou attente non instrumentee : lire les RIP NMI)")
