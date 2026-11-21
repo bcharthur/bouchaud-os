@@ -59,7 +59,7 @@ static int paint(void)
     while (file && fgets(record, sizeof record, file)) {
         if (strncmp(record, "SYSTEM_METRICS ", 15) == 0) {
             field(record, " cpu_busy_pct=", first, sizeof first);
-            snprintf(line, sizeof line, "CPU %s %%", first);
+            snprintf(line, sizeof line, "CPU %s pour cent", first);
             label(28, line);
             field(record, " ram_used_bytes=", first, sizeof first);
             field(record, " ram_total_bytes=", second, sizeof second);
@@ -71,7 +71,7 @@ static int paint(void)
             label(56, line);
         } else if (strncmp(record, "GPU_METRICS ", 12) == 0) {
             field(record, " virgl_frames=", first, sizeof first);
-            snprintf(line, sizeof line, "VIRGL %s trames | GPU N/A", first);
+            snprintf(line, sizeof line, "VIRGL %s trames - GPU N/A", first);
             label(70, line);
         }
     }
