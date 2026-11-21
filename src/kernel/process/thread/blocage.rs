@@ -69,6 +69,9 @@ fn publie_parking(interruptible: bool) -> Parking {
 /// d'y dormir. Ne revient pas.
 pub(crate) fn meurt_au_parking() -> ! {
     MORTES_AU_PARKING.fetch_add(1, Ordering::Relaxed);
+    // BOUCHAUD_REVEIL_CIBLE_V1 : la pile ne sera pas deroulee ; un
+    // `Abonnement` en cours ne serait jamais desinscrit (revue #344).
+    crate::kernel::fd::desinscrit_tache(current().tid);
     meurt_soi_meme(current());
     retire_exec_zombie_current()
 }
