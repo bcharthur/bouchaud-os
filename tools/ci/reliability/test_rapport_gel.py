@@ -132,7 +132,7 @@ class Qemu(unittest.TestCase):
             interrupted = text.replace("ech=1 cpu=1 rip=0x9cd642", "ech=1 cpu=1 rip=0xab84cd")
             interrupted += "[QEMU-CPU] ech=3 cpu=1 rip=0x9cd647 cpl=0 if=1 hlt=0 rsp=0x1803c41ff70 pile=[]\n"
             self.assertTrue(any("qemu_detenteur_confirme coeur=1" in line for line in rg.rapport(interrupted, "temoin")))
-            missing = interrupted.replace("ech=2 cpu=1", "ech=4 cpu=2")
+            missing = "\n".join(line for line in interrupted.splitlines() if "ech=2 cpu=1" not in line)
             self.assertFalse(any("qemu_detenteur_confirme" in line for line in rg.rapport(missing, "temoin")))
             for invalid in (
                 text.replace("cpu=1 rip=0x9cd647 cpl=0", "cpu=1 rip=0xab84cd cpl=0"),
