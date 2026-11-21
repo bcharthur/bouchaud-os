@@ -4,6 +4,7 @@ on:
     branches:
       - codex/p10-real-gpu-vulkan-20261119
       - codex/ladybird-ci-qualification-20261120
+      - codex/skia-vulkan-device-20261121
     paths:
       - '.github/workflows/ladybird-vulkan-experimental.yml'
       - 'third_party/UPSTREAM.md'

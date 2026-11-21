@@ -201,6 +201,22 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
 #endif""",
     )
     remplace(
+        root, "Libraries/LibGfx/PaintingSurface.h",
+        "    Function<void(PaintingSurface&)> on_flush;",
+        """    Function<void(PaintingSurface&)> on_flush;
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    bool bouchaud_readback_succeeded { false };
+#endif""",
+    )
+    remplace(
+        root, "Services/Compositor/BackingStoreManager.cpp",
+        "#include <AK/AnyOf.h>",
+        """#include <AK/AnyOf.h>
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+#    include <AK/Time.h>
+#endif""",
+    )
+    remplace(
         root, "Services/Compositor/BackingStoreManager.cpp",
         """    auto bitmap = buffer.bitmap();
     surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
@@ -215,19 +231,64 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
 #endif
     surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
 #ifdef BOUCHAUD_VULKAN_COMPOSITOR
-        if (!surface.try_read_into_bitmap(*bitmap)) {
+        auto const start = MonotonicTime::now();
+        surface.bouchaud_readback_succeeded = surface.try_read_into_bitmap(*bitmap);
+        if (!surface.bouchaud_readback_succeeded) {
             warnln("[LB:SKIA] readback=failed");
             return;
         }
-        static bool published_readback = false;
-        if (!published_readback) {
+        static u64 successful_readbacks = 0;
+        if (++successful_readbacks == 1)
             dbgln("[LB:SKIA] readback=vulkan");
-            published_readback = true;
+        if (successful_readbacks % 120 == 1) {
+            dbgln("[LB:SKIA] readback_us={} readback_bytes={}",
+                (MonotonicTime::now() - start).to_microseconds(),
+                static_cast<u64>(bitmap->width()) * bitmap->height() * 4);
         }
 #else
         surface.read_into_bitmap(*bitmap);
 #endif
     };""",
+    )
+
+    remplace(
+        root, "Services/Compositor/BackingStoreManager.cpp",
+        """        auto buffer = Gfx::SharedImageBuffer::create(allocation.size);
+        if (should_publish)""",
+        """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        // Nested contexts are sampled as Skia surfaces by the same Compositor.
+        // They have no bitmap consumer outside this process.
+        if (!should_publish) {
+            m_backing_stores.append({
+                .surface = Gfx::PaintingSurface::create_with_size(allocation.size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, skia_backend_context),
+                .bitmap_id = allocation.bitmap_ids[i],
+                .state = initial_buffer_state(i),
+                .accumulated_damage = { {}, allocation.size },
+            });
+            continue;
+        }
+#endif
+        auto buffer = Gfx::SharedImageBuffer::create(allocation.size);
+        if (should_publish)""",
+    )
+    remplace(
+        root, "Services/Compositor/CompositorState.cpp",
+        """    context->did_finish_gpu_present(bitmap_id);
+    if (context->presents_to_client()) {
+        VERIFY(m_client);""",
+        """    context->did_finish_gpu_present(bitmap_id);
+    if (context->presents_to_client()) {
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        // The Skia completion callback reached the event loop. Require the
+        // corresponding Vulkan surface and successful readback before attesting.
+        auto const& rendered = context->latest_rendered_surface();
+        static bool reported_vulkan_render = false;
+        if (!reported_vulkan_render && rendered && rendered->skia_backend_context() && rendered->bouchaud_readback_succeeded) {
+            dbgln("LADYBIRD_RENDER_BACKEND=vulkan");
+            reported_vulkan_render = true;
+        }
+#endif
+        VERIFY(m_client);""",
     )
 
 
