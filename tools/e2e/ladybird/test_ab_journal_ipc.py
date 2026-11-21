@@ -41,6 +41,11 @@ class BancJournal(unittest.TestCase):
         self.assertEqual(resultat["copies_pixels"], 500)
         self.assertIsNone(resultat["contre_pression"])
 
+    def test_trame_tronquee_ne_capture_pas_la_ligne_suivante(self):
+        for fin in ("\r", "\n", "\r\n"):
+            journal = f"[LB:FRAME] onglet=1 seq=1 t=0{fin}copie_px=100 complet=1 present_us=3200"
+            self.assertEqual(analyse(journal)["presentation_us"]["n"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

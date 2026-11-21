@@ -16,7 +16,7 @@ ICI = Path(__file__).resolve().parent
 SCENARIOS = "E2E-01,E2E-02,E2E-11"
 BUILD = re.compile(r"BOUCHAUD_BUILD commit=([a-f0-9]{8,40})\b")
 FRAME = re.compile(
-    r"\[LB:FRAME\] onglet=(\d+) seq=(\d+) t=(\d+)[^\r\n]*?"
+    r"\[LB:FRAME\] onglet=(\d+) seq=(\d+) t=(\d+).*?"
     r"copie_px=(\d+) complet=([01]) present_us=(\d+)"
 )
 PRESSION = re.compile(
@@ -56,14 +56,15 @@ def quantiles(valeurs):
 
 
 def analyse(journal):
-    frames = [tuple(map(int, f)) for f in FRAME.findall(journal)]
+    lignes = journal.splitlines()
+    frames = [tuple(map(int, f)) for ligne in lignes for f in FRAME.findall(ligne)]
     intervalles = [
         b[2] - a[2] for a, b in zip(frames, frames[1:])
         if a[0] == b[0] and b[1] == a[1] + 1 and b[2] >= a[2]
     ]
     pression = PRESSION.findall(journal)
     return dict(
-        lignes=len(journal.splitlines()),
+        lignes=len(lignes),
         presentation_us=quantiles(f[5] for f in frames),
         intervalle_invite_ms=quantiles(intervalles),
         completes=sum(f[4] for f in frames), copies_pixels=sum(f[3] for f in frames),
