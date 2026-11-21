@@ -36,7 +36,6 @@ pub fn couleurs() -> bool {
 
 const RESET: &str = "\x1b[0m";
 const GRIS: &str = "\x1b[90m";
-const CYAN: &str = "\x1b[36m";
 /// Format once per sample, then publish a bounded atomic byte snapshot. All
 /// accesses are ordered so a reader can reject a concurrent update without
 /// waiting, even if the writer was interrupted by this very log message.
@@ -140,11 +139,9 @@ fn ajoute_couleur(out: &mut Prefixe, couleur: &str) {
 fn ajoute_fps(out: &mut Prefixe, valeur: Option<u16>) {
     match valeur {
         Some(valeur) => {
-            ajoute_couleur(out, CYAN);
             let _ = out.write_fmt(format_args!("{:3}", valeur.min(999)));
         }
         None => {
-            ajoute_couleur(out, GRIS);
             let _ = out.write_str(" --");
         }
     }
@@ -190,19 +187,17 @@ pub fn prefixe() -> Prefixe {
     let mut out = Prefixe::neuf();
 
     ajoute_couleur(&mut out, GRIS);
+
     let _ = out.write_str("[");
-    ajoute_couleur(&mut out, CYAN);
     let _ = out.write_fmt(format_args!(
         "{:02}:{:02}:{:02}",
         heure.hour, heure.minute, heure.second
     ));
-    ajoute_couleur(&mut out, GRIS);
     let _ = out.write_str("][");
 
     ajoute_metriques(&mut out);
     let _ = out.write_str("][FPS:");
     ajoute_fps(&mut out, frame.filter(|s| s.active).map(|s| s.fps_arrondi()));
-    ajoute_couleur(&mut out, GRIS);
     let _ = out.write_str("] ");
     ajoute_couleur(&mut out, RESET);
     out
