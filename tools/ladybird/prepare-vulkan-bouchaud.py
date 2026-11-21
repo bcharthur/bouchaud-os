@@ -37,6 +37,76 @@ endif()
 find_package(CURL REQUIRED)""",
     )
 
+    # Do not inspect handles returned by an unsuccessful or truncated enumeration.
+    vulkan = "Libraries/LibGfx/VulkanContext.cpp"
+    remplace(
+        root, vulkan,
+        """    vkEnumeratePhysicalDevices(instance, &device_count, nullptr);""",
+        """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    if (auto result = vkEnumeratePhysicalDevices(instance, &device_count, nullptr); result != VK_SUCCESS) {
+        dbgln("[LB:SKIA] vulkan_enumerate_count_error={}", static_cast<int>(result));
+        return Error::from_string_literal("Physical device count failed");
+    }
+#else
+    vkEnumeratePhysicalDevices(instance, &device_count, nullptr);
+#endif""",
+    )
+    remplace(
+        root, vulkan,
+        """    vkEnumeratePhysicalDevices(instance, &device_count, devices.data());""",
+        """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    if (auto result = vkEnumeratePhysicalDevices(instance, &device_count, devices.data()); result != VK_SUCCESS) {
+        dbgln("[LB:SKIA] vulkan_enumerate_devices_error={}", static_cast<int>(result));
+        return Error::from_string_literal("Physical device enumeration failed");
+    }
+    if (device_count == 0)
+        return Error::from_string_literal("No physical devices after enumeration");
+    devices.resize(device_count);
+#else
+    vkEnumeratePhysicalDevices(instance, &device_count, devices.data());
+#endif""",
+    )
+    remplace(
+        root, vulkan,
+        """    for (auto const& device : devices) {
+        if (picked_device == VK_NULL_HANDLE)""",
+        """    for (auto const& device : devices) {
+#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+        uint32_t queue_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_count, nullptr);
+        if (queue_count == 0)
+            continue;
+        Vector<VkQueueFamilyProperties> queues;
+        queues.resize(queue_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_count, queues.data());
+        bool has_graphics = false;
+        for (uint32_t index = 0; index < queue_count; ++index) {
+            if (queues[index].queueCount > 0 && (queues[index].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                has_graphics = true;
+                break;
+            }
+        }
+        if (!has_graphics)
+            continue;
+#endif
+        if (picked_device == VK_NULL_HANDLE)""",
+    )
+    remplace(
+        root, vulkan,
+        """    VERIFY_NOT_REACHED();
+}
+
+static ErrorOr<VkDevice> create_logical_device""",
+        """#ifdef BOUCHAUD_VULKAN_COMPOSITOR
+    return Error::from_string_literal("No Vulkan physical device with a graphics queue");
+#else
+    VERIFY_NOT_REACHED();
+#endif
+}
+
+static ErrorOr<VkDevice> create_logical_device""",
+    )
+
     # The platform selects CPU if optional Vulkan initialisation fails.
     remplace(
         root, "Libraries/LibGfx/SkiaBackendContext.cpp",
