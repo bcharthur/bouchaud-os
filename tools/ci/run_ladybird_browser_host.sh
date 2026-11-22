@@ -1129,7 +1129,7 @@ if [ "$AFFICHAGE" = venus ] && [ "$EXIGE_RENDU_SKIA" = 1 ]; then
 fi
 
 if [[ "$SKIA_BACKEND" = vulkan && -n "$VENUS_HOST_PROFILE" ]]; then
-  if ! grep -aF 'Using "Virtio-GPU Venus' "$LOG" | grep -aF "${names[0]}" > /dev/null ||
+  if ! grep -aFq -- "Using \"Virtio-GPU Venus (${names[0]})\"" "$LOG" ||
      ! grep -aFq 'LADYBIRD_RENDER_BACKEND=vulkan' "$LOG"; then
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=renderer_venus_non_confirme attendu=${names[0]}" >&2
     exit 1
