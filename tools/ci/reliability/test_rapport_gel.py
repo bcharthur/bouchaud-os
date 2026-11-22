@@ -140,6 +140,19 @@ class Qemu(unittest.TestCase):
             ):
                 self.assertFalse(any("qemu_detenteur_confirme" in line for line in rg.rapport(invalid, "temoin")))
 
+    def test_qemu_dernier_intervalle_et_capture_partielle(self):
+        samples = [
+            rg.CpuQemu(1, 0, 0x100, 0, 0, 0),
+            rg.CpuQemu(2, 0, 0x200, 0, 0, 0),
+            rg.CpuQemu(3, 0, 0x200, 0, 0, 0),
+            rg.CpuQemu(3, 1, 0x300, 0, 1, 1),
+        ]
+        report = rg.lecture_qemu(samples, lambda address: hex(address))
+        self.assertTrue(any("boucle_noyau coeur=0 rip=0x200" in line for line in report))
+        self.assertTrue(any("qemu coeur=1 rip=0x300" in line for line in report))
+        report = rg.lecture_qemu([samples[0], *samples[2:]], lambda address: hex(address))
+        self.assertFalse(any("boucle_noyau" in line for line in report))
+
 
 if __name__ == "__main__":
     unittest.main()
