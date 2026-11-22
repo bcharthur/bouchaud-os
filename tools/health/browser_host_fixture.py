@@ -764,8 +764,7 @@ HTML = r'''<!doctype html>
     return ctx;
   };
 
-  const chargeImage = (url, garde) => new Promise((resolve, reject) => {
-    const image = new Image();
+  const chargeImage = (url, garde, image = new Image()) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timeout")), garde);
     image.onload = () => { clearTimeout(timer); resolve(image); };
     image.onerror = () => { clearTimeout(timer); reject(new Error("erreur de chargement")); };
@@ -1000,14 +999,12 @@ HTML = r'''<!doctype html>
     mire.style.cssText = "position:fixed;left:0;top:0;z-index:2147483647;"
       + "background:#000;padding:0;margin:0;line-height:0;font-size:0";
     const rouge = new Image();
-    rouge.src = "/mire/rouge.png";
     rouge.width = 64; rouge.height = 64;
     rouge.style.cssText = "display:inline-block;vertical-align:top";
     const vert = document.createElement("div");
     vert.style.cssText = "display:inline-block;vertical-align:top;width:64px;height:64px;"
       + "background-image:url(/mire/vert.png);background-size:64px 64px;background-repeat:no-repeat";
     const bleu = new Image();
-    bleu.src = "/mire/bleu.png";
     bleu.width = 128; bleu.height = 64;
     bleu.style.cssText = "display:inline-block;vertical-align:top";
     mire.appendChild(rouge);
@@ -1015,10 +1012,12 @@ HTML = r'''<!doctype html>
     mire.appendChild(bleu);
     document.body.appendChild(mire);
 
-    await Promise.all([rouge, bleu].map(im => new Promise(res => {
-      if (im.complete && im.naturalWidth > 0) return res();
-      im.onload = res; im.onerror = res;
-    })));
+    // Enregistrer les callbacks avant d'affecter src, y compris pour une
+    // reponse deja en cache. Garder la meme borne que le catalogue d'images.
+    await Promise.all([
+      chargeImage("/mire/rouge.png", 30000, rouge),
+      chargeImage("/mire/bleu.png", 30000, bleu),
+    ]);
     // Informatif seulement : la mire est dans le DOM, `<img>` rouge et bleu
     // ont fini de charger. Ce n'est PAS une borne de peinture -- voir
     // BOUCHAUD_SURFACE_ANCRE_PEINTE_V1 ci-dessous.
@@ -1046,17 +1045,11 @@ HTML = r'''<!doctype html>
     // premiere a peint la mire, la seconde prouve que la premiere est finie.
     // Le banc attend alors la presentation `seq_ancre + 2`, la premiere dont la
     // capture a forcement ete lancee apres l'ancre.
-    const sonde = new Image();
-    sonde.src = "/mire/vert.png";
-    // Sans `decode()`, retomber sur `load` -- et le dire : `decodees` compte
-    // les vrais decodages, `charge` les simples chargements.
+    const sonde = await chargeImage("/mire/vert.png", 30000);
+    // Les trois chargements sont deja observes. Sans decode(), garder la
+    // preuve de chargement et ne pas attendre un evenement deja passe.
     const decodages = await Promise.all([rouge, bleu, sonde].map(im =>
-      typeof im.decode === "function"
-        ? im.decode().then(() => 1, () => 0)
-        : new Promise(r => {
-            if (im.complete && im.naturalWidth > 0) return r(0);
-            im.addEventListener("load", () => r(0)); im.addEventListener("error", () => r(0));
-          })));
+      typeof im.decode === "function" ? im.decode().then(() => 1, () => 0) : 0));
     // Un navigateur sans boucle de presentation ne declenche JAMAIS
     // `requestAnimationFrame` -- un Chromium `headless_shell` en temps
     // virtuel, par exemple. Une epreuve ne doit pas pouvoir suspendre le
