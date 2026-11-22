@@ -281,6 +281,9 @@ if [ "$AFFICHAGE" = venus ]; then
   if [ "$SKIA_BACKEND" = vulkan ] && [ "${BO_SMOKE_SKIA_PARTIAL_READBACK:-0}" = 1 ]; then
     sed -i '1i export BOUCHAUD_SKIA_PARTIAL_READBACK=1' "$SCENARIO/autorun"
   fi
+  if [ "$SKIA_BACKEND" = vulkan ] && [ "${BO_SMOKE_SKIA_READBACK_TRACE:-0}" = 1 ]; then
+    sed -i '1i export BOUCHAUD_SKIA_READBACK_TRACE=1' "$SCENARIO/autorun"
+  fi
 fi
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"

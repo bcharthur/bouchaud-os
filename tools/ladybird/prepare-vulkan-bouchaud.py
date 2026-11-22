@@ -251,6 +251,7 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         static bool const partial = getenv("BOUCHAUD_SKIA_PARTIAL_READBACK") != nullptr;
         auto const damage = surface.bouchaud_readback_damage;
         surface.bouchaud_readback_damage.clear();
+        static bool const trace = getenv("BOUCHAUD_SKIA_READBACK_TRACE") != nullptr;
         auto const start = MonotonicTime::now();
         bool const copied_subset = partial && !needs_full_readback && damage.has_value()
             && !damage->is_empty() && damage->size() != surface.size()
@@ -264,11 +265,12 @@ bool PaintingSurface::try_read_into_bitmap(Bitmap& bitmap, IntPoint source_posit
         static u64 successful_readbacks = 0;
         if (++successful_readbacks == 1)
             dbgln("[LB:SKIA] readback=vulkan");
-        if (successful_readbacks % 120 == 1) {
+        if (trace || successful_readbacks % 120 == 1) {
             auto const copied_size = copied_subset ? damage->size() : bitmap->size();
-            dbgln("[LB:SKIA] readback_us={} readback_bytes={}",
+            dbgln("[LB:SKIA] readback_us={} readback_bytes={} scope={} copy={}",
                 (MonotonicTime::now() - start).to_microseconds(),
-                static_cast<u64>(copied_size.width()) * copied_size.height() * 4);
+                static_cast<u64>(copied_size.width()) * copied_size.height() * 4,
+                copied_subset ? "partial" : "full", successful_readbacks);
         }
     };
 #else
