@@ -414,3 +414,27 @@ et `serie.log`) avec
 L'analyseur vérifie chaque transition et chaque clôture. Les journaux
 locaux sont sous `/workspace/work/p10/qemu-identique-fence-*` et
 `/workspace/work/p10/qemu112-identique-fence-*`.
+
+### Qualifier le renderer hôte de Ladybird
+
+Sous Windows, `run.ps1 -Accel whpx -P10GPU` sélectionne `virtio-gpu-gl-pci`
+avec une sortie OpenGL. Ce profil expose VIRGL. WHPX accélère les vCPU.
+Venus exige en plus les propriétés QEMU `venus`, `blob`, `hostmem`,
+un virglrenderer compatible et un ICD Vulkan accessible au renderer hôte.
+
+Sur un hôte Linux avec QEMU/Venus, virglrenderer, `vulkaninfo` et un
+affichage GL, sélectionner un manifeste ICD qui expose un seul périphérique.
+Pour KVM le compte de lancement doit également pouvoir ouvrir `/dev/kvm`.
+
+```bash
+cargo bootimage --features banc-gpu-venus
+BOOT="$PWD/target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin"
+BO_SMOKE_ACCEL=kvm BO_SMOKE_VENUS_HOST_PROFILE=hardware \
+  BO_SMOKE_VENUS_HOST_ICD=/chemin/vers/icd-materiel.json \
+  tools/ci/run_ladybird_skia_ab.sh "$BOOT" "$NATIVE_DIR" "$ROOTFS_VENUS" "$SORTIE" 3
+```
+
+Relancer avec `BO_SMOKE_VENUS_HOST_PROFILE=lavapipe` et le manifeste LVP
+pour le renderer logiciel. Chaque campagne alterne Skia CPU et Vulkan avec
+les mêmes entrées. Le bras Vulkan exige le nom du périphérique dans le
+journal du chargeur Venus invité ainsi que le marqueur de trame terminée.
