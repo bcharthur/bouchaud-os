@@ -219,7 +219,7 @@ def regle_present(chrome, fautes):
             "qu'une trame partielle publie un rectangle partiel."
         )
 
-    complet = etendue(plan, "if (plan.complet)")
+    complet = etendue(plan, "if (plan.reconstruit_surface)")
     position = 0
     for ligne in plan.splitlines(keepends=True):
         debut = position
@@ -368,6 +368,8 @@ def main():
             print("ECHEC  %s" % faute)
         return 1
 
+    if "plan.reconstruit_surface = !m_page_valide;" not in degat:
+        fautes.append("BouchaudDegat.h : la reconstruction doit dépendre de la validité de la surface.")
     regle_present(chrome, fautes)
     regle_degat_natif(vue, fenetre, fautes)
     regle_aucune_capture(vue, fenetre, fautes)
