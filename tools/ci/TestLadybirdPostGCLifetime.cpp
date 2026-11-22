@@ -22,6 +22,8 @@ struct Observation {
     unsigned finalized { 0 };
     unsigned callbacks { 0 };
     unsigned suppressed { 0 };
+    unsigned callbacks_during_finalize { 0 };
+    bool finalizing { false };
 };
 
 class Resource final : public GC::Cell {
@@ -29,6 +31,8 @@ class Resource final : public GC::Cell {
     GC_DECLARE_ALLOCATOR(Resource);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     Resource(Target& target, Observation& observation)
         : m_target(target)
         , m_observation(observation)
@@ -39,13 +43,17 @@ public:
     {
         Base::finalize();
         ++m_observation.finalized;
+        m_observation.finalizing = true;
         heap().enqueue_post_gc_task([target = m_target, &observation = m_observation] {
             ++observation.callbacks;
+            if (observation.finalizing)
+                ++observation.callbacks_during_finalize;
             if (target)
                 ++target->calls;
             else
                 ++observation.suppressed;
         });
+        m_observation.finalizing = false;
     }
 
 private:
@@ -80,6 +88,7 @@ TEST_CASE(post_gc_task_observes_target_lifetime_across_collections)
     EXPECT_EQ(observation.finalized, 4u);
     EXPECT_EQ(observation.callbacks, 4u);
     EXPECT_EQ(observation.suppressed, 1u);
+    EXPECT_EQ(observation.callbacks_during_finalize, 0u);
 }
 
 TEST_CASE(post_gc_task_does_not_keep_target_alive_in_heap_teardown)
@@ -93,4 +102,5 @@ TEST_CASE(post_gc_task_does_not_keep_target_alive_in_heap_teardown)
     EXPECT_EQ(observation.finalized, 1u);
     EXPECT_EQ(observation.callbacks, 1u);
     EXPECT_EQ(observation.suppressed, 1u);
+    EXPECT_EQ(observation.callbacks_during_finalize, 0u);
 }
