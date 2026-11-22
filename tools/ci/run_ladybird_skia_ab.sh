@@ -16,6 +16,17 @@ case "$accel" in
     tcg|kvm) ;;
     *) echo 'BO_SMOKE_ACCEL doit valoir tcg ou kvm.' >&2; exit 2 ;;
 esac
+mode=${BO_SKIA_AB_MODE:-cpu-vulkan}
+case "$mode" in
+    cpu-vulkan) bras_reference=(cpu vulkan) ;;
+    readback) bras_reference=(vulkan-full vulkan-partial) ;;
+    *) echo 'BO_SKIA_AB_MODE doit valoir cpu-vulkan ou readback.' >&2; exit 2 ;;
+esac
+trace=${BO_SMOKE_SKIA_READBACK_TRACE:-0}
+case "$trace" in
+    0|1) ;;
+    *) echo 'BO_SMOKE_SKIA_READBACK_TRACE doit valoir 0 ou 1.' >&2; exit 2 ;;
+esac
 qemu=$(command -v qemu-system-x86_64)
 qemu_version=$("$qemu" --version)
 [[ -f $boot && -d $natif && -d $rootfs ]]
@@ -37,19 +48,27 @@ identite() {
 identite > "$sortie/entrees.sha256"
 printf '%s\n' "$qemu_version" > "$sortie/qemu-version.txt"
 printf '%s\n' "$accel" > "$sortie/acceleration.txt"
+printf 'mode=%s\nreadback_trace=%s\n' "$mode" "$trace" > "$sortie/mode.txt"
 git rev-parse HEAD > "$sortie/source.txt"
 printf 'tour\tbackend\tcode\tetat\n' > "$sortie/verdicts.tsv"
 
 echec=0
 for ((tour = 1; tour <= repetitions; tour++)); do
-    if ((tour % 2)); then bras=(cpu vulkan); else bras=(vulkan cpu); fi
-    for backend in "${bras[@]}"; do
-        dossier=$(printf '%s/%02d-%s' "$sortie" "$tour" "$backend")
+    if ((tour % 2)); then bras=("${bras_reference[@]}"); else bras=("${bras_reference[1]}" "${bras_reference[0]}"); fi
+    for bras_actif in "${bras[@]}"; do
+        backend=$bras_actif
+        partiel=${BO_SMOKE_SKIA_PARTIAL_READBACK:-0}
+        case "$bras_actif" in
+            vulkan-full) backend=vulkan; partiel=0 ;;
+            vulkan-partial) backend=vulkan; partiel=1 ;;
+        esac
+        dossier=$(printf '%s/%02d-%s' "$sortie" "$tour" "$bras_actif")
         mkdir -- "$dossier"
         cp --reflink=auto -- "$boot" "$dossier/amorce.bin"
-        suffixe="-skia-ab-${BASHPID}-${tour}-${backend}"
+        suffixe="-skia-ab-${BASHPID}-${tour}-${bras_actif}"
         code=0
         BO_SMOKE_ACCEL="$accel" BO_SMOKE_AFFICHAGE=venus BO_SMOKE_SKIA_BACKEND="$backend" \
+            BO_SMOKE_SKIA_PARTIAL_READBACK="$partiel" BO_SMOKE_SKIA_READBACK_TRACE="$trace" \
             BO_SMOKE_VENUS_SYSROOT="$rootfs" BO_SMOKE_SUFFIXE="$suffixe" \
             tools/ci/run_ladybird_browser_host.sh "$dossier/amorce.bin" "$natif" \
             > "$dossier/smoke.log" 2>&1 || code=$?
@@ -65,11 +84,11 @@ for ((tour = 1; tour <= repetitions; tour++)); do
             echec=1
         fi
         if ! identite | cmp -s "$sortie/entrees.sha256" -; then
-            printf '%s\t%s\t%s\tentree-modifiee\n' "$tour" "$backend" "$code" >> "$sortie/verdicts.tsv"
+            printf '%s\t%s\t%s\tentree-modifiee\n' "$tour" "$bras_actif" "$code" >> "$sortie/verdicts.tsv"
             echo "Campagne invalide : une entrée a changé. Journaux dans $sortie." >&2
             exit 1
         fi
-        printf '%s\t%s\t%s\t%s\n' "$tour" "$backend" "$code" "$etat" >> "$sortie/verdicts.tsv"
+        printf '%s\t%s\t%s\t%s\n' "$tour" "$bras_actif" "$code" "$etat" >> "$sortie/verdicts.tsv"
     done
 done
 cat "$sortie/verdicts.tsv"
