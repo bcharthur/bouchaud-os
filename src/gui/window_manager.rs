@@ -667,8 +667,7 @@ fn boucle() {
             lance_calculatrice(&mut wins, home, &mut degats);
             continue;
         }
-        let fenetre = make_app(kind, home, &mut spawn_n);
-        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        ouvre_app_integree(&mut wins, home, &mut degats, kind, &mut spawn_n);
     }
     // BOUCHAUD_DOOM_AUTOSTART_BANC_V1 : les bancs QEMU n'ont pas de souris
     // pour double-cliquer ; `BO_AUTOSTART_DOOM=1` ouvre DOOM comme le ferait
@@ -1084,8 +1083,7 @@ fn boucle() {
                             } else if kind == window::KIND_CALCULATRICE {
                                 lance_calculatrice(&mut wins, home, &mut degats);
                             } else {
-                                let fenetre = make_app(kind, home, &mut spawn_n);
-                                ouvre_fenetre(&mut wins, fenetre, &mut degats);
+                                ouvre_app_integree(&mut wins, home, &mut degats, kind, &mut spawn_n);
                             }
                             // Une fenetre vient d'apparaitre : sans cela, la
                             // trame ne serait composee qu'au prochain degat.
@@ -2578,6 +2576,17 @@ fn lance_calculatrice(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     lance_application_zone(wins, cwd, degats, CHEMIN_CALCULATRICE, "Calculatrice", (320, 420));
 }
 
+fn ouvre_app_integree(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, kind: usize, spawn_n: &mut i32) {
+    if kind == window::KIND_MONITEUR
+        && crate::shell::exported().iter().any(|e| e == "BO_MONITEUR_RING3=1")
+        && lance_application_zone(wins, cwd, degats, "/bin/moniteur-gui", "Moniteur", (420, 180))
+    {
+        return;
+    }
+    let fenetre = make_app(kind, cwd, spawn_n);
+    ouvre_fenetre(wins, fenetre, degats);
+}
+
 /// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : lance n'importe quel programme ring 3
 /// du protocole GUI dans une fenetre standard (`BO_AUTOSTART_APP=/chemin`).
 fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str) {
@@ -2586,7 +2595,7 @@ fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemi
 }
 
 fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str,
-                          titre: &str, zone: (i32, i32)) {
+                          titre: &str, zone: (i32, i32)) -> bool {
     let (largeur, hauteur) = zone;
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
     let client = match Client::lance(chemin, titre, cwd,
@@ -2594,7 +2603,7 @@ fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, 
         Ok(client) => client,
         Err(error) => {
             crate::serial_println!("BOUCHAUD_APP_LAUNCH_ERROR chemin={} {}", chemin, error);
-            return;
+            return false;
         }
     };
     crate::serial_println!("BOUCHAUD_APP_LAUNCH chemin={} pid={}", chemin, client.pid);
@@ -2609,6 +2618,7 @@ fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, 
             client.envoie_configuration(true);
         }
     }
+    true
 }
 
 /// DOOM: autre application ring3, independante du navigateur et du service.
@@ -2881,8 +2891,7 @@ fn handle_click(
                     lance_calculatrice(wins, home, degats);
                     fenetre_ouverte = true;
                 } else {
-                    let fenetre = make_app(kind, home, spawn_n);
-                    ouvre_fenetre(wins, fenetre, degats);
+                    ouvre_app_integree(wins, home, degats, kind, spawn_n);
                     fenetre_ouverte = true;
                 }
             }
