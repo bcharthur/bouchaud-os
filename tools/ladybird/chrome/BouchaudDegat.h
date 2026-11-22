@@ -143,6 +143,7 @@ struct Plan {
     Rect publie {};
     bool efface_necessaire { false };
     bool complet { false };
+    bool reconstruit_surface { false };
 
     constexpr bool rien_a_faire() const { return publie.vide(); }
 };
@@ -181,6 +182,7 @@ public:
         // couvre pas -- page plus courte que la fenetre, capture retrecie.
         plan.efface_necessaire = plan.copie != degat;
         plan.complet = degat == zone;
+        plan.reconstruit_surface = !m_page_valide;
 
         m_page_valide = true;
         return plan;

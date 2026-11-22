@@ -65,6 +65,7 @@ int main()
     {
         Suivi suivi;
         auto plan = suivi.planifie(kEcran, Rect { 10, 10, 2, 16 });
+        verifie(plan.reconstruit_surface, "premiere trame : chrome a reconstruire", "chrome absent");
         verifie(plan.complet, "premiere trame : complete", "un degat minuscule l'a emportee");
         verifie_rect(plan.copie, Rect { 0, 0, 1278, 590 }, "premiere trame : copie toute la page");
         verifie_rect(plan.publie, Rect { 0, 36, 1278, 590 }, "premiere trame : publie sous la barre");
@@ -96,6 +97,9 @@ int main()
         auto plan = suivi.planifie(kEcran, Rect { -50, -50, 5000, 5000 });
         verifie_rect(plan.copie, Rect { 0, 0, 1278, 590 }, "degat deborde : copie bornee");
         verifie_rect(plan.publie, Rect { 0, 36, 1278, 590 }, "degat deborde : publie borne");
+        verifie(!plan.reconstruit_surface, "degat page entier : chrome conserve", "chrome repeint sans invalidation");
+        suivi.invalide();
+        verifie(suivi.planifie(kEcran, {}).reconstruit_surface, "remappage : chrome restaure", "chrome absent apres remappage");
         verifie(plan.complet, "degat deborde : reconnu comme complet",
             "un degat couvrant toute la page n'a pas ete vu comme complet");
     }
@@ -140,6 +144,7 @@ int main()
 
         Geometrie agrandie { 1278, 700, 36, 1278, 664 };
         auto plan = suivi.planifie(agrandie, Rect { 4, 4, 8, 8 });
+        verifie(plan.reconstruit_surface, "agrandissement : chrome restaure", "chrome absent apres redimensionnement");
         verifie(plan.complet, "agrandissement : trame complete",
             "la zone nouvellement decouverte serait restee vide");
         verifie_rect(plan.publie, Rect { 0, 36, 1278, 664 }, "agrandissement : publie la nouvelle page");

@@ -2635,10 +2635,9 @@ inline bool compose_page(BouchaudDegat::Rect degat)
     // elle est repeinte, la surface entiere sur une trame complete.
     auto publie = plan.publie;
 
-    // La barre d'outils ne bouge pas quand la page bouge. Sur une trame
-    // complete -- premiere trame, fenetre redimensionnee -- la surface a cesse
-    // de la porter et il faut la repeindre.
-    if (plan.complet) {
+    // Un scroll peut endommager toute la page sans toucher le chrome.
+    // Repeindre la barre si la surface a ete invalidee ou si la barre a change.
+    if (plan.reconstruit_surface) {
         draw_chrome(canvas);
         // Elle vient d'etre repeinte : une recomposition de chrome en attente
         // serait redondante.
