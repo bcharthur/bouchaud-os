@@ -48,6 +48,7 @@ ORDRE = [
     "prepare-echange-processus.py",
     "prepare-c22-partitions.py",
     "prepare-gc-retention-proof.py",
+    "prepare-parser-resume-after-gc.py",
     "prepare-cache-journal.py",
     "prepare-libjs-valeur-diagnostic.py",
     "prepare-full-browser-host.py",
