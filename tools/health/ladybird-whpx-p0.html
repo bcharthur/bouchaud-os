@@ -12,6 +12,9 @@
 <main id="rows"></main>
 <script>
 "use strict";
+const options = new URLSearchParams(location.search);
+const profileCallbacks = options.get("phases") === "1";
+const scrollOnly = options.get("scroll-only") === "1";
 const rows = document.getElementById("rows");
 const start = document.getElementById("start");
 const statusLine = document.getElementById("status");
@@ -32,15 +35,26 @@ start.addEventListener("click", () => {
     const click = performance.now();
     const frames = [];
     let step = 0;
+    let callbackTotalMs = 0;
+    let callbackMaxMs = 0;
     function scroll(now) {
         if (step === 240) {
             // Aggregate the scene timings in one message after the animation.
             statusLine.textContent = "Terminé";
             console.log("WHPX_P0_SCROLL " + JSON.stringify({click, frames, end: now}));
+            if (profileCallbacks)
+                console.log("WHPX_P0_CALLBACK " + JSON.stringify({count: step, callbackTotalMs, callbackMaxMs, scrollOnly}));
             return;
         }
+        const before = profileCallbacks ? performance.now() : 0;
         window.scrollTo(0, ++step * 52);
-        statusLine.textContent = step + "/240";
+        if (!scrollOnly)
+            statusLine.textContent = step + "/240";
+        if (profileCallbacks) {
+            const elapsed = performance.now() - before;
+            callbackTotalMs += elapsed;
+            callbackMaxMs = Math.max(callbackMaxMs, elapsed);
+        }
         frames.push(now);
         requestAnimationFrame(scroll);
     }
