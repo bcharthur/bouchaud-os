@@ -45,10 +45,19 @@ Assert-Profile ((Resolve-BouchaudPerformance $capabilities).Accel -eq 'tcg') 'QE
 $capabilities.QemuTcg = $false
 Assert-Refused $capabilities @{} 'aucun accelerateur'
 $capabilities.QemuTcg = $true
-foreach ($case in @(@{ Free=0; Ram=2048 }, @{ Free=3072; Ram=2048 }, @{ Free=7168; Ram=4096 }, @{ Free=20000; Ram=12288 })) {
+$message = Write-BouchaudPerformance -Profile $tcg -Capabilities $capabilities -Accel 'tcg' -Reason $tcg.Reason 3>&1 6>&1 | Out-String
+Assert-Profile ($message -like "*profil materiel de performance WHPX n'est pas atteint*") 'Avertissement TCG absent'
+
+foreach ($case in @(
+    @{ Free=$null; Ram=2048 }, @{ Free=4096; Ram=2048 }, @{ Free=7167; Ram=2048 },
+    @{ Free=7168; Ram=4096 }, @{ Free=11263; Ram=4096 }, @{ Free=11264; Ram=8192 },
+    @{ Free=15359; Ram=8192 }, @{ Free=15360; Ram=12288 }
+)) {
     $capabilities.AvailableMiB = $case.Free
     Assert-Profile ((Resolve-BouchaudPerformance $capabilities).RamMiB -eq $case.Ram) "Palier RAM incorrect ($($case.Free))"
 }
-$capabilities.AvailableMiB = 3071
-Assert-Refused $capabilities @{} 'moins de 3072 MiB'
+foreach ($free in @(0, 3072, 4095)) {
+    $capabilities.AvailableMiB = $free
+    Assert-Refused $capabilities @{} 'moins de 4096 MiB'
+}
 Write-Output 'BOUCHAUD_PERFORMANCE_TEST_OK'

@@ -12,7 +12,7 @@ function Get-BouchaudPerformanceHost {
         GpuName = $gpu -join ', '
         HypervisorPresent = $machine.HypervisorPresent
         TotalMiB = [long]($machine.TotalPhysicalMemory / 1MB)
-        AvailableMiB = [long]($os.FreePhysicalMemory / 1024)
+        AvailableMiB = if ($null -ne $os.FreePhysicalMemory) { [long][math]::Floor($os.FreePhysicalMemory / 1024) } else { $null }
         QemuWhpx = [bool]($help -match '^\s*whpx\s*$')
         QemuTcg = [bool]($help -match '^\s*tcg\s*$')
     }
@@ -43,8 +43,8 @@ function Resolve-BouchaudPerformance {
     }
 
     $available = $Capabilities.AvailableMiB
-    if ($available -gt 0 -and $available -lt 3072) {
-        throw 'Performance : moins de 3072 MiB disponibles pour le profil et Windows.'
+    if ($null -ne $available -and $available -lt 4096) {
+        throw 'Performance : moins de 4096 MiB disponibles. Le profil minimal reserve 2048 MiB a Windows.'
     }
     foreach ($tier in @(12288,8192,4096)) {
         if ($available -ge ($tier + 3072)) {
@@ -52,7 +52,7 @@ function Resolve-BouchaudPerformance {
             break
         }
     }
-    if ($available -eq 0) { $reason += ' RAM disponible inconnue, profil minimal retenu.' }
+    if ($null -eq $available) { $reason += ' RAM disponible inconnue, profil minimal retenu.' }
 
     foreach ($name in $profile.Keys) {
         if (($Explicit.Keys -contains $name) -and $Explicit[$name] -ne $profile[$name]) {
@@ -87,8 +87,12 @@ function Write-BouchaudPerformance {
     Write-Host 'Ladybird       : artefact verifie'
     Write-Host "Hote CPU       : $($Capabilities.CpuName)"
     Write-Host "Hote GPU       : $($Capabilities.GpuName)"
-    Write-Host "Hote RAM       : $($Capabilities.AvailableMiB)/$($Capabilities.TotalMiB) MiB disponibles"
+    $free = if ($null -eq $Capabilities.AvailableMiB) { 'N/A' } else { $Capabilities.AvailableMiB }
+    Write-Host "Hote RAM       : $free/$($Capabilities.TotalMiB) MiB disponibles"
     Write-Host "Decision       : $Reason"
+    if ($Accel -eq 'tcg') {
+        Write-Warning 'TCG actif : le profil materiel de performance WHPX n''est pas atteint.'
+    }
 }
 
 Export-ModuleMember -Function Get-BouchaudPerformanceHost,Resolve-BouchaudPerformance,Test-BouchaudPerformanceFallback,Write-BouchaudPerformance

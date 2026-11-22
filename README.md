@@ -227,14 +227,16 @@ Sous Windows, `run.ps1` construit et lance une configuration complète, avec le 
 Le lanceur sélectionne le profil de référence WHPX à un vCPU, avec IRQchip
 désactivé, surface simple, rendu CPU et journalisation de production.
 Il lit la mémoire physique disponible et choisit 2, 4, 8 ou 12 Gio.
-Le palier minimal exige 3 Gio libres si le relevé est disponible. Les paliers
-supérieurs laissent au moins 3 Gio libres à l’hôte. Le lanceur indique la
+Le palier minimal exige 4 Gio libres et en réserve 2 à Windows. Les paliers
+supérieurs en réservent au moins 3. Si le relevé est indisponible, le lanceur
+l’indique et retient le palier minimal. Le lanceur indique la
 mémoire et les périphériques détectés. Une carte GPU détectée ne suffit pas
 à qualifier VIRGL ou Vulkan.
 
 Si l’hyperviseur Windows ou le support WHPX de QEMU ne sont pas détectés,
 le lanceur annonce TCG avant le démarrage. Il peut également relancer en
 TCG après un échec d’initialisation WHPX avant le démarrage du noyau.
+Dans les deux cas, il indique que le profil matériel WHPX n’est pas atteint.
 Un arrêt en cours d’exécution reste une erreur. Le verdict QEMU et la
 signature de l’hyperviseur invité restent dans les journaux.
 
