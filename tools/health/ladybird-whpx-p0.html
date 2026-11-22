@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Ladybird WHPX P0</title>
+<style>
+  body { margin: 0; font: 16px sans-serif; background: #eef2f6; }
+  header { position: sticky; top: 0; background: #123452; color: white; padding: 12px; }
+  article { box-sizing: border-box; height: 48px; margin: 4px 16px; padding: 8px;
+            border: 2px solid #256e99; background: white; }
+  article:nth-child(odd) { background: #cbe4f0; }
+</style>
+<header><button id="start" disabled>Lancer le défilement</button> <output id="status">Chargement</output></header>
+<main id="rows"></main>
+<script>
+"use strict";
+const rows = document.getElementById("rows");
+const start = document.getElementById("start");
+const statusLine = document.getElementById("status");
+const batch = document.createDocumentFragment();
+for (let i = 0; i < 512; ++i) {
+    const row = document.createElement("article");
+    row.textContent = "Bouchaud OS — ligne " + (i + 1);
+    batch.appendChild(row);
+}
+rows.appendChild(batch);
+requestAnimationFrame(() => requestAnimationFrame(() => {
+    statusLine.textContent = "Page prête";
+    start.disabled = false;
+    console.log("WHPX_P0_READY ms=" + performance.now().toFixed(2));
+}));
+start.addEventListener("click", () => {
+    start.disabled = true;
+    const click = performance.now();
+    const frames = [];
+    let step = 0;
+    function scroll(now) {
+        if (step === 240) {
+            // Aggregate the scene timings in one message after the animation.
+            statusLine.textContent = "Terminé";
+            console.log("WHPX_P0_SCROLL " + JSON.stringify({click, frames, end: now}));
+            return;
+        }
+        window.scrollTo(0, ++step * 52);
+        statusLine.textContent = step + "/240";
+        frames.push(now);
+        requestAnimationFrame(scroll);
+    }
+    requestAnimationFrame(scroll);
+}, {once: true});
+</script>

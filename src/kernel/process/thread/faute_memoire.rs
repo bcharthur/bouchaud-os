@@ -639,7 +639,44 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
 
     let page = adresse & !(crate::kernel::vmm::PAGE_SIZE - 1);
     let (fault_pml4, token) = {
-        let mm = processus.mm.lock();
+        let mut mm = processus.mm.lock();
+        // Zero mapping does not drop Mm for I/O. Publish the PTE while the
+        // effective VMA is still protected by the first lock acquisition.
+        if let Some(region) = crate::kernel::vma::trouve(&mm.promesses, page) {
+            if matches!(region.backing, PromesseBacking::Zero) {
+                let id = region.id;
+                let flags = region.drapeaux;
+                let outcome = if flags & crate::kernel::vmm::PTE_USER == 0 {
+                    FaultOutcome::Invalid
+                } else if mm.space.translate(page).is_some() {
+                    FaultOutcome::Resolved
+                } else {
+                    stall_pf_phase(220, page);
+                    if mm.space.map_alloc_accounted(
+                        page,
+                        crate::kernel::vmm::PAGE_SIZE,
+                        flags,
+                        crate::kernel::vmm::ResidentKind::Anonymous,
+                    ) {
+                        FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
+                        note.pose(crate::kernel::fautes::Categorie::Zero);
+                        let pml4 = mm.space.pml4();
+                        drop(mm);
+                        fault_cluster_after_zero(&processus, pml4, page, id, flags);
+                        stall_pf_phase(229, page);
+                        record_fault_outcome(FaultOutcome::Resolved);
+                        return FaultOutcome::Resolved;
+                    }
+                    FaultOutcome::IoError
+                };
+                drop(mm);
+                if outcome != FaultOutcome::Resolved {
+                    note.pose(crate::kernel::fautes::Categorie::Echec);
+                }
+                record_fault_outcome(outcome);
+                return outcome;
+            }
+        }
         let Some(token) = mapping_token(&mm.promesses, page) else {
             record_fault_outcome(FaultOutcome::Invalid);
             return FaultOutcome::Invalid;
@@ -778,28 +815,7 @@ fn peuple_page_loader(
     }
 
     match effective.backing {
-        PromesseBacking::Zero => {
-            stall_pf_phase(220, page);
-            let zero_id = effective.id;
-            let zero_flags = effective.drapeaux;
-            if !p.space.map_alloc_accounted(
-                page,
-                crate::kernel::vmm::PAGE_SIZE,
-                zero_flags,
-                crate::kernel::vmm::ResidentKind::Anonymous,
-            ) {
-                return FaultOutcome::IoError;
-            }
-            FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
-            note.pose(crate::kernel::fautes::Categorie::Zero);
-            // Le fault courant est maintenant autoritaire. L'anticipation est
-            // opportuniste et ne change jamais son resultat : elle valide le
-            // meme VMA Zero sous Mm et s'arrete au premier doute.
-            drop(p);
-            fault_cluster_after_zero(processus, fault_pml4, page, zero_id, zero_flags);
-            stall_pf_phase(229, page);
-            FaultOutcome::Resolved
-        }
+        PromesseBacking::Zero => unreachable!("zero faults are resolved under the initial Mm lock"),
         #[cfg(feature = "banc-gpu-venus")]
         PromesseBacking::GemGpu { phys_base, mapping_start, .. } => {
             let phys = phys_base + (page - mapping_start);
