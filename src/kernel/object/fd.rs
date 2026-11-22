@@ -727,6 +727,9 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
     // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
     // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
+    if path == crate::kernel::system_metrics::PROC_PATH {
+        return Some(FdKind::Instantane(Arc::new(crate::kernel::system_metrics::proc_snapshot())));
+    }
     if path == "/proc/stat" {
         return Some(FdKind::Instantane(Arc::new(proc_stat_global())));
     }

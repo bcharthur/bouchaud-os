@@ -119,6 +119,7 @@ pub mod sync;
 #[path = "syscall/legacy.rs"]
 pub mod syscall;
 pub mod sysroot;
+pub(crate) mod system_metrics;
 // BOUCHAUD_UPDATE_MECANISME_V1 : passage du chargeur, commit de sante sur META.
 pub mod update;
 #[path = "process/thread.rs"]

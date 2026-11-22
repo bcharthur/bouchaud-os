@@ -1,5 +1,10 @@
 // Periodic persistence snapshot.
 
+/// Completed synchronization timing counters, in nanoseconds.
+pub(crate) fn barrier_timing() -> (u64, u64) {
+    (TX_BARRIER_NS.load(Ordering::Relaxed), TX_BARRIER_MAX_NS.load(Ordering::Relaxed))
+}
+
 pub fn log_transaction_stats() {
     crate::serial_println!(
         "[PERSIST-TXN] calls={} snapshot_ns={} hash_ns={} io_ns={} bytes={} written={} skipped={} max_ns={}",
