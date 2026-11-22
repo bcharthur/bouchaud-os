@@ -79,6 +79,12 @@ pub fn note_trame(dessin_ns: u64, presentation_ns: u64) {
     TRAMES_BUREAU.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Number of desktop frames and upper bounds of the presentation histogram buckets.
+pub(crate) fn presentation_stats() -> (u64, [Option<u64>; 3]) {
+    let histogram = HISTO_PRESENTATION.instantane();
+    (TRAMES_BUREAU.load(Ordering::Relaxed), [50, 95, 99].map(|p| cg::centile_us(&histogram, p)))
+}
+
 fn r(rect: Rect) -> R {
     R::neuf(rect.x, rect.y, rect.largeur.min(i32::MAX as u32) as i32, rect.hauteur.min(i32::MAX as u32) as i32)
 }
