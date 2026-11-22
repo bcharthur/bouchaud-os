@@ -104,7 +104,7 @@ param(
     [ValidateSet('double', 'simple')]
     [string]$Surface = 'simple',
 
-    # Banc A/B WHPX CPU. Les deux bras utilisent le même bootimage main.
+    # Banc A/B WHPX CPU. Les deux bras utilisent le meme bootimage main.
     [string]$BenchmarkBootImage,
     [ValidatePattern('^[0-9a-fA-F]{64}$')]
     [string]$BenchmarkBootSha256,
