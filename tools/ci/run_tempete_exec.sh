@@ -183,7 +183,12 @@ else
   echec "aucun releve [PROC-STAT] avec processus_crees/detruits"
 fi
 
-memoire() { grep -aE "$1" <<<"$texte" | grep -av '+ echo' | sed -nE 's/^\[[0-9:]+\]\[ *[0-9]+%: *([0-9]+)%.*/\1/p' | sed -n "$2"; }
+memoire() {
+  grep -aE "$1" <<<"$texte" | grep -av '+ echo' | sed -nE '
+    s/^\[[0-9:]+\]\[CPU=[^ ]+ RAM=[0-9]+\/[0-9]+MiB\(([0-9]+)%\) DISK=.*/\1/p
+    s/^\[[0-9:]+\]\[ *[0-9]+%: *([0-9]+)%.*/\1/p
+  ' | sed -n "$2"
+}
 m0=$(memoire 'TEMPETE_BANC_DEBUT' 1p)
 m1=$(memoire 'TEMPETE_BANC_FIN' '$p')
 if [ -n "$m0" ] && [ -n "$m1" ]; then
