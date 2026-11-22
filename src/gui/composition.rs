@@ -71,7 +71,20 @@ static TRAMES_BUREAU: AtomicU64 = AtomicU64::new(0);
 static HISTO_DESSIN: cg::Histo = cg::Histo::neuf();
 static HISTO_PRESENTATION: cg::Histo = cg::Histo::neuf();
 
-pub fn note_trame(dessin_ns: u64, presentation_ns: u64) {
+static DERNIER_BACKEND: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn presentation_backend() -> &'static str {
+    match DERNIER_BACKEND.load(core::sync::atomic::Ordering::Relaxed) {
+        1 => "CPU",
+        2 => "VIRGL",
+        _ => "N/A",
+    }
+}
+
+pub fn note_trame(dessin_ns: u64, presentation_ns: u64, backend_virgl: Option<bool>) {
+    DERNIER_BACKEND.store(backend_virgl.map_or(0, |virgl| if virgl { 2 } else { 1 }),
+        core::sync::atomic::Ordering::Relaxed);
     HISTO_DESSIN.note(dessin_ns);
     HISTO_PRESENTATION.note(presentation_ns);
     NS_DESSIN.fetch_add(dessin_ns, Ordering::Relaxed);
