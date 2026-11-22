@@ -99,3 +99,46 @@ de scroll. Le rectangle publié doit exclure le chrome stable. Examiner aussi
 le premier affichage, le changement de taille, le changement d’onglet et le
 double tampon dans des essais visuels distincts. Pour la latence visible,
 utiliser une capture hôte horodatée. Les callbacks restent une mesure côté page.
+
+## Orchestration des trois paires
+
+Utiliser deux checkouts jetables sans `ladybird-browser.img`, un préfixe de
+sortie neuf avec assez d'espace pour six images, et le serveur HTTP ci-dessus
+depuis la tête contenant le banc. Laisser la fixture démarrer seule, garder le
+même mode d'affichage et quitter la VM après « Terminé ». Le passage suivant
+attend la sortie de QEMU. Réserver la navigation manuelle et le
+redimensionnement aux passages visuels pour préserver la mesure du scroll.
+
+```powershell
+$main = '621a84a8b44061f891e372c70b6fe2531819a6b8'
+$candidate = (git rev-parse HEAD).Trim() # Depuis le checkout #366 qualifie
+.\tools\windows\Banc-BrowserHost-WHPX.ps1 -ReferenceCheckout C:\ab\main -CandidateCheckout C:\ab\p366 -ReferenceSha $main -CandidateSha $candidate -BootImage C:\ab\boot-main.bin -OutputDirectory C:\ab\p366-campagne
+py tools/windows/analyse-whpx-browserhost.py --campaign C:\ab\p366-campagne
+```
+
+Le banc impose le bootimage du premier couple, un lanceur commun, les deux
+producteurs épinglés et WHPX strict. Le lanceur vérifie la provenance de
+l'artefact avant démarrage. La fixture servie et le binaire QEMU sont hachés
+entre essais. Le lanceur crée un disque neuf à chaque passage, avec une zone
+de persistance initialement nulle. La partie du disque qui contient le
+navigateur diffère entre bras. Les journaux, les manifestes et les disques
+après arrêt sont archivés par passage.
+
+L'analyseur utilise les horloges monotones invitées entre les marqueurs
+`WHPX_P0_BEGIN` et `WHPX_P0_SCROLL`, rejette les traces BrowserHost
+discontinues et donne les écarts B/A paire par paire, leur médiane, leur
+étendue et leur écart absolu médian. Les percentiles sont interpolés sur
+les échantillons triés. Ce protocole borne les **publications BrowserHost**
+par la phase du script. Il ne relie pas chaque mise à jour au balayage de
+l'écran. L'option `--historical-log` estime le début à partir de la durée
+JavaScript quand l'ancien journal est dépourvu de marqueur.
+
+Pour la recette visuelle, capturer l'affichage hôte à fréquence fixe pour
+chaque bras. Contrôler le premier affichage et le chrome juste avant le
+scroll, le déplacement des lignes et le compteur pendant le scroll, le
+chrome et le compteur après « Terminé », puis refaire la navigation et
+redimensionner la fenêtre en largeur et en hauteur. Comparer les états
+aux mêmes étapes de la fixture et conserver toute séquence présentant un
+rectangle vide, un fragment périmé ou une image corrompue. Mesurer les
+images distinctes et les pauses visibles dans la capture, indépendamment
+des intervalles rAF et des événements BrowserHost.
