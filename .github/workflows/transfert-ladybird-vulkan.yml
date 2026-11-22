@@ -16,21 +16,21 @@ jobs:
         run: |
           set -euo pipefail
           depot="$GITHUB_REPOSITORY"
-          run=44929331523
+          run=44936591441
           for tentative in $(seq 1 210); do
             etat=$(gh api "repos/$depot/actions/runs/$run")
-            jq -e '.head_sha == "e5637f69fc93a04f0af4896ac2f0b17dbe1311d9"' <<< "$etat" >/dev/null
+            jq -e '.head_sha == "65c1ea69a903ec8fcded0a1b287f84dd883ebc85"' <<< "$etat" >/dev/null
             if [[ $(jq -r .status <<< "$etat") == completed ]]; then break; fi
             sleep 30
           done
           jq -e '.status == "completed" and .conclusion == "success"' <<< "$etat" >/dev/null
           artefact=$(gh api "repos/$depot/actions/runs/$run/artifacts" | jq -cer '
-            [.artifacts[] | select(.name == "bouchaud-ladybird-vulkan-59bb1eac39ed3c3212b070ad0eed4a9b8eb15c33fb9dc1a48565df582847e56a" and .expired == false)]
+            [.artifacts[] | select(.name == "bouchaud-ladybird-vulkan-8f1fbc01ee44a690493b3ab4835ef6cb2f3e97edc15eecea1ca21a9d08adc848" and .expired == false)]
             | if length == 1 then .[0] else error("archive Vulkan non unique ou absente") end')
           aid=$(jq -r .id <<< "$artefact")
-          test "$aid" = 14719739830
+          test "$aid" = 14723129135
           digest=$(jq -er '.digest | sub("^sha256:"; "") | select(test("^[0-9a-f]{64}$"))' <<< "$artefact")
-          test "$digest" = 27b9c3d31e1930fe148cdadb58a9000db94eab90e4e7d915b31f215c81638e60
+          test "$digest" = a99aebe79d73807c4e549d88d34e0723052c00991690ecf0db2ae202738e68eb
           gh api "repos/$depot/actions/artifacts/$aid/zip" > ladybird.zip
           echo "$digest  ladybird.zip" | tee "$RUNNER_TEMP/ladybird.sha256" | sha256sum -c
           octets=$(stat -c %s ladybird.zip)
