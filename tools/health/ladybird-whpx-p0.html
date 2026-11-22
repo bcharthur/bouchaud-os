@@ -15,6 +15,7 @@
 const options = new URLSearchParams(location.search);
 const profileCallbacks = options.get("phases") === "1";
 const scrollOnly = options.get("scroll-only") === "1";
+const autoStart = options.get("auto-start") === "1";
 const rows = document.getElementById("rows");
 const start = document.getElementById("start");
 const statusLine = document.getElementById("status");
@@ -29,6 +30,8 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
     statusLine.textContent = "Page prête";
     start.disabled = false;
     console.log("WHPX_P0_READY ms=" + performance.now().toFixed(2));
+    if (autoStart)
+        setTimeout(() => start.click(), 10000);
 }));
 start.addEventListener("click", () => {
     start.disabled = true;
