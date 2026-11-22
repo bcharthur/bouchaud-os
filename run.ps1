@@ -136,6 +136,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($Performance -and ($PSBoundParameters.ContainsKey('BenchmarkBootImage') -or $PSBoundParameters.ContainsKey('BenchmarkBootSha256'))) {
+    throw 'Performance incompatible avec -BenchmarkBootImage et -BenchmarkBootSha256. Le banc A/B exige -Accel whpx sans repli TCG.'
+}
+
 $RepoRoot = $PSScriptRoot
 # BOUCHAUD_WHPX_CPU_V1 : modele CPU par accelerateur, lancement journalise,
 # verdict lu dans les journaux (tools\windows\BouchaudQemu.psm1).
