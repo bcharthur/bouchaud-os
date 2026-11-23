@@ -52,25 +52,113 @@ def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
 
-def disk_state(path):
-    with path.open("rb") as disk:
-        disk.seek(-128 * MIB, os.SEEK_END)
-        for _ in range(128):
-            if disk.read(MIB).strip(b"\0"):
-                raise ValueError("Zone persistante initiale non vide")
+SYSTEM_OVERRIDES = {
+    "usr/share/ladybird/fontconfig/fonts.conf",
+    "usr/share/ladybird/bouchaud-start.html",
+}
+BROWSER_DIRS = ("usr/libexec/ladybird", "usr/share/ladybird")
+
+
+def is_browser_payload(name):
+    return name == "bo-navigateur" or (
+        name not in SYSTEM_OVERRIDES
+        and any(name.startswith(directory + "/") for directory in BROWSER_DIRS)
+        and name != "usr/share/ladybird/fontconfig"
+    )
+
+
+def inventory(path):
     entries = {}
+    size = path.stat().st_size
+    if size <= 128 * MIB or size % 512:
+        raise ValueError("Taille du disque invalide")
+    offset = size - 128 * MIB
+    persistence = hashlib.sha256()
+    nonzero = False
+    with path.open("rb") as disk:
+        disk.seek(offset)
+        for _ in range(128):
+            block = disk.read(MIB)
+            nonzero |= bool(block.strip(b"\0"))
+            persistence.update(block)
     with tarfile.open(path, "r:") as archive:
         for entry in archive:
             name = entry.name.removeprefix("./")
-            if name in ("bo-navigateur", "usr/libexec/ladybird", "usr/share/ladybird"):
-                continue
-            if name.startswith(("usr/libexec/ladybird/", "usr/share/ladybird/")):
-                continue
             if name in entries:
                 raise ValueError(f"Entree disque dupliquee : {name}")
-            content = digest(archive.extractfile(entry)) if entry.isfile() else entry.linkname
-            entries[name] = (entry.type.hex(), entry.mode, entry.uid, entry.gid, content)
-    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+            if entry.offset_data + entry.size > offset:
+                raise ValueError(f"Entree TAR dans la zone persistante : {name}")
+            with_payload = None
+            if entry.isfile():
+                with archive.extractfile(entry) as data:
+                    with_payload = digest(data)
+            entries[name] = dict(
+                sha256=with_payload, mode=oct(entry.mode), uid=entry.uid, gid=entry.gid,
+                uname=entry.uname, gname=entry.gname, type=entry.type.hex(),
+                linkname=entry.linkname, mtime=entry.mtime, size=entry.size,
+                devmajor=entry.devmajor, devminor=entry.devminor, pax_headers=entry.pax_headers,
+            )
+    return dict(entries=entries, persistence=dict(offset=offset, size=128 * MIB,
+                sha256=persistence.hexdigest(), zero=not nonzero))
+
+
+def disk_state(state):
+    # USTAR mtime is assigned by host file creation/copy. The guest TAR
+    # loader does not use it. All other metadata and file bytes are checked.
+    system = {name: {k: v for k, v in entry.items() if k != "mtime"}
+              for name, entry in state["entries"].items() if not is_browser_payload(name)}
+    return hashlib.sha256(json.dumps(system, sort_keys=True).encode()).hexdigest()
+
+
+def diff_disks(reference, candidate):
+    a, b = reference["entries"], candidate["entries"]
+    only_a = {name: a[name] for name in sorted(a.keys() - b.keys())}
+    only_b = {name: b[name] for name in sorted(b.keys() - a.keys())}
+    changes = {}
+    for name in sorted(a.keys() & b.keys()):
+        fields = {key: {"A": value, "B": b[name][key]} for key, value in a[name].items()
+                  if value != b[name][key]}
+        if fields:
+            changes[name] = fields
+    rejected = disk_state(reference) != disk_state(candidate)
+    return dict(
+        only_reference=only_a, only_current=only_b, changed=changes,
+        browser_payload_changes=sorted(name for name in only_a.keys() | only_b.keys() | changes.keys()
+                                       if is_browser_payload(name)),
+        normalized_metadata=["mtime"],
+        persistence={"reference": reference["persistence"], "current": candidate["persistence"]},
+        accepted=not rejected and reference["persistence"]["zero"] and candidate["persistence"]["zero"],
+    )
+
+
+def check_disk(disk, trial, invariants):
+    state = inventory(disk)
+    reference = invariants.setdefault("reference_disk", state)
+    save(trial / "disk-inventory.json", state)
+    report = diff_disks(reference, state)
+    save(trial / "disk-diff.json", report)
+    if not state["persistence"]["zero"]:
+        raise ValueError("Zone persistante initiale non vide (voir disk-diff.json)")
+    if not report["accepted"]:
+        names = set(report["only_reference"]) | set(report["only_current"])
+        names.update(name for name, fields in report["changed"].items() if fields.keys() != {"mtime"})
+        differences = sorted(name for name in names if not is_browser_payload(name))
+        raise ValueError("Etat initial du disque different hors charge Ladybird : "
+                         + ", ".join(differences[:10]) + " (voir disk-diff.json)")
+    return disk_state(state)
+
+
+def archive_trial(logdir, old_logs, trial, disk, passed, old_qemu_logs=()):
+    new_logs = set(logdir.glob("*-serie.log")) - old_logs
+    for log in new_logs:
+        shutil.copyfile(log, trial / ("serial.log" if len(new_logs) == 1 else log.name))
+    for log in set(logdir.glob("*-qemu.log")) - set(old_qemu_logs):
+        shutil.copyfile(log, trial / log.name)
+    if disk.exists():
+        if passed:
+            disk.unlink()
+        else:
+            shutil.move(str(disk), trial / "disk-interrompu.img")
 
 
 @contextmanager
@@ -163,9 +251,10 @@ def completed(logdir, old_logs):
     return None
 
 
-def run_trial(root, trial, powershell, evidence, boot, run, invariants):
+def run_trial(root, trial, powershell, evidence, boot, run, invariants, ca_bundle):
     logdir = root / "target/journaux-qemu"
     old_logs = set(logdir.glob("*-serie.log"))
+    old_qemu_logs = set(logdir.glob("*-qemu.log"))
     disk = root / "ladybird-browser.img"
     if disk.exists():
         raise ValueError(f"Disque deja present : {disk}")
@@ -175,13 +264,16 @@ def run_trial(root, trial, powershell, evidence, boot, run, invariants):
     args = [
         str(powershell), "-NoProfile", "-File", str(root / "run-whpx-ab.ps1"),
         "-BenchmarkBootImage", str(boot), "-BenchmarkBootSha256", evidence["boot_sha256"],
+        "-BenchmarkCaBundle", str(ca_bundle), "-BenchmarkCaSha256", evidence["ca_sha256"],
         "-BenchmarkMonitorPort", str(port), "-Accel", "whpx", "-WhpxIrqchip", "off",
         "-CpuCount", "1", "-RamMiB", "8192", "-Surface", "simple", "-Audio", "none",
         "-LadybirdRunId", str(run), "-Gate0Autostart", "-LadybirdUrl", evidence["url"],
     ]
+    save(trial / "inputs.json", evidence)
     with (trial / "launcher.log").open("wb") as output:
         process = subprocess.Popen(args, cwd=root, stdin=subprocess.DEVNULL,
                                    stdout=output, stderr=subprocess.STDOUT)
+        passed = False
         try:
             with wait_for(process, 1200, lambda: connect(port)) as connection:
                 connection.settimeout(10)
@@ -193,9 +285,6 @@ def run_trial(root, trial, powershell, evidence, boot, run, invariants):
                         raise ValueError("QMP ne correspond pas au lanceur")
                     if command(wire, "query-status")["status"] != "prelaunch":
                         raise ValueError("QEMU a demarre avant verification du disque")
-                    state = disk_state(disk)
-                    if state != invariants.setdefault("disk_state_sha256", state):
-                        raise ValueError("Etat initial du disque different hors charge Ladybird")
                     browser = root / "native-browser-m9"
                     manifest = browser / "BOUCHAUD_ARTIFACT_MANIFEST.json"
                     shutil.copyfile(manifest, trial / manifest.name)
@@ -205,7 +294,12 @@ def run_trial(root, trial, powershell, evidence, boot, run, invariants):
                     )}
                     if hashes != invariants.setdefault(root, hashes):
                         raise ValueError("Artefact different entre essais du meme bras")
-                    evidence.update(hashes, disk_state_sha256=state, disk_sha256=sha256(disk))
+                    evidence.update(hashes, disk_sha256=sha256(disk))
+                    save(trial / "inputs.json", evidence)
+                    evidence["disk_state_sha256"] = check_disk(disk, trial, invariants)
+                    packed_ca = invariants["reference_disk"]["entries"].get("etc/ssl/certs/ca-certificates.crt")
+                    if packed_ca is None or packed_ca["sha256"] != evidence["ca_sha256"]:
+                        raise ValueError("Bundle CA commun absent du disque ou different")
                     command(wire, "cont")
                     log = wait_for(process, 180, lambda: completed(logdir, old_logs))
                     # QEMU can close the socket before replying to quit.
@@ -224,19 +318,18 @@ def run_trial(root, trial, powershell, evidence, boot, run, invariants):
             if sha256(boot) != evidence["boot_sha256"] or sha256(disk) != evidence["disk_sha256"]:
                 raise ValueError("Image source modifiee en mode snapshot")
             save(trial / "evidence.json", evidence)
+            passed = True
+        except (Exception, KeyboardInterrupt) as exc:
+            save(trial / "interruption.json", {"error": str(exc)})
+            raise
         finally:
-            if process.poll() is None:
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                               stdout=output, stderr=output, check=False)
-                process.wait(timeout=15)
-            new_logs = set(logdir.glob("*-serie.log")) - old_logs
-            for log in new_logs:
-                shutil.copyfile(log, trial / ("serial.log" if len(new_logs) == 1 else log.name))
-                qemu_log = log.with_name(log.name.replace("-serie.log", "-qemu.log"))
-                if qemu_log.is_file():
-                    shutil.copyfile(qemu_log, trial / qemu_log.name)
-            if disk.exists():
-                disk.unlink()
+            try:
+                if process.poll() is None:
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=output, stderr=output, check=False)
+                    process.wait(timeout=15)
+            finally:
+                archive_trial(logdir, old_logs, trial, disk, passed, old_qemu_logs)
 
 
 def campaign(args):
@@ -290,6 +383,15 @@ def campaign(args):
                 shutil.copyfile(root / BOOT, boot)
                 boots[arm] = boot, sha256(boot)
             shutil.copyfile(launcher, root / "run-whpx-ab.ps1")
+        # Build the Windows trust bundle once, with the pinned reference
+        # generator. Keep the exact bytes (including comments) for both arms.
+        ca_bundle = output / "ca-bundle.pem"
+        with (output / "ca-build.log").open("wb") as log:
+            subprocess.run([str(ps), "-NoProfile", "-File",
+                            str(roots["A"] / "tools/ladybird/certs/fabrique-bundle.ps1"),
+                            "-Sortie", str(ca_bundle)], stdout=log, stderr=subprocess.STDOUT,
+                           check=True, timeout=300)
+        common["ca_sha256"] = sha256(ca_bundle)
         with serve(fixture, output / "http.log") as port:
             for index, arm in enumerate(ANALYSIS.ORDER, 1):
                 print(f"Passage {index}/6 ({arm}, {args.mode})", flush=True)
@@ -310,7 +412,7 @@ def campaign(args):
                                 boot_commit=HEADS[kernel], boot_sha256=boot_hash,
                                 url=f"http://10.0.2.2:{port}{QUERY}")
                 run_trial(root, trial, ps, evidence, boot,
-                          0 if root in invariants else runs[arm], invariants)
+                          0 if root in invariants else runs[arm], invariants, ca_bundle)
         save(output / "rapport.json", ANALYSIS.campaign(output))
         print(f"Rapport : {output / 'rapport.json'}", flush=True)
     finally:
@@ -330,5 +432,5 @@ if __name__ == "__main__":
     parser.add_argument("--candidate-run", type=int, required=True)
     try:
         campaign(parser.parse_args())
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as exc:
         parser.exit(1, f"Campagne WHPX non qualifiable : {exc}\n")

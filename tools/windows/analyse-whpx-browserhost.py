@@ -119,6 +119,8 @@ def campaign(directory):
     per_arm = ARM
     if mode != "Legacy":
         common += ("disk_state_sha256",)
+        if any("ca_sha256" in info for _, info, _ in trials):
+            common += ("ca_sha256",)
         if len({tuple(result["viewport"]) for _, _, result in trials}) != 1:
             raise ValueError("campaign: different scroll dimensions")
         reference = trials[0][1]["checkout"]

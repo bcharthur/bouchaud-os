@@ -110,6 +110,9 @@ param(
     [string]$BenchmarkBootSha256,
     [ValidateRange(1024, 65535)]
     [int]$BenchmarkMonitorPort,
+    [string]$BenchmarkCaBundle,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$BenchmarkCaSha256,
 
     # BOUCHAUD_PERF_V1 -- journalisation de DIAGNOSTIC (profil RIP par tic,
     # releves periodiques complets). Sans ce commutateur, la session
@@ -409,8 +412,16 @@ $qemuArgs = @(
 )
 
 
+if ($BenchmarkCaBundle -or $BenchmarkCaSha256) {
+    if (-not $BenchmarkMonitorPort -or -not $BenchmarkCaBundle -or -not $BenchmarkCaSha256) {
+        Fail 'Le bundle CA commun exige le mode banc et son SHA-256.'
+    }
+    if ((Get-FileHash -LiteralPath $BenchmarkCaBundle -Algorithm SHA256).Hash -ne $BenchmarkCaSha256) {
+        Fail 'SHA-256 du bundle CA commun incorrect.'
+    }
+}
 if ($BenchmarkMonitorPort) {
-    if (-not $BenchmarkBootImage -or -not $Gate0Autostart -or $Gate0SerialPort -or $Performance) {
+    if (-not $BenchmarkCaBundle -or -not $BenchmarkBootImage -or -not $Gate0Autostart -or $Gate0SerialPort -or $Performance) {
         Fail 'Le moniteur de banc exige le bootimage epingle, Gate0Autostart et le journal serie fichier.'
     }
     $qemuArgs += @('-S', '-name', "bouchaud-whpx-$BenchmarkMonitorPort", '-qmp',
@@ -842,7 +853,10 @@ if ($LadybirdMode) {
         # BOUCHAUD_CA_COMPLET_V2 : appele a CHAQUE lancement -- le script rend
         # la main aussitot si le bundle est a jour, et reconstruit un bundle de
         # l'ancien schema (magasin local seul, incomplet : `verify=20`).
-        if ($true) {
+        if ($BenchmarkMonitorPort) {
+            $PublicCABundle = $BenchmarkCaBundle
+        }
+        else {
             $Fabrique = Join-Path `
                 $RepoRoot `
                 "tools\ladybird\certs\fabrique-bundle.ps1"

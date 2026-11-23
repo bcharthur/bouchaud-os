@@ -36,6 +36,14 @@ artefact expire, fournir un run compatible avec `-ReferenceRunId` ou
 le banc réutilise le cache et rejette toute différence de manifeste ou
 de SHA BrowserHost/WebContent à l'intérieur du bras.
 
+Le banc génère une fois le magasin CA avec le générateur du checkout
+de référence et archive `ca-bundle.pem` et `ca-build.log`. Les deux bras
+installent exactement ce fichier et vérifient son SHA-256. L'ancien banc
+générait le magasin séparément dans les deux worktrees. Même à certificats
+identiques, le commentaire horodaté changeait les octets du fichier invité
+`etc/ssl/certs/ca-certificates.crt`. Ce fichier reste soumis à la comparaison
+intégrale.
+
 QEMU attend la validation de son disque en pré-démarrage. Chaque passage
 repart d'une image neuve avec zone de persistance nulle. Le contenu logique
 du disque hors charge Ladybird doit être identique. Le disque complet est
@@ -44,6 +52,12 @@ Ne pas interagir avec la fenêtre pendant ces mesures. Le moniteur arrête la
 VM après réception des marqueurs. Le banc contrôle le code de sortie, le
 SHA du noyau, la signature WHPX, le viewport, les 240 callbacks et la suite
 continue des publications. Une session incomplète interrompt la campagne.
+Chaque passage inspecté produit `disk-inventory.json` et `disk-diff.json`
+par rapport au premier passage A. Le diff liste les entrées exclusives, les
+champs TAR modifiés et le SHA-256 de la zone persistante. Le champ `mtime`
+est journalisé et neutralisé dans la comparaison, car le lecteur TAR invité
+ne l'utilise pas. Le dossier de tout passage rejeté conserve les journaux
+disponibles et `disk-interrompu.img` si l'image a été créée.
 
 Les répertoires de passage contiennent les journaux du lanceur, de QEMU et
 du port série, ainsi que le manifeste d'artefact et les empreintes des
