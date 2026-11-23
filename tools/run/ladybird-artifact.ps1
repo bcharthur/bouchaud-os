@@ -127,7 +127,10 @@ function Use-BoLadybirdArtifact {
     $runs = @(Get-BoCompatibleRuns -Root $RepoRoot -Fingerprint $current -ArtifactName $ArtifactName -ExplicitRunId $RunId)
     if ($runs.Count -eq 0) {
         if ($goodCache -and $RunId -eq 0) { Write-Host 'Ladybird : cache verifie conserve' -ForegroundColor Yellow; return }
-        throw 'Ladybird : aucun artefact de compilation compatible et non expire disponible'
+        if ($RunId -gt 0) {
+            throw ('Ladybird : run {0} sans artefact admissible pour la recette {1}. Consulter le producteur et passer son identifiant apres publication.' -f $RunId,$current)
+        }
+        throw ('Ladybird : aucun artefact de compilation compatible et non expire pour la recette {0}. Attendre le workflow Ladybird de cette recette.' -f $current)
     }
     $suffix = [guid]::NewGuid().ToString('N')
     $stage = $TargetDir + '.download-' + $suffix
