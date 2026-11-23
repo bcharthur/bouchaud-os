@@ -148,6 +148,8 @@ impl Drop for GardeControleur {
 /// Secteurs transferes entre deux points de preemption : 16 Kio, quelques
 /// millisecondes de PIO sous TCG.
 const SECTEURS_PAR_POINT_SUR: usize = 32;
+/// Verifie les demandes de preemption sans payer ce cout a chaque lecture PIO.
+const SONDAGES_PAR_POINT_SUR: u64 = 1024;
 
 /// BOUCHAUD_ATA_POINT_SUR_V1
 ///
@@ -283,7 +285,7 @@ fn wait_not_busy() -> bool {
         tours += 1;
         // L'attente de fin de commande -- surtout `FLUSH CACHE` -- peut durer :
         // elle ne doit pas monopoliser le coeur (voir `point_sur`).
-        if tours % 1024 == 0 {
+        if tours % SONDAGES_PAR_POINT_SUR == 0 {
             point_sur();
         }
         if tours > TOURS_MAX {
@@ -323,6 +325,11 @@ fn wait_data_ready() -> bool {
         }
         if crate::kernel::timer::ticks().wrapping_sub(debut) > limite {
             return false;
+        }
+        // DRQ peut tarder entre deux secteurs d'un meme lot. Donner au
+        // noyau les memes points surs que pendant une attente BSY.
+        if tours % SONDAGES_PAR_POINT_SUR == 0 {
+            point_sur();
         }
     }
 }
