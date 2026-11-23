@@ -80,6 +80,7 @@ PY_C22_NATIVE_GUARD
 # (layout, paintables...) rendent leurs pages videes apres chaque balayage GC.
 python3 tools/ladybird/prepare-c22-partitions.py "$SRC"
 python3 tools/ladybird/prepare-gc-retention-proof.py "$SRC"
+python3 tools/ladybird/prepare-parser-resume-after-gc.py "$SRC"
 python3 tools/ladybird/prepare-cache-journal.py "$SRC"
 # BOUCHAUD_LIBJS_VALEUR_DIAGNOSTIC_V1 : l'assertion Value.cpp:484 nomme la
 # famille de la valeur (vide / accesseur / inconnue) AVANT de se declencher.
