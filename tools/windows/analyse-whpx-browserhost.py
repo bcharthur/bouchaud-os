@@ -12,8 +12,12 @@ from statistics import median, quantiles
 JS = re.compile(r'(\d+\.\d+) WebContent\((\d+)\): \(js log\) "WHPX_P0_(BEGIN|SCROLL|CALLBACK)\b')
 FRAME = re.compile(
     r"\[LB:FRAME\] onglet=(\d+) seq=(\d+) t=(\d+) .*?"
-    r"publie=(-?\d+),(-?\d+) (\d+)x(\d+) copie_px=(\d+) complet=([01]) present_us=(\d+)"
+    r"vue=(\d+)x(\d+) publie=(-?\d+),(-?\d+) (\d+)x(\d+) copie_px=(\d+) complet=([01]) present_us=(\d+)"
 )
+
+
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def stats(values):
@@ -26,7 +30,7 @@ def stats(values):
 
 def analyse(path, historical=False):
     raw = path.read_text(encoding="utf-8-sig", errors="replace")
-    log = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    log = strip_ansi(raw)
     markers = {}
     for line in log.splitlines():
         match = JS.search(line)
@@ -58,13 +62,17 @@ def analyse(path, historical=False):
     if (len(frames) < 2 or len({frame[0] for frame in frames}) != 1
             or sequences != list(range(sequences[0], sequences[-1] + 1))):
         raise ValueError(f"{path}: incomplete, duplicate, or multi-tab BrowserHost trace")
+    views = {frame[3:5] for frame in frames}
+    if len(views) != 1 or not all(next(iter(views))):
+        raise ValueError(f"{path}: viewport changed or empty during scroll")
     raf_intervals = [b - a for a, b in zip(raf, raf[1:])]
     complete = sum(frame[-2] for frame in frames)
-    rects = Counter(f"{x},{y} {w}x{h}" for _, _, _, x, y, w, h, _, _, _ in frames)
+    rects = Counter(f"{x},{y} {w}x{h}" for _, _, _, _, _, x, y, w, h, _, _, _ in frames)
     return {
         "phase": "guest-marker-window" if "BEGIN" in markers else "estimated-from-scroll-duration",
         "guest_window_ms": [start, stop],
         "scroll_ms": duration,
+        "viewport": list(next(iter(views))),
         "callbacks_per_s": len(raf) * 1000 / duration,
         "raf_ms": stats(raf_intervals),
         "raf_intervals_ge_35ms": sum(value >= 35 for value in raf_intervals),
@@ -75,7 +83,7 @@ def analyse(path, historical=False):
         "browserhost_complete_pct": 100 * complete / len(frames),
         "present_us": stats([f[-1] for f in frames]),
         "published_rects": dict(rects),
-        "published_pixels": sum(f[5] * f[6] for f in frames),
+        "published_pixels": sum(f[7] * f[8] for f in frames),
         "copied_pixels": sum(f[-3] for f in frames),
         "browserhost_seq": [sequences[0], sequences[-1]],
     }
@@ -103,7 +111,25 @@ def campaign(directory):
         if info["arm"] != arm:
             raise ValueError(f"{trial}: invalid arm")
         trials.append((arm, info, analyse(trial / "serial.log")))
-    for keys, subset in [(COMMON, trials), *[(ARM, [t for t in trials if t[0] == arm]) for arm in "AB"]]:
+    modes = {info.get("mode", "Legacy") for _, info, _ in trials}
+    if len(modes) != 1 or not modes <= {"Legacy", "CommonKernel", "FullStack"}:
+        raise ValueError("campaign: invalid or mixed modes")
+    mode = modes.pop()
+    common = COMMON
+    per_arm = ARM
+    if mode != "Legacy":
+        common += ("disk_state_sha256",)
+        if len({tuple(result["viewport"]) for _, _, result in trials}) != 1:
+            raise ValueError("campaign: different scroll dimensions")
+        reference = trials[0][1]["checkout"]
+        for _, info, _ in trials:
+            expected = reference if mode == "CommonKernel" else info["checkout"]
+            if info["boot_commit"] != expected:
+                raise ValueError("campaign: unexpected kernel for mode")
+    if mode == "FullStack":
+        common = tuple(key for key in common if key != "boot_sha256")
+        per_arm += ("boot_sha256",)
+    for keys, subset in [(common, trials), *[(per_arm, [t for t in trials if t[0] == arm]) for arm in "AB"]]:
         if any(len({t[1][key] for t in subset}) != 1 for key in keys):
             raise ValueError(f"campaign: inconsistent evidence for {', '.join(keys)}")
     if trials[0][1]["browserhost_sha256"] == trials[1][1]["browserhost_sha256"]:
@@ -121,7 +147,9 @@ def campaign(directory):
             mid = median(values)
             dispersion[key] = dict(median=mid, min=min(values), max=max(values),
                                    mad=median(abs(v - mid) for v in values))
-    return {"trials": [{"arm": arm, "metrics": result} for arm, _, result in trials],
+    return {"mode": mode,
+            "trials": [{"arm": arm, "evidence": info, "metrics": result}
+                       for arm, info, result in trials],
             "paired_candidate_relative_pct": deltas, "paired_dispersion_pct": dispersion}
 
 

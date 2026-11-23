@@ -1,144 +1,70 @@
-# Validation WHPX du rendu Ladybird
+# Validation WHPX de #366
 
-Le bras de référence utilise `621a84a8b44061f891e372c70b6fe2531819a6b8`.
-Le bras de rendu utilise la tête de #366 à qualifier. Les deux arbres ont
-le même traitement des fautes anonymes. La branche de qualification mémoire
-`codex/p0-fautes-anonymes-20261122` se mesure dans une autre campagne.
+Le banc compare main `c856ece9aaced8167aa8c783276ca3a5da7222a4` et #366
+`218a556c733d412b30fc11c9ad0384e824edecf3` sur Windows PowerShell 5.1.
+Il exige Python 3.9+, Git, GitHub CLI authentifiée, Cargo avec bootimage
+et QEMU WHPX à son emplacement habituel sous Program Files. Fermer les
+VM QEMU avant la campagne et garder les mêmes réglages d'affichage hôte.
 
-## Entrées
-
-Dans le checkout #366, garder le serveur suivant ouvert pendant toute la campagne.
-
-```powershell
-py -m http.server 18082 --bind 127.0.0.1 --directory tools/health
-```
-
-Depuis chaque checkout, confirmer le SHA de la tête et le comparer au SHA
-prévu pour le bras. Passer le run producteur du **bras courant**.
-`45009297744` est le run de référence. Le producteur initial du correctif de
-rendu est `45044774669`. Attendre la publication et l’état success avant
-l’essai. Recalculer l’empreinte si le code Ladybird change.
+Depuis le checkout du banc, indiquer les deux checkouts sources existants.
+Le banc lit leurs SHA et crée des worktrees temporaires à part. Il construit
+les bootimages, démarre son propre serveur HTTP local sur un port libre,
+puis enchaîne A/B/B/A/A/B. Chaque campagne exige un dossier de sortie neuf.
 
 ```powershell
-git rev-parse HEAD
-git status --short --untracked-files=no
-py tools/ci/ladybird_empreinte.py calcule
-$repo = 'bcharthur/bouchaud-os'
-# Passer l'identifiant du producteur du bras courant.
-$run = 45044774669
-gh run view $run -R $repo --json status,conclusion,headSha,url
-gh api "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | [.name,.expired,.digest] | @tsv'
-```
-
-Un checkout modifié, un producteur sans artefact disponible, un manifeste
-incompatible ou l'absence de journal WHPX rend l’essai non qualifiable.
-`run.ps1 -LadybirdRunId` impose la provenance de la recette et contrôle les
-empreintes des binaires du manifeste avant de démarrer QEMU. Conserver ce
-manifeste ainsi que la sortie du lanceur avec la preuve.
-
-## Bootimage main commun
-
-Construire une seule fois depuis le checkout main propre. Garder une copie
-source et la même empreinte pour toute la campagne.
-
-```powershell
-if ((git rev-parse HEAD).Trim() -ne '621a84a8b44061f891e372c70b6fe2531819a6b8') {
-  throw 'Le bootimage de référence doit être construit depuis main 621a84a8.'
+$projects = Join-Path $env:USERPROFILE 'RustroverProjects'
+$options = @{
+    ReferenceCheckout = Join-Path $projects 'bouchaud-os'
+    CandidateCheckout = Join-Path $projects 'bouchaud-os-p366'
 }
-.\tools\run\cargo-bootimage-safe.cmd
-if ($LASTEXITCODE -ne 0) { throw 'Échec du build du noyau main.' }
-$boot = Join-Path $env:TEMP 'bouchaud-main-621a84a8.bin'
-Copy-Item target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin $boot
-$bootHash = (Get-FileHash $boot -Algorithm SHA256).Hash
-$bootHash
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+.\tools\windows\Banc-BrowserHost-WHPX.ps1 @options -Mode CommonKernel `
+    -OutputDirectory (Join-Path $projects "whpx-366-commun-$stamp")
+.\tools\windows\Banc-BrowserHost-WHPX.ps1 @options -Mode FullStack `
+    -OutputDirectory (Join-Path $projects "whpx-366-complet-$stamp")
 ```
 
-Copier le `run.ps1` de #366 sous le nom `run-whpx-ab.ps1` à la racine
-des deux checkouts. Le script cherche les outils dans son propre dossier.
-Ainsi chaque bras vérifie son artefact contre le vrai HEAD de son checkout.
-Utiliser le même `$boot` et `$bootHash` pour les deux bras.
+- **CommonKernel** utilise le bootimage main dans les deux bras. Il compare
+  les artefacts Ladybird à noyau identique.
+- **FullStack** utilise le bootimage propre à chaque SHA. Il qualifie le
+  candidat complet, y compris le correctif noyau, avec le même scénario.
 
-## Campagne
+Le lanceur vérifie la recette et les SHA du manifeste Ladybird. Les runs
+par défaut sont `45009297744` pour A et `45044774669` pour B. Si un
+artefact expire, fournir un run compatible avec `-ReferenceRunId` ou
+`-CandidateRunId`. Une fois le premier artefact vérifié pour chaque bras,
+le banc réutilise le cache et rejette toute différence de manifeste ou
+de SHA BrowserHost/WebContent à l'intérieur du bras.
 
-Préparer le même état de disque initial dans chaque checkout et le restaurer
-avant chaque passage. Garder QEMU, l’hôte, la résolution et le profil CPU
-constants. Faire trois paires A/B, B/A, A/B avec la même URL. Dans une
-campagne distincte, ajouter `&scroll-only=1` au bras D et garder l’artefact
-et le noyau constants. Le démarrage automatique attend 10 s après *Page prête*.
+QEMU attend la validation de son disque en pré-démarrage. Chaque passage
+repart d'une image neuve avec zone de persistance nulle. Le contenu logique
+du disque hors charge Ladybird doit être identique. Le disque complet est
+haché par passage, et son image de base reste inchangée grâce au snapshot.
+Ne pas interagir avec la fenêtre pendant ces mesures. Le moniteur arrête la
+VM après réception des marqueurs. Le banc contrôle le code de sortie, le
+SHA du noyau, la signature WHPX, le viewport, les 240 callbacks et la suite
+continue des publications. Une session incomplète interrompt la campagne.
 
-```powershell
-# Créer un dossier d'identifiant différent par passage.
-$sortie = New-Item -ItemType Directory -Path "$env:TEMP\bouchaud-whpx-A1" -ErrorAction Stop
-$url = 'http://10.0.2.2:18082/ladybird-whpx-p0.html?phases=1&auto-start=1'
-$debut = Get-Date
-$lanceur = Join-Path $PWD 'run-whpx-ab.ps1'
-$bootEssai = Join-Path $sortie 'bootimage.bin'
-Copy-Item $boot $bootEssai
-& $lanceur -BenchmarkBootImage $bootEssai -BenchmarkBootSha256 $bootHash `
-  -Accel whpx -WhpxIrqchip off -CpuCount 1 -RamMiB 8192 `
-  -Surface simple -Audio none -LadybirdRunId $run -Gate0Autostart -LadybirdUrl $url *>&1 |
-  Tee-Object -FilePath (Join-Path $sortie 'lanceur.log')
-$logs = @(Get-ChildItem target\journaux-qemu\*-serie.log |
-  Where-Object LastWriteTime -ge $debut)
-if ($logs.Count -ne 1) { throw 'Comparaison non qualifiable. Journal WHPX unique absent.' }
-Copy-Item $logs[0].FullName $sortie
-Copy-Item native-browser-m9\BOUCHAUD_ARTIFACT_MANIFEST.json $sortie -ErrorAction Stop
-Get-FileHash native-browser-m9\BouchaudBrowserHost,native-browser-m9\WebContent -Algorithm SHA256 |
-  Out-File (Join-Path $sortie 'binaires.txt')
-git rev-parse HEAD | Out-File (Join-Path $sortie 'checkout-ladybird.txt')
-$bootHash | Out-File (Join-Path $sortie 'bootimage-sha256.txt')
-if (-not (Select-String -Path $logs[0].FullName -Pattern 'BOUCHAUD_BUILD commit=621a84a8b440' -Quiet)) {
-  throw 'Comparaison non qualifiable. Le noyau journalisé ne correspond pas à main.'
-}
-Select-String -Path $logs[0].FullName -Pattern 'BOUCHAUD_BUILD|WHPX_P0_SCROLL|WHPX_P0_CALLBACK|\[LB:FRAME\]|M11_RENDER_STATS' |
-  ForEach-Object Line | Set-Content (Join-Path $sortie 'marqueurs.txt')
-```
+Les répertoires de passage contiennent les journaux du lanceur, de QEMU et
+du port série, ainsi que le manifeste d'artefact et les empreintes des
+entrées. `rapport.json` donne P50/P95/P99 et les écarts des trois paires.
+Les intervalles rAF sont des mesures côté page. Les publications et leur
+temps de présentation sont des mesures BrowserHost. La cadence affichée
+demande une capture hôte.
 
-Comparer `degat`, `publie`, `copie_px` et `present_us` pendant la phase
-de scroll. Le rectangle publié doit exclure le chrome stable. Examiner aussi
-le premier affichage, le changement de taille, le changement d’onglet et le
-double tampon dans des essais visuels distincts. Pour la latence visible,
-utiliser une capture hôte horodatée. Les callbacks restent une mesure côté page.
+## Vérification visuelle
 
-## Orchestration des trois paires
+Faire un passage interactif dans chaque checkout sur la fixture servie
+depuis #366. Utiliser les mêmes réglages et capturer la fenêtre QEMU à
+fréquence fixe. Garder ce passage distinct de la campagne automatique.
 
-Utiliser deux checkouts jetables sans `ladybird-browser.img`, un préfixe de
-sortie neuf avec assez d'espace pour six images, et le serveur HTTP ci-dessus
-depuis la tête contenant le banc. Laisser la fixture démarrer seule, garder le
-même mode d'affichage et quitter la VM après « Terminé ». Le passage suivant
-attend la sortie de QEMU. Réserver la navigation manuelle et le
-redimensionnement aux passages visuels pour préserver la mesure du scroll.
-
-```powershell
-$main = '621a84a8b44061f891e372c70b6fe2531819a6b8'
-$candidate = (git rev-parse HEAD).Trim() # Depuis le checkout #366 qualifie
-.\tools\windows\Banc-BrowserHost-WHPX.ps1 -ReferenceCheckout C:\ab\main -CandidateCheckout C:\ab\p366 -ReferenceSha $main -CandidateSha $candidate -BootImage C:\ab\boot-main.bin -OutputDirectory C:\ab\p366-campagne
-py tools/windows/analyse-whpx-browserhost.py --campaign C:\ab\p366-campagne
-```
-
-Le banc impose le bootimage du premier couple, un lanceur commun, les deux
-producteurs épinglés et WHPX strict. Le lanceur vérifie la provenance de
-l'artefact avant démarrage. La fixture servie et le binaire QEMU sont hachés
-entre essais. Le lanceur crée un disque neuf à chaque passage, avec une zone
-de persistance initialement nulle. La partie du disque qui contient le
-navigateur diffère entre bras. Les journaux, les manifestes et les disques
-après arrêt sont archivés par passage.
-
-L'analyseur utilise les horloges monotones invitées entre les marqueurs
-`WHPX_P0_BEGIN` et `WHPX_P0_SCROLL`, rejette les traces BrowserHost
-discontinues et donne les écarts B/A paire par paire, leur médiane, leur
-étendue et leur écart absolu médian. Les percentiles sont interpolés sur
-les échantillons triés. Ce protocole borne les **publications BrowserHost**
-par la phase du script. Il ne relie pas chaque mise à jour au balayage de
-l'écran. L'option `--historical-log` estime le début à partir de la durée
-JavaScript quand l'ancien journal est dépourvu de marqueur.
-
-Pour la recette visuelle, capturer l'affichage hôte à fréquence fixe pour
-chaque bras. Contrôler le premier affichage et le chrome juste avant le
-scroll, le déplacement des lignes et le compteur pendant le scroll, le
-chrome et le compteur après « Terminé », puis refaire la navigation et
-redimensionner la fenêtre en largeur et en hauteur. Comparer les états
-aux mêmes étapes de la fixture et conserver toute séquence présentant un
-rectangle vide, un fragment périmé ou une image corrompue. Mesurer les
-images distinctes et les pauses visibles dans la capture, indépendamment
-des intervalles rAF et des événements BrowserHost.
+1. Attendre « Page prête », puis « Terminé ». Vérifier que les lignes
+   défilent dans l'ordre et que la barre d'outils reste stable.
+2. Ouvrir un deuxième onglet, charger la fixture sans démarrage automatique,
+   revenir au premier onglet, puis fermer le deuxième.
+3. Naviguer vers la page d'accueil locale, revenir à la fixture, puis
+   redimensionner la fenêtre Ladybird en largeur et en hauteur dans les deux
+   sens. Vérifier les zones nouvellement exposées et la réponse aux clics.
+4. Sur la capture, relever toute zone blanche inattendue, image périmée,
+   corruption ou pause visible avec l'heure et l'action. Conserver les
+   journaux série et QEMU correspondant aux deux captures.

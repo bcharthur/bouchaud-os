@@ -108,6 +108,8 @@ param(
     [string]$BenchmarkBootImage,
     [ValidatePattern('^[0-9a-fA-F]{64}$')]
     [string]$BenchmarkBootSha256,
+    [ValidateRange(1024, 65535)]
+    [int]$BenchmarkMonitorPort,
 
     # BOUCHAUD_PERF_V1 -- journalisation de DIAGNOSTIC (profil RIP par tic,
     # releves periodiques complets). Sans ce commutateur, la session
@@ -407,6 +409,15 @@ $qemuArgs = @(
 )
 
 
+if ($BenchmarkMonitorPort) {
+    if (-not $BenchmarkBootImage -or -not $Gate0Autostart -or $Gate0SerialPort -or $Performance) {
+        Fail 'Le moniteur de banc exige le bootimage epingle, Gate0Autostart et le journal serie fichier.'
+    }
+    $qemuArgs += @('-S', '-name', "bouchaud-whpx-$BenchmarkMonitorPort", '-qmp',
+        "tcp:127.0.0.1:${BenchmarkMonitorPort},server=on,wait=off", '-snapshot')
+}
+
+
 # =============================================================================
 # Mode Ladybird
 # =============================================================================
@@ -422,7 +433,7 @@ if ($LadybirdMode) {
     $IsLadybirdM9 = -not $IsLadybirdM8
 
     $NativeBrowserName = if ($IsLadybirdM8) { "native-browser-m8" } else { "native-browser-m9" }
-    $ScenarioName = if ($IsLadybirdM8) { "scenario-m8" } else { "scenario-m9" }
+    $ScenarioName = if ($BenchmarkMonitorPort) { "scenario-whpx-banc" } elseif ($IsLadybirdM8) { "scenario-m8" } else { "scenario-m9" }
 
 
     $NativeBrowserDir = Join-Path `
@@ -1407,12 +1418,18 @@ else {
     New-Item -ItemType Directory -Force -Path $JournauxQemu | Out-Null
     $Horodatage = Get-Date -Format "yyyyMMdd-HHmmss"
     $JournalSerie = Join-Path $JournauxQemu "$Horodatage-serie.log"
-    $qemuArgs += @(
-        "-chardev",
-        ("stdio,id=serie0,logfile={0}" -f ($JournalSerie -replace ',', ',,')),
-        "-serial",
-        "chardev:serie0"
-    )
+    if ($BenchmarkMonitorPort) {
+        $qemuArgs += @("-chardev", ("file,id=serie0,path={0}" -f ($JournalSerie -replace ',', ',,')),
+            "-serial", "chardev:serie0")
+    }
+    else {
+        $qemuArgs += @(
+            "-chardev",
+            ("stdio,id=serie0,logfile={0}" -f ($JournalSerie -replace ',', ',,')),
+            "-serial",
+            "chardev:serie0"
+        )
+    }
 }
 
 
