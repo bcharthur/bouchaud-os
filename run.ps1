@@ -129,7 +129,9 @@ param(
     [switch]$RefreshUserland,
 
     # Mode userland classique uniquement.
-    [switch]$AllowOlderUserland
+    [switch]$AllowOlderUserland,
+
+    [switch]$Performance
 )
 
 $ErrorActionPreference = "Stop"
@@ -266,6 +268,21 @@ function Ensure-GitHubCli {
 # =============================================================================
 # Selection du mode Ladybird
 # =============================================================================
+
+$QemuExe = "C:\Program Files\qemu\qemu-system-x86_64.exe"
+if ($Performance) {
+    if (-not (Test-Path -LiteralPath $QemuExe -PathType Leaf)) { Fail "QEMU introuvable : $QemuExe" }
+    Import-Module (Join-Path $RepoRoot 'tools\windows\BouchaudPerformance.psm1') -Force
+    $PerformanceHost = Get-BouchaudPerformanceHost -QemuExe $QemuExe
+    $PerformanceProfile = Resolve-BouchaudPerformance -Capabilities $PerformanceHost -Explicit $PSBoundParameters
+    $Accel = $PerformanceProfile.Accel
+    $CpuCount = $PerformanceProfile.CpuCount
+    $RamMiB = $PerformanceProfile.RamMiB
+    $WhpxIrqchip = $PerformanceProfile.WhpxIrqchip
+    $Surface = $PerformanceProfile.Surface
+    $P10GPU = $PerformanceProfile.P10GPU
+    $Diagnostic = $PerformanceProfile.Diagnostic
+}
 
 $ModeCount = @(
     [bool]$Legacy,
@@ -1488,10 +1505,6 @@ if ($Fullscreen) {
 Write-Section "Demarrage QEMU"
 
 
-$QemuExe = `
-    "C:\Program Files\qemu\qemu-system-x86_64.exe"
-
-
 if (-not (Test-Path $QemuExe)) {
 
     Fail "QEMU introuvable : $QemuExe"
@@ -1652,13 +1665,21 @@ try {
         $Horodatage = Get-Date -Format "yyyyMMdd-HHmmss"
     }
     $JournalErreurs = Join-Path $JournauxQemu "$Horodatage-qemu.log"
+    if ($Performance) {
+        Write-BouchaudPerformance -Profile $PerformanceProfile -Capabilities $PerformanceHost `
+            -Accel $Acceleration.accel -Reason $PerformanceProfile.Reason
+    }
     $QemuExitCode = Invoke-BouchaudQemu -Exe $QemuExe -Arguments $qemuArgs -JournalErreurs $JournalErreurs
     $Verdict = Get-BouchaudVerdictQemu -JournalSerie $JournalSerie -JournalErreurs $JournalErreurs
 
     # `auto` : WHPX ne s'est pas initialise (rien n'a demarre) -> relance en
     # TCG, ANNONCEE comme telle. Un echec en cours de route (VP exit) n'est
     # jamais masque par une relance.
-    if ($Acceleration.repli_tcg_explicite -and $Verdict.whpx_indisponible -and -not $Verdict.noyau) {
+    $repliTcg = $Acceleration.repli_tcg_explicite -and $Verdict.whpx_indisponible -and -not $Verdict.noyau
+    if ($Performance) {
+        $repliTcg = Test-BouchaudPerformanceFallback -Profile $PerformanceProfile -Verdict $Verdict
+    }
+    if ($repliTcg) {
         Write-Host ""
         Write-Host "accel      : WHPX indisponible sur cette machine -> relance en TCG (ce demarrage sera TCG, pas WHPX)" `
             -ForegroundColor Yellow
@@ -1671,6 +1692,10 @@ try {
             $qemuArgs = @($qemuArgs | ForEach-Object { if ($_ -like 'stdio,id=serie0,logfile=*') { "stdio,id=serie0,logfile={0}" -f ($JournalSerie -replace ',', ',,') } else { $_ } })
         }
         $JournalErreurs = $JournalErreurs -replace '-qemu\.log$', '-qemu-tcg.log'
+        if ($Performance) {
+            Write-BouchaudPerformance -Profile $PerformanceProfile -Capabilities $PerformanceHost `
+                -Accel 'tcg' -Reason 'Echec initialisation WHPX. Relance en emulation logicielle.'
+        }
         $QemuExitCode = Invoke-BouchaudQemu -Exe $QemuExe -Arguments $qemuArgs -JournalErreurs $JournalErreurs
         $Verdict = Get-BouchaudVerdictQemu -JournalSerie $JournalSerie -JournalErreurs $JournalErreurs
     }
