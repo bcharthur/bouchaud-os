@@ -229,13 +229,12 @@ impl Client {
 
         let mut prepare = move |processus: &task::Process| -> Vec<String> {
             processus.metadata.lock().ecran = Some(ecran);
-            let mut files = processus.files.lock();
-            let fd_surface =
-                files.insert(FileDesc::fichier_partage_inscriptible(surface_node));
-            let fd_gui = files.insert(FileDesc::new(FdKind::SocketPair(
-                canal_client.clone(),
-                canal_wm.clone(),
-            )));
+            let surface = FileDesc::fichier_partage_inscriptible(surface_node);
+            let gui = FileDesc::new(FdKind::SocketPair(canal_client.clone(), canal_wm.clone()));
+            let (fd_surface, fd_gui) = {
+                let mut files = processus.files.lock();
+                (files.insert(surface), files.insert(gui))
+            };
             alloc::vec![
                 alloc::format!("BO_SURFACE_FD={}", fd_surface),
                 alloc::format!("BO_SURFACE_WIDTH={}", largeur_px),

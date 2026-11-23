@@ -574,7 +574,8 @@ impl FileDesc {
     /// Le droit du nœud et le mode porte par le descripteur sont deux choses
     /// distinctes. Une projection partagee en ecriture exige les deux ; ce
     /// constructeur rend impossible l'oubli du second sur les surfaces et les
-    /// tampons anonymes crees par Bouchaud.
+    /// tampons anonymes crees par Bouchaud. La prise de reference peut
+    /// attendre une eviction. Construire le descripteur hors du verrou FdTable.
     pub fn fichier_partage_inscriptible(node: usize) -> Self {
         let mut desc = Self::new(FdKind::File(node));
         desc.flags = ACCES_LECTURE_ECRITURE;

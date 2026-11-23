@@ -291,7 +291,7 @@ fn evince_si_orphelin(node: usize) {
         let Some(index) = cache.iter().position(|entry| entry.node == node) else {
             return;
         };
-        if cache[index].ouverts != 0 || cache[index].mappages != 0 {
+        if cache[index].evicting || cache[index].ouverts != 0 || cache[index].mappages != 0 {
             return;
         }
         if cache[index].pages.iter().any(|page| page.pins.load(Ordering::Acquire) != 0) {
@@ -326,9 +326,10 @@ fn evince_si_orphelin(node: usize) {
     for (_, frame) in pages {
         vmm::free_frame(frame);
     }
-    if anonyme {
-        crate::fs::ramfs::fs().libere_anonyme(node);
-    }
+    // Retire l'ancienne generation avant que RAMFS puisse recycler son index.
+    // L'ordre RAMFS -> CACHE ne couvre ni writeback, ni liberation de frames,
+    // ni reveil. Les chemins CACHE qui touchent RAMFS le relachent d'abord.
+    let mut fs = anonyme.then(crate::fs::ramfs::fs);
     {
         let mut cache = CACHE.lock();
         if let Some(index) = cache.iter().position(|entry| {
@@ -338,6 +339,10 @@ fn evince_si_orphelin(node: usize) {
             cache.swap_remove(index);
         }
     }
+    if let Some(fs) = fs.as_mut() {
+        fs.libere_anonyme(node);
+    }
+    drop(fs);
     lifecycle.wake_all();
 }
 
