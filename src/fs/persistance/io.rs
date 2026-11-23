@@ -1,6 +1,6 @@
 // Disk I/O for an immutable transaction snapshot. Runs at BKL depth 0.
 
-fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
+fn synchronise_snapshot(entrees: Vec<SnapshotEntree>) -> i64 {
     // AUCUNE ZONE N'EST PAS UN ECHEC D'ECRITURE.
     //
     // # Ce que la confusion a coute
@@ -46,11 +46,16 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     let mut table = vec![0u8; secteurs_table * SECTOR_SIZE];
     let mut secteur = base + contenu_demi(demi);
     let fin_zone = base + fin_demi(demi);
-    let mut nouveau: Vec<SurDisque> = Vec::with_capacity(entrees.len());
+    // Ne garder aucune ancienne entree de cette demi-zone en cas d'echec.
+    // Les comparaisons de contenu s'executent hors SpinLock, sous TRANSACTION.
+    let ancien = core::mem::take(&mut DISQUE.lock()[demi as usize]);
+    let nombre_entrees = entrees.len();
+    let mut nouveau = Vec::with_capacity(entrees.len());
+    let mut octets_cache = 0;
     let mut ecrites = 0usize;
     let mut sautees = 0usize;
 
-    for (index, entree) in entrees.iter().enumerate() {
+    for (index, entree) in entrees.into_iter().enumerate() {
         let octets = entree.chemin.as_bytes();
         if octets.len() >= CHEMIN_MAX { oublie_le_disque(); return -1; }
         let longueur = entree.contenu.len();
@@ -62,20 +67,26 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
         let secteurs = ((longueur + SECTOR_SIZE - 1) / SECTOR_SIZE) as u64;
         if secteur + secteurs > fin_zone { oublie_le_disque(); return -1; }
 
-        let hash_start = crate::kernel::timer::monotonic_ns();
-        let sceau_courant = sceau(&entree.contenu);
-        TX_HASH_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(hash_start), Ordering::Relaxed);
+        let comparaison = crate::kernel::timer::monotonic_ns();
+        let identique = ancien.get(index).and_then(Option::as_ref).is_some_and(|connu| {
+            connu.secteur == secteur && connu.chemin == entree.chemin && connu.contenu == entree.contenu
+        });
+        // Ancien nom de compteur conserve pour les analyseurs existants.
+        TX_HASH_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(comparaison), Ordering::Relaxed);
 
         if secteurs != 0 {
-            // La demi-zone alterne : un contenu ecrit au tour precedent n'est
-            // PAS a la meme place. Le cache d'ecriture ne peut donc sauter une
-            // ecriture que si la demi-zone n'a pas change, ce que `deja_ecrite`
-            // verifie par le secteur.
-            if deja_ecrite(index, &entree.chemin, secteur, longueur, sceau_courant) {
+            if identique {
                 sautees += 1;
             } else {
-                let mut tampon = vec![0u8; secteurs as usize * SECTOR_SIZE];
-                tampon[..longueur].copy_from_slice(&entree.contenu);
+                let longueur_disque = secteurs as usize * SECTOR_SIZE;
+                let tampon = if longueur == longueur_disque {
+                    alloc::borrow::Cow::Borrowed(entree.contenu.as_slice())
+                } else {
+                    let mut contenu = Vec::with_capacity(longueur_disque);
+                    contenu.extend_from_slice(&entree.contenu);
+                    contenu.resize(longueur_disque, 0);
+                    alloc::borrow::Cow::Owned(contenu)
+                };
                 let io_start = crate::kernel::timer::monotonic_ns();
                 let ecrits = volume_ecrit(secteur, secteurs as usize, &tampon);
                 TX_IO_NS.fetch_add(crate::kernel::timer::monotonic_ns().saturating_sub(io_start), Ordering::Relaxed);
@@ -84,7 +95,12 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
                 ecrites += 1;
             }
         }
-        nouveau.push(SurDisque { chemin: entree.chemin.clone(), secteur, longueur, sceau: sceau_courant });
+        if secteurs != 0 && longueur <= CACHE_OCTETS_PAR_DEMI - octets_cache {
+            octets_cache += longueur;
+            nouveau.push(Some(SurDisque { chemin: entree.chemin, secteur, contenu: entree.contenu }));
+        } else {
+            nouveau.push(None);
+        }
         secteur += secteurs;
     }
 
@@ -109,7 +125,7 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     // coupure de courant.
     // P13_FSYNC_PHASE_V6: retain the mandatory durability barrier.
     let barrier_start = crate::kernel::timer::monotonic_ns();
-    volume_barriere();
+    let contenu_durable = volume_barriere();
     let barrier_ns = crate::kernel::timer::monotonic_ns().saturating_sub(barrier_start);
     TX_BARRIER_NS.fetch_add(barrier_ns, Ordering::Relaxed);
     TX_BARRIER_MAX_NS.fetch_max(barrier_ns, Ordering::Relaxed);
@@ -122,7 +138,7 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     let nouveau_superbloc = Superbloc {
         generation,
         demi,
-        entrees: entrees.len() as u32,
+        entrees: nombre_entrees as u32,
         secteurs_contenu: secteur.saturating_sub(base + contenu_demi(demi)),
         somme_table: somme_controle(&table),
     };
@@ -140,7 +156,7 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     // appelant, pas une precaution supplementaire.
     // P13_FSYNC_PHASE_V6: retain the mandatory durability barrier.
     let barrier_start = crate::kernel::timer::monotonic_ns();
-    volume_barriere();
+    let commit_durable = volume_barriere();
     let barrier_ns = crate::kernel::timer::monotonic_ns().saturating_sub(barrier_start);
     TX_BARRIER_NS.fetch_add(barrier_ns, Ordering::Relaxed);
     TX_BARRIER_MAX_NS.fetch_max(barrier_ns, Ordering::Relaxed);
@@ -150,8 +166,10 @@ fn synchronise_snapshot(entrees: &[SnapshotEntree]) -> i64 {
     TX_COMMITS.fetch_add(1, Ordering::Relaxed);
     TX_GENERATION.store(generation, Ordering::Relaxed);
 
-    *DISQUE.lock() = nouveau;
+    if contenu_durable && commit_durable {
+        DISQUE.lock()[demi as usize] = nouveau;
+    }
     TX_WRITTEN.fetch_add(ecrites as u64, Ordering::Relaxed);
     TX_SKIPPED.fetch_add(sautees as u64, Ordering::Relaxed);
-    entrees.len() as i64
+    nombre_entrees as i64
 }
