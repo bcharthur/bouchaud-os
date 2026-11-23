@@ -22,7 +22,7 @@
 #      un processus sorti par exit_group, ou ayant fait execve, n'etait JAMAIS
 #      detruit : 7 700 crees, 3 544 detruits, RAM pleine en ~2 000 cycles,
 #      puis fautes de page `erreur_es` et fork en echec ;
-#   4. la memoire physique (prefixe des lignes) n'a pas monte de plus de 10
+#   4. la memoire physique (releves meminfo synchrones) n'a pas monte de plus de 10
 #      points entre le debut et la fin.
 #
 # Sur un gel, le rapport automatique est imprime (tools/ci/reliability/
@@ -58,10 +58,14 @@ SILENCE_S=${SILENCE_S:-90}
 (cd tools/userland && OUT=out-tempete-exec ./build.sh musl >/dev/null)
 cp tools/userland/out-tempete-exec/tempete-exec-probe "$SCENARIO/bin/"
 cat > "$SCENARIO/autorun" <<EOF
+echo TEMPETE_RAM_DEBUT
+meminfo
 echo TEMPETE_BANC_DEBUT
 /bin/tempete-exec-probe 15 3 fork
 /bin/tempete-exec-probe 15 3 vide
 /bin/tempete-exec-probe ${COMPLET} 3 complet
+echo TEMPETE_RAM_FIN
+meminfo
 echo TEMPETE_BANC_FIN
 EOF
 (cd tools/userland && IMAGE="$IMAGE" ./mkdisk.sh "$SCENARIO" >/dev/null)
@@ -183,9 +187,24 @@ else
   echec "aucun releve [PROC-STAT] avec processus_crees/detruits"
 fi
 
-memoire() { grep -aE "$1" <<<"$texte" | grep -av '+ echo' | sed -nE 's/^\[[0-9:]+\]\[ *[0-9]+%: *([0-9]+)%.*/\1/p' | sed -n "$2"; }
-m0=$(memoire 'TEMPETE_BANC_DEBUT' 1p)
-m1=$(memoire 'TEMPETE_BANC_FIN' '$p')
+# Le prefixe periodique peut encore etre N/A au premier autorun. Lire
+# les pages physiques via meminfo entre deux marqueurs, meme a froid.
+memoire() {
+  awk -v debut="TEMPETE_RAM_$1" -v fin="TEMPETE_BANC_$1" '
+    /\+ echo/ { next }
+    index($0, debut) { ouvert = 1; next }
+    index($0, fin) { exit }
+    ouvert && match($0, /frames user: used=[0-9]+ free=[0-9]+ total=[0-9]+/) {
+      valeur = substr($0, RSTART, RLENGTH)
+      split(valeur, champs, /[ =]+/)
+      used = champs[4]; total = champs[8]
+      if (total > 0 && used <= total) printf "%d\n", 100 * used / total
+      exit
+    }
+  ' <<<"$texte"
+}
+m0=$(memoire DEBUT)
+m1=$(memoire FIN)
 if [ -n "$m0" ] && [ -n "$m1" ]; then
   if (( m1 <= m0 + 10 )); then ok "memoire physique ${m0}% -> ${m1}%"
   else echec "memoire physique ${m0}% -> ${m1}% (+$((m1 - m0)) points)"; fi

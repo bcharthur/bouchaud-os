@@ -126,6 +126,8 @@ pub const VOLUME_INTERNE: Volume = Volume(2);
 static PRESENT: AtomicBool = AtomicBool::new(false);
 static LECTURES: AtomicU64 = AtomicU64::new(0);
 static ECRITURES: AtomicU64 = AtomicU64::new(0);
+static OCTETS_LUS: AtomicU64 = AtomicU64::new(0);
+static OCTETS_ECRITS: AtomicU64 = AtomicU64::new(0);
 static VIDANGES: AtomicU64 = AtomicU64::new(0);
 static ERREURS: AtomicU64 = AtomicU64::new(0);
 static DELAIS: AtomicU64 = AtomicU64::new(0);
@@ -1397,8 +1399,10 @@ impl PiloteNvme {
         note_reussite_es();
         if ecriture {
             ECRITURES.fetch_add(faits as u64, Ordering::Relaxed);
+            OCTETS_ECRITS.fetch_add((faits * taille) as u64, Ordering::Relaxed);
         } else {
             LECTURES.fetch_add(faits as u64, Ordering::Relaxed);
+            OCTETS_LUS.fetch_add((faits * taille) as u64, Ordering::Relaxed);
         }
         Achevement::Fait(faits)
     }
@@ -1638,6 +1642,10 @@ fn note_delai_es() {
 /// Une commande d'entree-sortie a abouti : la serie de delais est rompue.
 fn note_reussite_es() {
     DELAIS_SUITE.store(0, Ordering::Release);
+}
+
+pub(crate) fn octets_transferes() -> (u64, u64) {
+    (OCTETS_LUS.load(Ordering::Relaxed), OCTETS_ECRITS.load(Ordering::Relaxed))
 }
 
 /// Compteurs, pour le diagnostic.

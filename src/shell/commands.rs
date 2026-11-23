@@ -623,6 +623,14 @@ pub fn cat(argc: usize, argv: &[&str; 12], cwd: usize) -> i32 {
         println!("usage: cat <file>");
         return 1;
     }
+    if argv[1] == crate::kernel::system_metrics::PROC_PATH {
+        let snapshot = crate::kernel::system_metrics::proc_snapshot();
+        if let Ok(text) = core::str::from_utf8(&snapshot) {
+            print!("{}", text);
+            return 0;
+        }
+        return 1;
+    }
     // Le backing peut reprendre RAMFS : ne pas conserver le verrou VFS
     // pendant logical_len()/read_at().
     let idx = {
