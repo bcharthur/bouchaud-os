@@ -12,11 +12,14 @@ from statistics import median, quantiles
 JS = re.compile(r'(\d+\.\d+) WebContent\((\d+)\): \(js log\) "WHPX_P0_(BEGIN|SCROLL|CALLBACK)\b')
 FRAME = re.compile(
     r"\[LB:FRAME\] onglet=(\d+) seq=(\d+) t=(\d+) .*?"
-    r"publie=(-?\d+),(-?\d+) (\d+)x(\d+) copie_px=(\d+) complet=[01] present_us=(\d+)"
+    r"publie=(-?\d+),(-?\d+) (\d+)x(\d+) copie_px=(\d+) complet=([01]) present_us=(\d+)"
 )
 
 
 def stats(values):
+    if len(values) == 1:
+        value = values[0]
+        return dict(p50=value, p95=value, p99=value, max=value)
     percentiles = quantiles(values, n=100, method="inclusive")
     return dict(p50=median(values), p95=percentiles[94], p99=percentiles[98], max=max(values))
 
@@ -56,7 +59,8 @@ def analyse(path, historical=False):
             or sequences != list(range(sequences[0], sequences[-1] + 1))):
         raise ValueError(f"{path}: incomplete, duplicate, or multi-tab BrowserHost trace")
     raf_intervals = [b - a for a, b in zip(raf, raf[1:])]
-    rects = Counter(f"{x},{y} {w}x{h}" for _, _, _, x, y, w, h, _, _ in frames)
+    complete = sum(frame[-2] for frame in frames)
+    rects = Counter(f"{x},{y} {w}x{h}" for _, _, _, x, y, w, h, _, _, _ in frames)
     return {
         "phase": "guest-marker-window" if "BEGIN" in markers else "estimated-from-scroll-duration",
         "guest_window_ms": [start, stop],
@@ -67,17 +71,20 @@ def analyse(path, historical=False):
         "browserhost_interval_ms": stats([b[2] - a[2] for a, b in zip(frames, frames[1:])]),
         "callback_total_ms": callback["callbackTotalMs"],
         "browserhost_count": len(frames),
+        "browserhost_complete_count": complete,
+        "browserhost_complete_pct": 100 * complete / len(frames),
         "present_us": stats([f[-1] for f in frames]),
         "published_rects": dict(rects),
         "published_pixels": sum(f[5] * f[6] for f in frames),
-        "copied_pixels": sum(f[-2] for f in frames),
+        "copied_pixels": sum(f[-3] for f in frames),
         "browserhost_seq": [sequences[0], sequences[-1]],
     }
 
 
 def metrics(result):
     flat = {k: result[k] for k in ("scroll_ms", "callbacks_per_s", "callback_total_ms",
-                                  "browserhost_count", "copied_pixels", "published_pixels", "raf_intervals_ge_35ms")}
+                                  "browserhost_count", "browserhost_complete_count", "browserhost_complete_pct",
+                                  "copied_pixels", "published_pixels", "raf_intervals_ge_35ms")}
     for group in ("raf_ms", "present_us", "browserhost_interval_ms"):
         flat.update({f"{group}.{k}": v for k, v in result[group].items()})
     return flat
@@ -114,7 +121,7 @@ def campaign(directory):
             mid = median(values)
             dispersion[key] = dict(median=mid, min=min(values), max=max(values),
                                    mad=median(abs(v - mid) for v in values))
-    return {"trials": [{"arm": arm, "metrics": metrics} for arm, _, metrics in trials],
+    return {"trials": [{"arm": arm, "metrics": result} for arm, _, result in trials],
             "paired_candidate_relative_pct": deltas, "paired_dispersion_pct": dispersion}
 
 
