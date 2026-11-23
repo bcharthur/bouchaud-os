@@ -230,6 +230,41 @@ def connect(port):
         return None
 
 
+def preflight_whpx(qemu, log):
+    """Check partition creation before building any campaign inputs."""
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    args = [
+        str(qemu), "-S", "-display", "none", "-nodefaults", "-m", "8192", "-smp", "1",
+        "-accel", "whpx,kernel-irqchip=off", "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt",
+        "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off",
+    ]
+    try:
+        with log.open("wb") as output:
+            process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=output,
+                                       stderr=subprocess.STDOUT)
+            try:
+                with wait_for(process, 15, lambda: connect(port)) as connection:
+                    connection.settimeout(5)
+                    with connection.makefile("rwb") as wire:
+                        if "QMP" not in receive(wire):
+                            raise ValueError("Salutation QMP absente")
+                        command(wire, "qmp_capabilities")
+                        if command(wire, "query-status")["status"] != "prelaunch":
+                            raise ValueError("Etat QEMU inattendu")
+                        send(wire, "quit")
+                if process.wait(timeout=5):
+                    raise ValueError(f"Sortie QEMU {process.returncode}")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        detail = log.read_text(encoding="utf-8", errors="replace").strip() if log.exists() else ""
+        raise ValueError(f"Prevol WHPX : {detail or exc} (journal : {log})") from exc
+
+
 def completed(logdir, old_logs):
     paths = set(logdir.glob("*-serie.log")) - old_logs
     if len(paths) > 1:
@@ -357,6 +392,7 @@ def campaign(args):
         raise ValueError("Fermer la VM QEMU deja active")
     output = args.output.resolve()
     output.mkdir(parents=True)
+    preflight_whpx(qemu, output / "whpx-preflight.log")
     fixture = (TOOLS.parent / "health" / FIXTURE).read_bytes()
     expected = subprocess.check_output(
         ["git", "-C", str(sources["B"]), "show", f"{HEADS['B']}:tools/health/{FIXTURE}"]
