@@ -62,6 +62,13 @@ static REFUS: AtomicU64 = AtomicU64::new(0);
 /// puis LIT celle de l'autre (`present` fait de meme). Au moins l'un des deux
 /// voit l'autre ; deux compositeurs n'ecrivent jamais le meme ecran.
 pub fn bureau_noyau_demarre() -> bool {
+    // A configured ring-3 desktop already owns the reservation. Publishing
+    // a speculative claim here can make its live DISPLAY_INFO fail.
+    if ecran_reserve_au_compositeur() {
+        REFUS.fetch_add(1, Ordering::Relaxed);
+        crate::serial_println!("BOUCHAUD_BUREAU_NOYAU_REFUSE raison=ecran-au-compositeur");
+        return false;
+    }
     BUREAU_NOYAU.store(true, Ordering::SeqCst);
     if BUREAU_RING3.load(Ordering::SeqCst) || ECRAN_AU_COMPOSITEUR.load(Ordering::SeqCst) {
         BUREAU_NOYAU.store(false, Ordering::SeqCst);
