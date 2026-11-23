@@ -328,7 +328,11 @@ fn wait_data_ready() -> bool {
         }
         // DRQ peut tarder entre deux secteurs d'un meme lot. Donner au
         // noyau les memes points surs que pendant une attente BSY.
-        if tours % SONDAGES_PAR_POINT_SUR == 0 {
+        if tours % SONDAGES_PAR_POINT_SUR == 0
+            && crate::kernel::scheduler::preempt::pending()
+            && crate::kernel::scheduler::preempt::cession_volontaire_sure()
+            && !crate::kernel::task::current_is_kernel_task()
+        {
             point_sur();
         }
     }
