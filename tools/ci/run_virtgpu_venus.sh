@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# QEMU 10+ et GTK/GL avec un virglrenderer qui propose Venus.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+if [[ $# != 2 || -z ${DISPLAY:-} ]]; then
+    echo 'usage: DISPLAY=:N run_virtgpu_venus.sh BOOTIMAGE_BANC_VENUS NEW_OUTPUT_DIR' >&2
+    exit 2
+fi
+smp=${BO_VIRTGPU_SMP:-2}
+if [[ $smp != 2 && $smp != 4 ]]; then
+    echo 'BO_VIRTGPU_SMP doit valoir 2 ou 4' >&2
+    exit 2
+fi
+boot=$(realpath "$1")
+sortie=$(realpath -m "$2")
+mkdir "$sortie"
+mkdir "$sortie/scen"
+sysroot=${BO_VENUS_LOADER_SYSROOT:-}
+case ${BO_VENUS_SKIA_PROBE:-0} in
+    0) sonde=vulkan-probe ;;
+    1) sonde=skia-vulkan-probe
+       [[ -n $sysroot ]] || { echo "La sonde Skia exige BO_VENUS_LOADER_SYSROOT" >&2; exit 2; } ;;
+    *) echo "BO_VENUS_SKIA_PROBE doit valoir 0 ou 1" >&2; exit 2 ;;
+esac
+fenetre=${BO_VENUS_SKIA_WINDOW:-0}
+case $fenetre in
+    0) ;;
+    1) [[ $sonde == skia-vulkan-probe ]] || { echo "La fenêtre exige BO_VENUS_SKIA_PROBE=1" >&2; exit 2; } ;;
+    *) echo "BO_VENUS_SKIA_WINDOW doit valoir 0 ou 1" >&2; exit 2 ;;
+esac
+parallele=${BO_VENUS_DEUX_PROCESSUS:-0}
+case "$parallele" in
+    0) ;;
+    1) [[ -n $sysroot && $sonde == vulkan-probe ]] || {
+           echo 'Deux processus exigent la sonde publique Vulkan et son rootfs' >&2; exit 2;
+       } ;;
+    *) echo 'BO_VENUS_DEUX_PROCESSUS doit valoir 0 ou 1' >&2; exit 2 ;;
+esac
+if [[ -n $sysroot ]]; then
+    # Rootfs préparé avec la sonde publique, le loader, le vrai ICD Venus
+    # et ses dépendances. Aucun téléchargement ni installation implicite.
+    for entree in "$sonde" venus.json lib/libvulkan.so.1; do
+        if [[ ! -f $sysroot/$entree ]]; then
+            echo "Entrée manquante dans BO_VENUS_LOADER_SYSROOT $entree" >&2
+            exit 2
+        fi
+    done
+    cp -Lr "$sysroot/." "$sortie/scen/"
+    cat >"$sortie/scen/autorun" <<'RUN'
+export LD_LIBRARY_PATH=/lib
+export VK_DRIVER_FILES=/venus.json
+export VK_LOADER_DEBUG=error,warn,driver
+export VN_DEBUG=init
+RUN
+    if [[ $fenetre == 1 ]]; then
+        printf 'export BO_AUTOSTART_APP=/skia-vulkan-probe\ndesktop\n' >>"$sortie/scen/autorun"
+    elif [[ $sonde == skia-vulkan-probe ]]; then
+        printf '/skia-vulkan-probe\n' >>"$sortie/scen/autorun"
+    elif [[ $parallele == 1 ]]; then
+        printf '/vulkan-probe --allow-cpu-deux-processus\n' >>"$sortie/scen/autorun"
+    else
+        printf '/vulkan-probe --allow-cpu\n' >>"$sortie/scen/autorun"
+    fi
+else
+    musl-gcc -Wall -Wextra -O2 -static-pie tools/userland/virtgpu-venus-version.c -o "$sortie/scen/version"
+    if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
+        mkdir -p "$sortie/scen/usr/libexec/ladybird"
+        for chemin in usr/libexec/ladybird/Compositor usr/libexec/ladybird/WebContent usr/libexec/Compositor; do
+            cp "$sortie/scen/version" "$sortie/scen/$chemin"
+        done
+        cat >"$sortie/scen/autorun" <<'RUN'
+/version demappe
+/usr/libexec/ladybird/Compositor profil-autorise
+/usr/libexec/ladybird/WebContent profil-refuse
+/usr/libexec/Compositor profil-refuse
+RUN
+    else
+        printf '/version\n' > "$sortie/scen/autorun"
+    fi
+fi
+if [[ $fenetre == 0 ]]; then printf 'poweroff\n' >>"$sortie/scen/autorun"; fi
+IMAGE="$sortie/guest.img" tools/userland/mkdisk.sh "$sortie/scen" >/dev/null
+qemu=(timeout --kill-after=5 45 qemu-system-x86_64 -accel tcg -cpu max -smp "$smp" -m 2048 -vga none
+    -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=256M -display gtk,gl=on -no-reboot
+    -drive "format=raw,file=$boot,snapshot=on"
+    -drive "format=raw,file=$sortie/guest.img,snapshot=on"
+    -serial "file:$sortie/serie.log" -d guest_errors -trace 'enable=virtio_gpu_cmd_*')
+if [[ $fenetre == 1 ]]; then
+    "${qemu[@]}" >"$sortie/qemu.log" 2>&1 &
+    pid=$!
+    trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+    for ((fin = SECONDS + 38; SECONDS < fin; )); do
+        if grep -aqF 'SKIA_VULKAN_FENETRE_PRETE' "$sortie/serie.log" 2>/dev/null; then break; fi
+        kill -0 "$pid"
+        sleep .5
+    done
+    grep -aqF 'SKIA_VULKAN_FENETRE_PRETE' "$sortie/serie.log"
+    # La publication du dommage précède le scanout. La destruction des
+    # ressources Vulkan peut encore détenir la controlq après ce marqueur.
+    # Garder le délai global et exiger les mêmes pixels de la capture.
+    while kill -0 "$pid" 2>/dev/null && ((SECONDS < fin)); do
+        if import -window root "$sortie/capture.png" \
+            && python3 tools/ci/verifie_capture_skia_venus.py "$sortie/capture.png" > "$sortie/capture-verdict.log" 2>&1; then
+            break
+        fi
+        sleep .5
+    done
+    python3 tools/ci/verifie_capture_skia_venus.py "$sortie/capture.png"
+else
+    "${qemu[@]}" >"$sortie/qemu.log" 2>&1 || {
+        rc=$?
+        if [[ $rc != 124 ]]; then
+            cat "$sortie/qemu.log" >&2
+            exit "$rc"
+        fi
+    }
+fi
+if grep -aEq 'PANIC|panicked at|DOUBLE FAULT|TRIPLE FAULT' "$sortie/serie.log"; then exit 1; fi
+if [[ -n $sysroot ]]; then
+    grep -aqF 'Found ICD manifest file /venus.json' "$sortie/serie.log"
+    grep -aqF 'using DRM device /dev/dri/renderD128' "$sortie/serie.log"
+    if [[ $sonde == skia-vulkan-probe ]]; then
+        grep -aqF 'SKIA_VULKAN_RGBA_OK pixels=1024' "$sortie/serie.log"
+        exit 0
+    fi
+    grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=5a17c3e9' "$sortie/serie.log"
+    grep -aqF 'VULKAN_TRANSFERT_OK octets=4096 verification=exacte motif=a18e3c16' "$sortie/serie.log"
+    if [[ $parallele == 1 ]]; then
+        grep -aqF 'VULKAN_TRANSFERT_DEUX_PROCESSUS_OK' "$sortie/serie.log"
+    fi
+    exit 0
+fi
+grep -aqF 'P10_VENUS_HOSTMEM_OK' "$sortie/serie.log"
+grep -aqF 'P10_BLOB_INVITE_OK' "$sortie/serie.log"
+grep -aqF 'VIRTGPU_VENUS_DRM_DECOUVERTE_OK' "$sortie/serie.log"
+grep -aqF 'VIRTGPU_VENUS_DRM_VERSION_OK' "$sortie/serie.log"
+grep -aqF 'VIRTGPU_VENUS_DRM_CAPS_OK' "$sortie/serie.log"
+grep -aqF 'VIRTGPU_VENUS_DRM_CONTEXT_OK' "$sortie/serie.log"
+grep -aoE 'VIRTGPU_VENUS_VERSION_RING3_OK appels=3 api=[0-9.]+' "$sortie/serie.log"
+if [[ ${BO_VENUS_DEMAPPE:-0} == 1 ]]; then
+    grep -aqF 'VIRTGPU_VENUS_DRM_NON_ROOT_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_PROFIL_COMPOSITOR_OK' "$sortie/serie.log"
+    test "$(grep -acF 'VIRTGPU_VENUS_PROFIL_REFUSE_OK' "$sortie/serie.log")" -eq 2
+    test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_RELIT_OK octets=4096' "$sortie/serie.log")" -eq 2
+    test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_MMAP_OK octets=4096' "$sortie/serie.log")" -eq 2
+    test "$(grep -acF 'VIRTGPU_VENUS_VKFILL_FENCE_OK octets=4096' "$sortie/serie.log")" -eq 4
+    test "$(grep -acF 'VIRTGPU_VENUS_VKBUFFER_OK octets=4096' "$sortie/serie.log")" -eq 4
+    test "$(grep -acF 'VIRTGPU_VENUS_APPAREILS compte=' "$sortie/serie.log")" -eq 4
+    grep -aqF 'VIRTGPU_VENUS_GRAND_GEM_OK octets=8388608' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_DRM_MMAP_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_DRM_GEM_OK objets=8' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_DRM_INSTANCES_OK cycles=2' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_TAILLES_OK cycles=4' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_PROPRIETAIRE_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_CTX_ORPHELIN_OK' "$sortie/serie.log"
+    grep -aqF 'P10_VENUS_ORPHELIN_RECUPERE' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_SYNC_FILE_OK' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_REPONSE_CLIENT_OK anneaux=64' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_CONTEXTES_ISOLES_OK' "$sortie/serie.log"
+    grep -aqF 'P10_VENUS_SECOND_ORPHELIN_RECUPERE' "$sortie/serie.log"
+    grep -aqF 'VIRTGPU_VENUS_DEMAPPE_OK' "$sortie/serie.log"
+fi

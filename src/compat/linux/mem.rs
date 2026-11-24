@@ -250,6 +250,10 @@ pub fn sys_brk(addr: u64) -> i64 {
         }
 
         let current = borrowed.brk;
+        #[cfg(feature = "banc-gpu-venus")]
+        if croise_gem(&borrowed.promesses, addr.min(current), addr.max(current)) {
+            return current as i64;
+        }
         if addr > current {
             let start = (current + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let end = (addr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -386,6 +390,8 @@ fn installe_vma(
         let clean_pages = process.retire_clean_pages(base, length);
         let retirement = process.space.prepare_unmap(base, length);
         vma::retire(&mut process.promesses, base, fin);
+        #[cfg(feature = "banc-gpu-venus")]
+        process.space.retire_baux_gpu_sans_vma(&process.promesses);
         (Some(retirement), shared_nodes, clean_pages)
     } else {
         (None, alloc::vec::Vec::new(), alloc::vec::Vec::new())
@@ -401,6 +407,13 @@ fn installe_vma(
         },
     );
     (retirement, shared_nodes, clean_pages)
+}
+
+#[cfg(feature = "banc-gpu-venus")]
+fn croise_gem(promesses: &[Vma], debut: u64, fin: u64) -> bool {
+    promesses.iter().any(|vma| {
+        vma.chevauche(debut, fin) && matches!(vma.backing, Backing::GemGpu { .. })
+    })
 }
 
 /// `mmap`.
@@ -434,6 +447,17 @@ pub fn sys_mmap(
 
     let process_rc = task::current_process();
     let fd_kind = process_rc.files.lock().get(fd).map(|desc| desc.kind.clone());
+    #[cfg(feature = "banc-gpu-venus")]
+    let gpu = match &fd_kind {
+        Some(FdKind::GpuRender(session)) if flags & MAP_ANONYMOUS == 0 => {
+            if map_type != MAP_SHARED || prot & PROT_EXEC != 0 { return -errno::EACCES; }
+            match crate::drivers::virtio_gpu::mappe_gem_venus(session, offset, length) {
+                Ok(mapping) => Some(mapping),
+                Err(e) => return super::virtgpu::erreur(e),
+            }
+        }
+        _ => None,
+    };
     let ecran = process_rc.metadata.lock().ecran;
     let capacite_jit_rwx = capacite_jit_rwx_courante(prot);
     let mut process = process_rc.mm.lock();
@@ -447,6 +471,22 @@ pub fn sys_mmap(
     let Some(drapeaux) = prot_to_flags_verifie_jit(prot, anonyme_prive, capacite_jit_rwx) else {
         return -errno::EACCES;
     };
+
+    #[cfg(feature = "banc-gpu-venus")]
+    if let Some((phys_base, bail)) = gpu {
+        if !fixed && !process.tient_sous_limite(length) { return -errno::ENOMEM; }
+        let bail_id = vma::nouvelle_identite();
+        let (retirement, partages, pages) = installe_vma(
+            &mut process, base, length, drapeaux | vmm::PTE_NO_CACHE | vmm::PTE_WRITE_THROUGH,
+            Backing::GemGpu { bail_id, phys_base, mapping_start: base }, fixed,
+        );
+        process.space.retient_bail_gpu(bail_id, base, base + length, bail);
+        let pml4 = process.space.pml4();
+        drop(process);
+        if fixed { task::retire_fault_range(pml4, base, length); }
+        finish_mapping_replacement(&process_rc, retirement, &partages, &pages);
+        return base as i64;
+    }
 
     if flags & MAP_ANONYMOUS == 0 && fd >= 0 {
         if let Some(FdKind::Framebuffer) = &fd_kind {
@@ -612,6 +652,11 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
         let clean_liberes = process.retire_clean_pages(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
         let retirement = process.space.prepare_unmap(addr, length);
+        #[cfg(feature = "banc-gpu-venus")]
+        {
+            let mm = &mut *process;
+            mm.space.retire_baux_gpu_sans_vma(&mm.promesses);
+        }
         let pml4 = process.space.pml4();
         (retirement, liberes, clean_liberes, pml4)
     };
@@ -672,6 +717,11 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     let Some(_) = prot_to_flags_verifie_jit(prot, anonyme_prive, capacite_jit_rwx) else {
         return -errno::EACCES;
     };
+
+    #[cfg(feature = "banc-gpu-venus")]
+    if prot & PROT_EXEC != 0 && croise_gem(&process.promesses, addr, fin) {
+        return -errno::EACCES;
+    }
 
     // Clean cache frames are deliberately shared without COW. Never make one
     // writable in place: that would grant one process writes into every other
@@ -763,6 +813,11 @@ pub fn sys_mremap(
             }
         }
         return old_addr as i64;
+    }
+
+    #[cfg(feature = "banc-gpu-venus")]
+    if croise_gem(&task::current_process().mm.lock().promesses, old_addr, old_addr.saturating_add(old_size)) {
+        return -errno::EINVAL;
     }
 
     let new_addr = sys_mmap(

@@ -141,6 +141,20 @@ repair_req={} repair_exec={}",
 /// Appelee depuis le drainage verrouille, qui repasse regulierement. Rendre
 /// le verdict plus tot serait le rendre faux ; ne jamais le rendre serait
 /// pire encore.
+/// Un verdict est-il du ? Sans verrou ni acces au materiel.
+///
+/// BOUCHAUD_RX_INSTANTANE_PARESSEUX_V1 : le drainage prenait l'instantane de
+/// la carte (lecture MMIO de `RDH`) a CHAQUE passage, pour le jeter aussitot
+/// hors d'une fenetre de reprise. Smoke Ladybird de `main@e18a954` : 312 000
+/// lectures de `RDH`, autant de sorties de VM sous KVM/WHPX, pour un verdict
+/// rendu deux fois. L'appelant ne prend l'instantane que si ceci est vrai ;
+/// `conclure_si_du` refait le meme test.
+pub fn verdict_du() -> bool {
+    EN_COURS.load(Ordering::Acquire)
+        && crate::kernel::timer::monotonic_ns()
+            .saturating_sub(DEBUT_NS.load(Ordering::Relaxed)) >= FENETRE_VERDICT_NS
+}
+
 pub fn conclure_si_du(apres: &anneau::InstantaneRx) {
     if !EN_COURS.load(Ordering::Acquire) {
         return;

@@ -218,6 +218,35 @@ Sous Windows, `run.ps1` construit et lance une configuration complète, avec le 
 .\run.ps1
 ```
 
+### Profil interactif Performance
+
+```powershell
+.\run.ps1 -Performance
+```
+
+Le lanceur sélectionne le profil de référence WHPX à un vCPU, avec IRQchip
+désactivé, surface simple, rendu CPU et journalisation de production.
+Il lit la mémoire physique disponible et choisit 2, 4, 8 ou 12 Gio.
+Le palier minimal exige 4 Gio libres et en réserve 2 à Windows. Les paliers
+supérieurs en réservent au moins 3. Si le relevé est indisponible, le lanceur
+l’indique et retient le palier minimal. Le lanceur indique la
+mémoire et les périphériques détectés. Une carte GPU détectée ne suffit pas
+à qualifier VIRGL ou Vulkan.
+
+Si l’hyperviseur Windows ou le support WHPX de QEMU ne sont pas détectés,
+le lanceur annonce TCG avant le démarrage. Il peut également relancer en
+TCG après un échec d’initialisation WHPX avant le démarrage du noyau.
+Dans les deux cas, il indique que le profil matériel WHPX n’est pas atteint.
+Un arrêt en cours d’exécution reste une erreur. Le verdict QEMU et la
+signature de l’hyperviseur invité restent dans les journaux.
+
+Une valeur explicite qui contredit le profil est refusée. Une valeur
+identique est acceptée. `-Accel whpx` interdit la relance TCG même si le
+profil sélectionne WHPX. Les options indépendantes comme `-Fullscreen`,
+`-Audio` et `-LadybirdUrl` restent utilisables. Pour les bancs A/B, omettre
+`-Performance` et fixer les paramètres comme auparavant. Le contrôle
+d’intégrité et de provenance Ladybird s’applique dans tous les modes.
+
 ### Démarrer avec la composition GPU (VIRGL)
 
 Il faut un QEMU avec `virtio-gpu-gl-pci` (virglrenderer) et une sortie OpenGL (SDL ou GTK). Le noyau négocie VIRGL tout seul quand l'hôte le propose, vérifie la convention du `BLIT` par un autotest relu au pixel, puis compose les fenêtres par le GPU ; sans VIRGL, rien ne change.

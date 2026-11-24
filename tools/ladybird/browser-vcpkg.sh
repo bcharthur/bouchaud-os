@@ -56,7 +56,7 @@ import os
 vulkan_requested = os.environ.get("BOUCHAUD_P10_GPU_VULKAN") == "1"
 remove = {"dbus", "libproxy"}
 if not vulkan_requested:
-    remove.update(("vulkan", "vulkan-headers", "vulkan-memory-allocator"))
+    remove.update(("vulkan", "vulkan-headers", "vulkan-loader", "vulkan-memory-allocator"))
 out = []
 for dep in data.get("dependencies", []):
     name = dep if isinstance(dep, str) else dep.get("name")
@@ -69,6 +69,12 @@ for dep in data.get("dependencies", []):
             features.append("vulkan")
         dep["features"] = features
     out.append(dep)
+if vulkan_requested and not any(
+    (dep if isinstance(dep, str) else dep.get("name")) == "vulkan-loader" for dep in out
+):
+    # L'overlay Ladybird de "vulkan" est un paquet vide pour les hôtes
+    # qui fournissent déjà le loader. Le profil Bouchaud le construit.
+    out.append("vulkan-loader")
 data["dependencies"] = out
 
 with open(dst, "w", encoding="utf-8") as f:
@@ -141,13 +147,14 @@ with open(sys.argv[1], encoding="utf-8") as f:
 names = {d if isinstance(d, str) else d.get("name") for d in data.get("dependencies", [])}
 import os
 vulkan_requested = os.environ.get("BOUCHAUD_P10_GPU_VULKAN") == "1"
-for forbidden in ("dbus", "libproxy") + (() if vulkan_requested else ("vulkan", "vulkan-headers", "vulkan-memory-allocator")):
+for forbidden in ("dbus", "libproxy") + (() if vulkan_requested else ("vulkan", "vulkan-headers", "vulkan-loader", "vulkan-memory-allocator")):
     if forbidden in names:
         raise SystemExit(f"dependance interdite encore presente dans le manifeste: {forbidden}")
 if vulkan_requested:
-    if "vulkan" not in names:
-        raise SystemExit("P10_VULKAN_FAIL: manifest Vulkan absent; ne pas pretendre GPU actif")
-    print("P10_VULKAN_DEPS_REQUESTED: compilation native Vulkan opt-in; pilote GPU ring3 NON qualifie")
+    requis = {"vulkan", "vulkan-headers", "vulkan-loader", "vulkan-memory-allocator"}
+    if not requis <= names:
+        raise SystemExit(f"P10_VULKAN_FAIL dependances absentes: {sorted(requis - names)}")
+    print("P10_VULKAN_DEPS_REQUESTED compilation Skia Vulkan opt-in")
 else:
     print("  manifeste Bouchaud propre : dbus/libproxy/vulkan absents")
 PYCHECK
@@ -199,6 +206,9 @@ PREFIX="$INSTALLED/x64-linux"
 for f in "$PREFIX/lib/libskia.a" "$PREFIX/lib/libssl.a" "$PREFIX/lib/libcrypto.a"; do
     [ -f "$f" ] || { echo "archive attendue absente: $f" >&2; exit 1; }
 done
+if [[ ${BOUCHAUD_P10_GPU_VULKAN:-0} == 1 ]]; then
+    [ -f "$PREFIX/lib/libvulkan.so.1" ] || { echo "Vulkan Loader partagé absent" >&2; exit 1; }
+fi
 ok "dependances navigateur pretes : $PREFIX"
 printf '  archives : %s\n' "$(find "$PREFIX/lib" -maxdepth 1 -name '*.a' | wc -l)"
 printf '  taille   : %s\n' "$(du -sh "$PREFIX" | cut -f1)"

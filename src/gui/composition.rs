@@ -71,12 +71,31 @@ static TRAMES_BUREAU: AtomicU64 = AtomicU64::new(0);
 static HISTO_DESSIN: cg::Histo = cg::Histo::neuf();
 static HISTO_PRESENTATION: cg::Histo = cg::Histo::neuf();
 
-pub fn note_trame(dessin_ns: u64, presentation_ns: u64) {
+static DERNIER_BACKEND: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn presentation_backend() -> &'static str {
+    match DERNIER_BACKEND.load(core::sync::atomic::Ordering::Relaxed) {
+        1 => "CPU",
+        2 => "VIRGL",
+        _ => "N/A",
+    }
+}
+
+pub fn note_trame(dessin_ns: u64, presentation_ns: u64, backend_virgl: Option<bool>) {
+    DERNIER_BACKEND.store(backend_virgl.map_or(0, |virgl| if virgl { 2 } else { 1 }),
+        core::sync::atomic::Ordering::Relaxed);
     HISTO_DESSIN.note(dessin_ns);
     HISTO_PRESENTATION.note(presentation_ns);
     NS_DESSIN.fetch_add(dessin_ns, Ordering::Relaxed);
     NS_PRESENTATION.fetch_add(presentation_ns, Ordering::Relaxed);
     TRAMES_BUREAU.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Number of desktop frames and upper bounds of the presentation histogram buckets.
+pub(crate) fn presentation_stats() -> (u64, [Option<u64>; 3]) {
+    let histogram = HISTO_PRESENTATION.instantane();
+    (TRAMES_BUREAU.load(Ordering::Relaxed), [50, 95, 99].map(|p| cg::centile_us(&histogram, p)))
 }
 
 fn r(rect: Rect) -> R {

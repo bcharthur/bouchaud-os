@@ -48,6 +48,7 @@ import os
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 ARTEFACT = "bouchaud-ladybird-native-browser"
 CORPUS = "bouchaud-wpt-corpus"
@@ -235,12 +236,13 @@ def decide(palier, courant_id, empreinte_courante, liste_artefacts, api, emprein
             return {"mode": "attendu", "source_run": "",
                     "raison": f"{raison} ; production en cours run={en_cours[0]}"}
     if declenche is not None:
-        try:
-            declenche()
-            return {"mode": "attendu", "source_run": "", "raison": f"{raison} ; production declenchee"}
-        except Exception as exc:
-            raison = f"{raison} ; production impossible ({type(exc).__name__}: {exc})"
+        declenche()
+        return {"mode": "attendu", "source_run": "", "raison": f"{raison} ; production declenchee"}
     return {"mode": "construit", "source_run": "", "raison": f"{raison} : repli build dans le run"}
+
+
+class AucuneBrancheCompatible(RuntimeError):
+    """Les branches sont lisibles, mais ne portent pas les entrées demandées."""
 
 
 class AttenteEchec(RuntimeError):
@@ -348,6 +350,31 @@ def gh_api(depot):
     return appel
 
 
+def selectionne_ref_production(api, refs, empreinte, empreinte_de):
+    raisons = []
+    for ref in dict.fromkeys(ref for ref in refs if ref):
+        sha = _champ(api(f"branches/{quote(ref, safe='')}"), "commit", "sha")
+        if not isinstance(sha, str) or len(sha) != 40:
+            raise AttenteEchec(f"SHA de la branche de production {ref} absent")
+        observee = empreinte_de(sha)
+        if observee == empreinte:
+            return ref
+        raisons.append(f"{ref}@{sha}={observee}")
+    raise AucuneBrancheCompatible(f"aucune branche ne porte l'empreinte {empreinte} ({', '.join(raisons)})")
+
+
+def fusion_pr_verifiee(env, courant, git):
+    if env.get("GITHUB_EVENT_NAME") != "pull_request" or not env.get("GITHUB_EVENT_PATH"):
+        return False
+    with open(env["GITHUB_EVENT_PATH"], encoding="utf-8") as evenement:
+        pr = json.load(evenement)["pull_request"]
+    if env.get("GITHUB_SHA") != courant:
+        return False
+    entete = git("cat-file", "commit", courant).split(b"\n\n", 1)[0]
+    parents = [ligne[7:].decode("ascii") for ligne in entete.splitlines() if ligne.startswith(b"parent ")]
+    return parents == [pr["base"]["sha"], pr["head"]["sha"]]
+
+
 def gh_declenche(depot, ref, empreinte, reconstruire):
     def declenche():
         subprocess.run(["gh", "api", "-X", "POST", f"repos/{depot}/actions/workflows/{FICHIER_WORKFLOW}/dispatches",
@@ -437,15 +464,22 @@ def main(argv=None) -> int:
 
     declenche = None
     if palier in CONSOMMATEURS and env.get("REF_PRODUCTION"):
-        declenche = gh_declenche(depot, env["REF_PRODUCTION"], courant["empreinte"], reconstruire)
+        def declenche():
+            ref = selectionne_ref_production(api, (env["REF_PRODUCTION"], env.get("REF_BASE")),
+                                             courant["empreinte"], empreinte_de)
+            gh_declenche(depot, ref, courant["empreinte"], reconstruire)()
     try:
         d = decide(palier, courant_id, courant["empreinte"], liste_artefacts(api), api, empreinte_de, depot,
                    reconstruire=reconstruire, depuis=depuis, declenche=declenche)
-    except ValueError:
-        raise
-    except Exception as exc:
+    except AucuneBrancheCompatible as exc:
+        if not fusion_pr_verifiee(env, courant["commit"], le.git):
+            print(f"LADYBIRD_PROVENANCE_ECHEC {exc}")
+            return 1
         d = {"mode": "construit", "source_run": "",
-             "raison": f"API indisponible ({type(exc).__name__}) : repli build"}
+             "raison": "entrées propres au commit de fusion PR vérifié"}
+    except Exception as exc:
+        print(f"LADYBIRD_PROVENANCE_ECHEC {type(exc).__name__}: {exc}")
+        return 1
     print(f"PROVENANCE_DECISION mode={d['mode']} source_run={d['source_run'] or '-'} raison={d['raison']}")
     ecrit("mode", d["mode"])
     ecrit("source_run", d["source_run"])

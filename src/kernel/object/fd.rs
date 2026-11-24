@@ -45,6 +45,11 @@ pub enum FdKind {
     Random,
     /// `/dev/fb0`.
     Framebuffer,
+    /// Nœud de rendu VirtIO-GPU et identité de son ouverture.
+    GpuRender(Arc<()>),
+    /// sync_file d'une clôture déjà confirmée par VirtIO.
+    #[cfg(feature = "banc-gpu-venus")]
+    GpuFence(u64),
     /// `/dev/input/event0` (clavier).
     InputKeyboard,
     /// `/dev/input/event1` (souris).
@@ -344,7 +349,159 @@ pub fn wait_readiness(ticket: WaitTicket, deadline_ns: Option<u64>) {
 }
 
 pub fn notify_readiness() {
+    NOTIFS_GLOBALES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Tous les abonnes : un evenement sans objet nomme (fermeture, signal,
+    // entree) peut concerner n'importe qui -- comme avant ce mecanisme.
+    let files: Vec<Arc<WaitQueue>> = ABONNES.lock().iter().map(|a| Arc::clone(&a.file)).collect();
+    reveille_files(files);
     READINESS.wake_all();
+}
+
+// --- BOUCHAUD_REVEIL_CIBLE_V1 ------------------------------------------------
+//
+// LE REVEIL COLLECTIF.
+//
+// Toute ecriture dans un tube, un canal de `socketpair` ou un `eventfd`
+// appelait `notify_readiness()`, qui reveille TOUTES les attentes `poll`,
+// `select` et `epoll_wait` du systeme. Ladybird en tient des dizaines (une
+// boucle d'evenements par fil) et echange des milliers de messages IPC par
+// seconde : chaque message reveillait chaque boucle, qui relisait tous ses
+// descripteurs pour se rendormir. Session WHPX du 19/11 : `bo-navigateur`
+// 15 s de temps noyau pour 0,3 s utilisateur ; en SMP2, 7 151 IPI/s et un
+// temps noyau multiplie par quatre.
+//
+// Une attente s'ABONNE aux objets qu'elle surveille (adresse de l'etat
+// partage : tube, canal, eventfd) et dort sur SA file. Un producteur
+// `notifie_cle(objet)` ne reveille que les abonnes de cet objet. Ce qui
+// n'a pas d'objet nommable s'abonne a `CLE_TOUT` et reste reveille par
+// tout, comme avant. `notify_readiness()` reveille toujours tout le monde.
+//
+// Course producteur/attente : l'abonnement est inscrit AVANT le ticket et
+// AVANT le balayage. Un producteur qui modifie l'etat puis collecte les
+// abonnes sous le verrou du registre voit l'abonne (reveil) ; s'il collecte
+// avant l'inscription, le balayage qui suit l'inscription voit l'etat.
+
+/// Abonnement universel : reveille par toute notification.
+pub const CLE_TOUT: usize = 0;
+
+struct Abonne {
+    cle: usize,
+    file: Arc<WaitQueue>,
+    /// La tache abonnee : une tache tuee pendant son attente meurt au
+    /// parking SANS derouler sa pile (`meurt_au_parking`), donc sans
+    /// `Drop` ; `desinscrit_tache` retire alors ses abonnements.
+    tid: u32,
+}
+
+static ABONNES: SpinLock<Vec<Abonne>> = SpinLock::new(Vec::new());
+
+static NOTIFS_GLOBALES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NOTIFS_CIBLEES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static FILES_REVEILLEES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static ATTENTES_ABONNEES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static REVEILS_A_VIDE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn reveille_files(files: Vec<Arc<WaitQueue>>) {
+    for (i, file) in files.iter().enumerate() {
+        // Une attente abonnee a plusieurs objets touches par la meme
+        // notification n'est reveillee qu'une fois.
+        if files[..i].iter().any(|f| Arc::ptr_eq(f, file)) {
+            continue;
+        }
+        FILES_REVEILLEES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        file.wake_all();
+    }
+}
+
+/// L'etat de `cle` (adresse d'un etat partage) a change : reveiller ses
+/// abonnes, les abonnes universels, et les attentes historiques de la file
+/// globale (lectures et ecritures bloquantes, qui n'y sont pas encore).
+pub fn notifie_cle(cle: usize) {
+    NOTIFS_CIBLEES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let files: Vec<Arc<WaitQueue>> = ABONNES
+        .lock()
+        .iter()
+        .filter(|a| a.cle == cle || a.cle == CLE_TOUT)
+        .map(|a| Arc::clone(&a.file))
+        .collect();
+    reveille_files(files);
+    READINESS.wake_all();
+}
+
+/// La cle d'un etat partage : son adresse, stable tant que l'`Arc` vit.
+pub fn cle_de<T>(etat: &Arc<T>) -> usize {
+    Arc::as_ptr(etat) as *const u8 as usize
+}
+
+/// Une attente abonnee. Desinscrite a sa destruction, quel que soit le
+/// chemin de sortie (retour, EINTR, EFAULT).
+pub struct Abonnement {
+    file: Arc<WaitQueue>,
+}
+
+impl Abonnement {
+    /// `cles` vide : abonnement universel (`CLE_TOUT`).
+    pub fn new(mut cles: Vec<usize>) -> Self {
+        cles.sort_unstable();
+        cles.dedup();
+        if cles.is_empty() {
+            cles.push(CLE_TOUT);
+        }
+        let file = Arc::new(WaitQueue::new());
+        let tid = crate::kernel::task::try_current().map(|t| t.tid).unwrap_or(0);
+        {
+            let mut abonnes = ABONNES.lock();
+            for cle in cles {
+                abonnes.push(Abonne { cle, file: Arc::clone(&file), tid });
+            }
+        }
+        Self { file }
+    }
+
+    pub fn ticket(&self) -> WaitTicket {
+        self.file.ticket()
+    }
+
+    pub fn attends(&self, ticket: WaitTicket, deadline_ns: Option<u64>) {
+        ATTENTES_ABONNEES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        match deadline_ns {
+            Some(deadline) => { self.file.wait_until(ticket, deadline); }
+            None => self.file.wait(ticket),
+        }
+    }
+
+    /// Un reveil n'a rien rendu pret : compte pour la mesure.
+    pub fn reveil_a_vide() {
+        REVEILS_A_VIDE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Une tache meurt pendant son attente (`meurt_au_parking`, qui ne revient
+/// pas) : ses abonnements partent avec elle. Sans cela, chaque tache tuee en
+/// `poll` laissait des entrees que chaque notification parcourait ensuite.
+pub fn desinscrit_tache(tid: u32) {
+    if tid != 0 {
+        ABONNES.lock().retain(|a| a.tid != tid);
+    }
+}
+
+impl Drop for Abonnement {
+    fn drop(&mut self) {
+        ABONNES.lock().retain(|a| !Arc::ptr_eq(&a.file, &self.file));
+    }
+}
+
+/// `[DISPO]` : notifications (globales, ciblees), files reveillees, attentes
+/// et reveils A VIDE (une attente reveillee sans rien de pret, avant son
+/// echeance). Le rapport reveils_a_vide / attentes est le cout du reveil
+/// collectif.
+pub fn log_dispo() {
+    use core::sync::atomic::Ordering::Relaxed;
+    crate::serial_println!(
+        "[DISPO] notifs_globales={} notifs_ciblees={} files_reveillees={} attentes={} reveils_a_vide={} abonnes={}",
+        NOTIFS_GLOBALES.load(Relaxed), NOTIFS_CIBLEES.load(Relaxed), FILES_REVEILLEES.load(Relaxed),
+        ATTENTES_ABONNEES.load(Relaxed), REVEILS_A_VIDE.load(Relaxed), ABONNES.lock().len(),
+    );
 }
 
 /// Ferme des descripteurs retires d'une table, puis reveille les attentes de
@@ -570,6 +727,9 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
     // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
     // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
+    if path == crate::kernel::system_metrics::PROC_PATH {
+        return Some(FdKind::Instantane(Arc::new(crate::kernel::system_metrics::proc_snapshot())));
+    }
     if path == "/proc/stat" {
         return Some(FdKind::Instantane(Arc::new(proc_stat_global())));
     }
@@ -599,6 +759,8 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     match path {
         "/dev/null" => Some(FdKind::Null),
         "/dev/zero" => Some(FdKind::Zero),
+        "/dev/dri/renderD128" => crate::drivers::virtio_gpu::capset_render_id()
+            .map(|_| FdKind::GpuRender(Arc::new(()))),
         "/dev/random" | "/dev/urandom" => Some(FdKind::Random),
         "/dev/tty" | "/dev/console" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" => Some(FdKind::Console),
         // Les consoles virtuelles sont ouvertes par le plugin linuxfb de Qt

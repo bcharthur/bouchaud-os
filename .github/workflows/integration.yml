@@ -661,6 +661,13 @@ jobs:
       - name: Fichiers ring3 - lectures exactes, copies bornees
         if: always()
         run: tools/ci/run_lecture_fichiers.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      # BOUCHAUD_REVEIL_CIBLE_V1 : meme noyau. Un message IPC ne reveille que
+      # son destinataire : 12 processus en poll(-1) sur leurs propres canaux
+      # ne consomment rien pendant 20 000 allers-retours IPC entre deux
+      # autres (main : 18,1 s de CPU pour les inactifs).
+      - name: IPC ring3 - un message ne reveille que son destinataire
+        if: always()
+        run: tools/ci/run_reveil_cible.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       # BOUCHAUD_JIT_RWX_V1 : meme noyau. L'UNIQUE exception a W^X -- memoire
       # anonyme privee d'un lanceur Java installe par root -- et rien d'autre :
       # un binaire hors /usr/lib/jvm, ou inscriptible par le groupe, n'obtient
@@ -678,6 +685,7 @@ jobs:
             target/verifie-tcp-perte/serie.log
             target/verifie-tcp-perte/serveur.log
             target/lecture-fichiers/serie.log
+            target/reveil-cible/serie.log
             target/jit-rwx/serie.log
           if-no-files-found: warn
 

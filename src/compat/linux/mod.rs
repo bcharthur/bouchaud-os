@@ -26,6 +26,7 @@ pub mod nr;
 pub mod proc;
 pub mod profil;
 pub mod verrous;
+mod virtgpu;
 
 use alloc::string::String;
 use alloc::vec::Vec;

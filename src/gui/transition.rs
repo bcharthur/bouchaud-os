@@ -286,6 +286,23 @@ pub fn focus_transfere(
     rects
 }
 
+/// L'ajout ou le retrait d'une fenetre change son empreinte peinte (ombre
+/// comprise), le cadre de l'autre fenetre qui change de focus et la barre
+/// des taches. Une fenetre retiree pendant qu'elle est minimisee n'a plus
+/// d'empreinte visible.
+pub fn fenetre_ajoutee_ou_retiree(
+    empreinte: Option<Rect>,
+    autre_focus: Option<Rect>,
+    barre_taches: Rect,
+) -> Rects {
+    let mut rects = Rects::vide();
+    for rect in [empreinte, autre_focus].into_iter().flatten() {
+        rects.pousse(rect, Cible::Fenetre);
+    }
+    rects.pousse(barre_taches, Cible::BarreTaches);
+    rects
+}
+
 // ─── Barre du haut ─────────────────────────────────────────────────────────
 
 /// Une seconde passe : l'heure, la charge CPU, la memoire et le disque bougent.

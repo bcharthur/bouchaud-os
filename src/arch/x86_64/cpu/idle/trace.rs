@@ -126,6 +126,7 @@ pub fn log_idle_snapshot() {
     crate::drivers::mouse::log_diagnostic();
     crate::arch::x86_64::idt::log_preempt_irq_diagnostic();
     crate::kernel::sync::log_wait_word_stats();
+    crate::kernel::fd::log_dispo();
     crate::fs::persistance::log_transaction_stats();
     crate::kernel::readahead::log_stats();
 }

@@ -69,6 +69,9 @@ fn publie_parking(interruptible: bool) -> Parking {
 /// d'y dormir. Ne revient pas.
 pub(crate) fn meurt_au_parking() -> ! {
     MORTES_AU_PARKING.fetch_add(1, Ordering::Relaxed);
+    // BOUCHAUD_REVEIL_CIBLE_V1 : la pile ne sera pas deroulee ; un
+    // `Abonnement` en cours ne serait jamais desinscrit (revue #344).
+    crate::kernel::fd::desinscrit_tache(current().tid);
     meurt_soi_meme(current());
     retire_exec_zombie_current()
 }
@@ -265,11 +268,25 @@ pub(crate) fn park_current_on_until(wait_queue_key: usize, deadline_ns: u64) -> 
 /// un verrou par tache, pour supprimer un reveil rare et inoffensif.
 pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
     let mut woke = 0;
+    // BOUCHAUD_REVEIL_UN_SEUL_GARDE_V1 -- UN GARDE POUR TOUT LE PARCOURS.
+    //
+    // `registre_tache(index)` prenait un garde de lecture PAR EMPLACEMENT :
+    // `cli`/`sti` et deux operations SeqCst sur le compteur GLOBAL `LECTEURS`,
+    // partage par tous les coeurs. Le registre d'une session Ladybird compte
+    // plusieurs centaines d'emplacements : un seul reveil en faisait autant,
+    // et le profil hote place un des points chauds du noyau juste apres le
+    // `sti` de cette boucle.
+    //
+    // Chaque iteration tenait DEJA un garde pendant `reveille()` et
+    // `publish_ready()` : n'en prendre qu'un pour la boucle n'ajoute aucun
+    // ordre de verrous, il allonge seulement la tenue -- le temps du
+    // parcours -- pendant laquelle un ecrivain du registre attend.
+    let lecture = RegistreLecture::acquire();
     for index in 0..registre_longueur() {
         if woke == limit {
             break;
         }
-        let Some(tache) = registre_tache(index) else { continue };
+        let Some(tache) = registre_tache_sous_lecture(&lecture, index) else { continue };
         if tache.wait_queue_key != wait_queue_key {
             continue;
         }
@@ -302,6 +319,7 @@ pub(crate) fn wake_wait_queue(wait_queue_key: usize, limit: usize) -> usize {
         publish_ready(index);
         woke += 1;
     }
+    drop(lecture);
     woke
 }
 

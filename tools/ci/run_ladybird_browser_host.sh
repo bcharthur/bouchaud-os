@@ -32,15 +32,46 @@ SUFFIXE=${BO_SMOKE_SUFFIXE:-}
 # l'ecran X (`import`), recadree sur l'ecran de la machine.
 AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
 AFFICHE=(-display none)
+CAPTURE_X=0
+SKIA_BACKEND=${BO_SMOKE_SKIA_BACKEND:-cpu}
+ACCEL_QEMU=()
+case "${BO_SMOKE_ACCEL:-}" in
+    "") ;;
+    tcg) ACCEL_QEMU=(-accel tcg) ;;
+    kvm)
+        if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            echo 'Le banc KVM exige un périphérique /dev/kvm accessible.' >&2
+            exit 2
+        fi
+        ACCEL_QEMU=(-accel kvm) ;;
+    *) echo 'BO_SMOKE_ACCEL doit valoir tcg ou kvm.' >&2; exit 2 ;;
+esac
 case "$AFFICHAGE" in
     bga) ECRAN=() ;;
     virtio) ECRAN=(-vga none -device virtio-gpu-pci) ;;
     virgl)
         ECRAN=(-vga none -device virtio-gpu-gl-pci)
         AFFICHE=(-display sdl,gl=on)
-        [ -n "${DISPLAY:-}" ] || { echo "BO_SMOKE_AFFICHAGE=virgl exige DISPLAY (Xvfb)" >&2; exit 2; } ;;
-    *) echo "BO_SMOKE_AFFICHAGE inconnu : $AFFICHAGE (bga, virtio ou virgl)" >&2; exit 2 ;;
+        CAPTURE_X=1 ;;
+    venus)
+        ECRAN=(-vga none -device virtio-gpu-gl-pci,venus=on,blob=on,hostmem=512M)
+        AFFICHE=(-display sdl,gl=on)
+        CAPTURE_X=1
+        VENUS_SYSROOT=${BO_SMOKE_VENUS_SYSROOT:?Le smoke Venus exige un rootfs ICD Mesa}
+        for entree in lib/libvulkan.so.1 lib/libvulkan_virtio.so lib64/ld-linux-x86-64.so.2 venus.json; do
+            [ -f "$VENUS_SYSROOT/$entree" ] || { echo "Rootfs Venus incomplet : $entree" >&2; exit 2; }
+        done
+        case "$SKIA_BACKEND" in cpu|vulkan) ;; *) echo "Backend Skia inconnu" >&2; exit 2 ;; esac ;;
+    *) echo "BO_SMOKE_AFFICHAGE inconnu : $AFFICHAGE (bga, virtio, virgl ou venus)" >&2; exit 2 ;;
 esac
+if [ "$CAPTURE_X" = 1 ] && [ -z "${DISPLAY:-}" ]; then
+    echo "Ce mode graphique exige DISPLAY (Xvfb)" >&2
+    exit 2
+fi
+if [ "$AFFICHAGE" != venus ] && [ "$SKIA_BACKEND" != cpu ]; then
+    echo "BO_SMOKE_SKIA_BACKEND=vulkan exige BO_SMOKE_AFFICHAGE=venus" >&2
+    exit 2
+fi
 
 # BOUCHAUD_BANC_PREREQUIS_V1 -- UN OUTIL DE BANC ABSENT N'EST PAS UN MAILLON
 # PRODUIT ROUGE.
@@ -65,7 +96,22 @@ for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Com
   # BOUCHAUD_PIPEFAIL_SANS_SIGPIPE_V1 : `! a | b` ne declenche jamais `set -e`
   # (bash l'exclut) -- la verification etait inerte. Lue d'un fichier, sans tube.
   readelf -l "$OUT/$f" > "/tmp/entetes-$f.txt"
-  if grep -q INTERP "/tmp/entetes-$f.txt"; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
+  if grep -q INTERP "/tmp/entetes-$f.txt"; then
+      if [ "$AFFICHAGE" != venus ]; then echo "$f : binaire dynamique (INTERP)" >&2; exit 1; fi
+  elif [ "$AFFICHAGE" = venus ]; then
+      echo "$f : binaire du profil statique dans la campagne Skia" >&2
+      exit 1
+  fi
+  if [ "$AFFICHAGE" = venus ]; then
+      dependances=$(readelf -dW "$OUT/$f" | sed -n 's/.*(NEEDED).*\[\([^]]*\)\].*/\1/p')
+      while IFS= read -r bibliotheque; do
+          [ -z "$bibliotheque" ] && continue
+          if [ ! -f "$VENUS_SYSROOT/lib/$bibliotheque" ] && [ ! -f "$VENUS_SYSROOT/lib64/$bibliotheque" ]; then
+              echo "Rootfs Venus incomplet pour $f : $bibliotheque" >&2
+              exit 2
+          fi
+      done <<< "$dependances"
+  fi
 done
 
 rm -rf scenario-browser-host ladybird-browser-host${SUFFIXE}.img \
@@ -88,6 +134,11 @@ if [ -d "$OUT/resources" ]; then
   cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
 fi
 cp /etc/ssl/certs/ca-certificates.crt "$SCENARIO/etc/ssl/certs/ca-certificates.crt"
+if [ "$AFFICHAGE" = venus ]; then
+  mkdir -p "$SCENARIO/usr/share/vulkan/icd.d"
+  cp -Lr "$VENUS_SYSROOT/lib" "$VENUS_SYSROOT/lib64" "$SCENARIO/"
+  cp "$VENUS_SYSROOT/venus.json" "$SCENARIO/usr/share/vulkan/icd.d/bouchaud_venus.json"
+fi
 
 # LA DUREE DE VIE DE LA VM, RENDUE A L'HOTE -- POUR LE DIAGNOSTIC SEULEMENT.
 #
@@ -176,6 +227,9 @@ echo "AUTORUN_DESKTOP_ENTER"
 desktop
 echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
+if [ "$AFFICHAGE" = venus ]; then
+  sed -i "1i export LD_LIBRARY_PATH=/lib\nexport VK_DRIVER_FILES=/usr/share/vulkan/icd.d/bouchaud_venus.json\nexport BOUCHAUD_SKIA_BACKEND=$SKIA_BACKEND" "$SCENARIO/autorun"
+fi
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
 fi
@@ -327,7 +381,11 @@ SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 # `[SMP-PF] c1=0 c2=0 c3=0` -- : le navigateur saturait un coeur pendant que
 # trois autres n'existaient pas. Un test qui fait tourner le produit dans une
 # configuration que personne n'expedie ne mesure pas le produit.
-qemu-system-x86_64 \
+# BOUCHAUD_BANC_PERF_V2 : `BO_SMOKE_QEMU_ARGS` ajoute des arguments QEMU
+# (p. ex. un second moniteur pour l'echantillonneur hote
+# tools/perf/echantillonneur_qemu.py). Vide par defaut : rien ne change.
+read -r -a QEMU_EXTRA <<< "${BO_SMOKE_QEMU_ARGS:-}"
+qemu-system-x86_64 "${ACCEL_QEMU[@]}" ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
   -m 8192 -smp 4 -cpu max "${AFFICHE[@]}" -no-reboot \
@@ -371,16 +429,16 @@ capture_mire() {
     local t_capture_ms resultat
     t_capture_ms=$(maintenant_ms)
 
-    if [ "$AFFICHAGE" = virgl ]; then
+    if [ "$CAPTURE_X" = 1 ]; then
         # Ecran X -> PPM de l'ecran de la machine (zone non noire).
         if import -window root "$fichier.png" 2>/dev/null \
             && python3 -c 'import sys; from PIL import Image; i=Image.open(sys.argv[1]).convert("RGB"); b=i.getbbox(); (i.crop(b) if b else i).save(sys.argv[2])' "$fichier.png" "$fichier"; then
             :
         fi
     fi
-    if [ "$AFFICHAGE" != virgl ] && ! echo "screendump $fichier" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
+    if [ "$CAPTURE_X" = 0 ] && ! echo "screendump $fichier" | socat - "unix-connect:$MONITEUR" >/dev/null 2>&1; then
         resultat=moniteur_muet
-    elif [ "$AFFICHAGE" = virgl ] && [ ! -s "$fichier" ]; then
+    elif [ "$CAPTURE_X" = 1 ] && [ ! -s "$fichier" ]; then
         resultat=capture_vide
     else
         # `screendump` rend la main avant que le fichier soit entierement
@@ -995,6 +1053,17 @@ if [ "$MIRE_VERDICT" != ok ]; then
   echo "FONCTIONNEL" >&2
   echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=surface"
   exit 1
+fi
+
+if [ "$AFFICHAGE" = venus ] && ! grep -aFq "[LB:SKIA] backend=$SKIA_BACKEND" "$LOG"; then
+  echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=backend_skia attendu=$SKIA_BACKEND" >&2
+  exit 1
+fi
+if [ "$AFFICHAGE" = venus ] && [ "$SKIA_BACKEND" = vulkan ]; then
+  if ! grep -aFq '[LB:SKIA] readback=vulkan' "$LOG" || grep -aFq '[LB:SKIA] readback=failed' "$LOG"; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=readback_skia" >&2
+    exit 1
+  fi
 fi
 
 echo "LADYBIRD_FUNCTIONAL_SMOKE ok"

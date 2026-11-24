@@ -38,10 +38,12 @@ target_link_libraries(BouchaudBrowserHost PRIVATE
 )
 
 if (BOUCHAUD_PORT)
-    target_link_options(BouchaudBrowserHost PRIVATE
-        -static-pie
-        LINKER:--allow-multiple-definition
-    )
+    target_link_options(BouchaudBrowserHost PRIVATE LINKER:--allow-multiple-definition)
+    if (BOUCHAUD_VULKAN_COMPOSITOR)
+        target_link_options(BouchaudBrowserHost PRIVATE -pie)
+    else()
+        target_link_options(BouchaudBrowserHost PRIVATE -static-pie)
+    endif()
     set_target_properties(BouchaudBrowserHost PROPERTIES
         SKIP_BUILD_RPATH TRUE
         BUILD_WITH_INSTALL_RPATH FALSE

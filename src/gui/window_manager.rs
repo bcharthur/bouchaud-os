@@ -667,8 +667,7 @@ fn boucle() {
             lance_calculatrice(&mut wins, home, &mut degats);
             continue;
         }
-        let fenetre = make_app(kind, home, &mut spawn_n);
-        ouvre_fenetre(&mut wins, fenetre, &mut degats);
+        ouvre_app_integree(&mut wins, home, &mut degats, kind, &mut spawn_n);
     }
     // BOUCHAUD_DOOM_AUTOSTART_BANC_V1 : les bancs QEMU n'ont pas de souris
     // pour double-cliquer ; `BO_AUTOSTART_DOOM=1` ouvre DOOM comme le ferait
@@ -684,6 +683,8 @@ fn boucle() {
             lance_application(&mut wins, home, &mut degats, &chemin);
         }
     }
+    #[cfg(all(feature = "reference-desktop", feature = "banc-gpu-perte-scanout"))]
+    lance_application(&mut wins, home, &mut degats, "/mire-gpu");
     // Le portail du navigateur : voir BOUCHAUD_NAVIGATEUR_ATTEND_SON_RESOLVEUR_V2
     // plus bas. `services_initialises` dit que la session supervisee PEUT
     // demarrer : la premiere trame est posee et le reseau a eu sa chance. Le
@@ -839,10 +840,7 @@ fn boucle() {
                 continue;
             }
             if k == Key::Other && (menu_open || !client_actif) {
-                // Un menu ou une fenetre disparait : ce qu'elle couvrait
-                // redevient fond, et personne d'autre ne le sait.
                 sale = true;
-                degats.tout();
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 // Une application native peut prendre Echap pour elle (un menu
                 // contextuel ouvert se ferme) : la fenetre ne se ferme pas.
@@ -851,12 +849,19 @@ fn boucle() {
                 });
                 if menu_open {
                     menu_open = false;
+                    for (rect, cible) in transition::menu_bascule(window::menu_proto(), barre_taches_rect()).iter() {
+                        degats.ajoute(origine_de(cible), rect);
+                    }
                 } else {
                     use crate::gui::atelier::session::{action_echap, EchapSansMenu};
                     match action_echap(prise, !wins.is_empty()) {
-                        EchapSansMenu::PrisParApplication => {}
+                        EchapSansMenu::PrisParApplication => {
+                            if let Some(i) = actif {
+                                degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[i]));
+                            }
+                        }
                         EchapSansMenu::FermerFenetre => {
-                            if !ferme_fenetre_du_dessus(&mut wins) {
+                            if !ferme_fenetre_du_dessus(&mut wins, &mut degats) {
                                 crate::serial_println!("BOUCHAUD_ATELIER_ECHAP_IGNOREE raison=aucune_fenetre_fermable");
                             }
                         }
@@ -881,10 +886,7 @@ fn boucle() {
                 degats.ajoute(Origine::Fenetre, empreinte_fenetre(&wins[index]));
                 TOUCHES_VERS_BUREAU.fetch_add(1, Ordering::Relaxed);
                 if apps::key_to_app(&mut wins[index], k, home) {
-                    ferme_fenetre(&mut wins, index);
-                    // Une fenetre qui disparait decouvre ce qu'elle couvrait,
-                    // et le bureau est seul a le savoir.
-                    degats.tout();
+                    ferme_fenetre(&mut wins, index, &mut degats);
                 }
             }
         }
@@ -1081,8 +1083,7 @@ fn boucle() {
                             } else if kind == window::KIND_CALCULATRICE {
                                 lance_calculatrice(&mut wins, home, &mut degats);
                             } else {
-                                let fenetre = make_app(kind, home, &mut spawn_n);
-                                ouvre_fenetre(&mut wins, fenetre, &mut degats);
+                                ouvre_app_integree(&mut wins, home, &mut degats, kind, &mut spawn_n);
                             }
                             // Une fenetre vient d'apparaitre : sans cela, la
                             // trame ne serait composee qu'au prochain degat.
@@ -1290,7 +1291,7 @@ fn boucle() {
         // `temoin_composition` plus bas.
         let pompe_t_ms = crate::kernel::timer::monotonic_ms();
         degats_routes.clear();
-        let (degat_clients, perte_fenetre, gpu_sale) = pompe_clients(&mut wins, recompose_aveugle, &mut degats_routes);
+        let (degat_clients, perte_fenetre, gpu_sale) = pompe_clients(&mut wins, recompose_aveugle, &mut degats_routes, &mut degats);
         if !degat_clients.vide() {
             sale = true;
             degats.ajoute(Origine::Client, degat_clients);
@@ -1306,8 +1307,6 @@ fn boucle() {
             trame_gpu_due = true;
         }
         if perte_fenetre {
-            // Une fenetre a disparu : ce qu'elle couvrait redevient fond.
-            degats.tout();
             sale = true;
         }
 
@@ -1603,7 +1602,8 @@ fn boucle() {
                 {
                     let fin = crate::kernel::timer::monotonic_ns();
                     crate::gui::composition::note_trame(
-                        t_presentation.saturating_sub(t_trame), fin.saturating_sub(t_presentation));
+                        t_presentation.saturating_sub(t_trame), fin.saturating_sub(t_presentation),
+                        (!repli_cpu_du).then(|| plan_gpu_precedent.nombre() != 0));
                 }
 
                 crate::kernel::timer::mark_frame();
@@ -2213,7 +2213,7 @@ fn ferme_trame(
 }
 
 fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
-    degats_routes: &mut Vec<Rect>) -> (Rect, bool, bool) {
+    degats_routes: &mut Vec<Rect>, degats: &mut Degats) -> (Rect, bool, bool) {
     let mut degat_ecran = Rect::default();
     let mut gpu_sale = false;
     let mut morts: Vec<usize> = Vec::new();
@@ -2301,7 +2301,7 @@ fn pompe_clients(wins: &mut Vec<Win>, recompose_aveugle: bool,
     // A l'envers : retirer une fenetre decale celles qui suivent.
     let perte = !morts.is_empty();
     for index in morts.into_iter().rev() {
-        ferme_fenetre(wins, index);
+        ferme_fenetre(wins, index, degats);
     }
     (degat_ecran, perte, gpu_sale)
 }
@@ -2311,7 +2311,7 @@ fn proto_rect_ecran(rect: Rect) -> Rect {
 }
 
 /// Ferme une fenetre, en terminant son client s'il y en a un.
-fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
+fn ferme_fenetre(wins: &mut Vec<Win>, index: usize, degats: &mut Degats) {
     if index >= wins.len() {
         return;
     }
@@ -2323,13 +2323,24 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
         App::Navigateur { client } | App::Doom { client } | App::Application { client } => client.vivant(),
         _ => true,
     };
+    let actif = widgets::indice_focus(wins) == Some(index);
     if vivant && !wins[index].min {
-        let actif = widgets::indice_focus(wins) == Some(index);
         let w = &wins[index];
         crate::gui::atelier::effets::ferme(w.id.get(), vers_boite(cadre_fenetre(w)),
             crate::gui::theme::RADIUS_WINDOW, || widgets::draw_fenetre(w, actif));
     }
     let mut w = wins.remove(index);
+    let empreinte = (!w.min).then(|| empreinte_fenetre(&w));
+    let nouveau_focus = if actif {
+        widgets::indice_focus(wins).map(|i| empreinte_fenetre(&wins[i]))
+    } else {
+        None
+    };
+    for (rect, cible) in transition::fenetre_ajoutee_ou_retiree(
+        empreinte, nouveau_focus, barre_taches_rect(),
+    ).iter() {
+        degats.ajoute(origine_de(cible), rect);
+    }
     // BOUCHAUD_ATELIER_GEOMETRIE_V1 : la fermeture laisse une trace, et le
     // bouton Demarrer (dont la place depend du nombre de fenetres) se republie.
     crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_FERMEE titre={}", w.window.title);
@@ -2343,11 +2354,11 @@ fn ferme_fenetre(wins: &mut Vec<Win>, index: usize) {
 }
 
 /// Ferme la fenetre du dessus. Rend `false` s'il n'y en avait aucune.
-fn ferme_fenetre_du_dessus(wins: &mut Vec<Win>) -> bool {
+fn ferme_fenetre_du_dessus(wins: &mut Vec<Win>, degats: &mut Degats) -> bool {
     match wins.len() {
         0 => false,
         n => {
-            ferme_fenetre(wins, n - 1);
+            ferme_fenetre(wins, n - 1, degats);
             true
         }
     }
@@ -2384,8 +2395,8 @@ fn ferme_tous_les_clients(wins: &mut Vec<Win>) {
 // exemple, d'ou « la barre des taches n'affiche Fichiers que si je passe la
 // souris dessus ».
 //
-// Une fenetre qui apparait est le seul cas ou le plein ecran est justifie : ce
-// qu'elle recouvre n'a jamais ete dessine, et le bureau est seul a le savoir.
+// L'ouverture invalide l'empreinte peinte, le focus precedent et la barre
+// des taches. Le registre des effets ajoute les zones de l'animation.
 //
 // Pousser directement dans `wins` est desormais interdit ailleurs qu'ici :
 // `tools/verifie-ouverture-fenetre.py` echoue si un `wins.push` reapparait hors
@@ -2452,12 +2463,16 @@ fn ouvre_fenetre(wins: &mut Vec<Win>, fenetre: Win, degats: &mut Degats) {
     // l'image de livraison exige apres un double-clic REEL sur son icone.
     crate::serial_println!("BOUCHAUD_ATELIER_FENETRE_OUVERTE titre={}", fenetre.window.title);
     profil_trames::note_ouverture();
-    // BOUCHAUD_ATELIER_EFFETS_V1 : l'apparition est animee (fondu et montee),
-    // datee sur l'horloge monotone. Le plein ecran reste le degat de CE tour.
-    crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte_fenetre(&fenetre)));
+    let empreinte = empreinte_fenetre(&fenetre);
+    let ancien_focus = widgets::indice_focus(wins).map(|i| empreinte_fenetre(&wins[i]));
+    crate::gui::atelier::effets::ouvre(fenetre.id.get(), vers_boite(empreinte));
+    for (rect, cible) in transition::fenetre_ajoutee_ou_retiree(
+        Some(empreinte), ancien_focus, barre_taches_rect(),
+    ).iter() {
+        degats.ajoute(origine_de(cible), rect);
+    }
     journalise_geometrie(&fenetre);
     wins.push(fenetre);
-    degats.tout();
     journalise_demarrer(wins.len());
 }
 
@@ -2562,6 +2577,17 @@ fn lance_calculatrice(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     lance_application_zone(wins, cwd, degats, CHEMIN_CALCULATRICE, "Calculatrice", (320, 420));
 }
 
+fn ouvre_app_integree(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, kind: usize, spawn_n: &mut i32) {
+    if kind == window::KIND_MONITEUR
+        && crate::shell::exported().iter().any(|e| e == "BO_MONITEUR_RING3=1")
+        && lance_application_zone(wins, cwd, degats, "/bin/moniteur-gui", "Moniteur", (420, 180))
+    {
+        return;
+    }
+    let fenetre = make_app(kind, cwd, spawn_n);
+    ouvre_fenetre(wins, fenetre, degats);
+}
+
 /// BOUCHAUD_GUI_CLIENT_GENERIQUE_V1 : lance n'importe quel programme ring 3
 /// du protocole GUI dans une fenetre standard (`BO_AUTOSTART_APP=/chemin`).
 fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str) {
@@ -2570,7 +2596,7 @@ fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemi
 }
 
 fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str,
-                          titre: &str, zone: (i32, i32)) {
+                          titre: &str, zone: (i32, i32)) -> bool {
     let (largeur, hauteur) = zone;
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
     let client = match Client::lance(chemin, titre, cwd,
@@ -2578,7 +2604,7 @@ fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, 
         Ok(client) => client,
         Err(error) => {
             crate::serial_println!("BOUCHAUD_APP_LAUNCH_ERROR chemin={} {}", chemin, error);
-            return;
+            return false;
         }
     };
     crate::serial_println!("BOUCHAUD_APP_LAUNCH chemin={} pid={}", chemin, client.pid);
@@ -2593,6 +2619,7 @@ fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, 
             client.envoie_configuration(true);
         }
     }
+    true
 }
 
 /// DOOM: autre application ring3, independante du navigateur et du service.
@@ -2865,8 +2892,7 @@ fn handle_click(
                     lance_calculatrice(wins, home, degats);
                     fenetre_ouverte = true;
                 } else {
-                    let fenetre = make_app(kind, home, spawn_n);
-                    ouvre_fenetre(wins, fenetre, degats);
+                    ouvre_app_integree(wins, home, degats, kind, spawn_n);
                     fenetre_ouverte = true;
                 }
             }
@@ -3008,10 +3034,7 @@ fn handle_click(
             if let Some(client) = wins[index].app.client_mut() {
                 client.demande_fermeture();
             } else {
-                ferme_fenetre(wins, index);
-                // Une fenetre disparait : le fond qu'elle couvrait n'est connu
-                // de personne d'autre que du bureau.
-                degats.tout();
+                ferme_fenetre(wins, index, degats);
             }
         } else if region == crate::gui::windowing::HitRegion::Maximize {
             let command = if top.placement == crate::gui::windowing::WindowPlacement::Maximized {

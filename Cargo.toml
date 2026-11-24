@@ -26,6 +26,8 @@ python-embarque = []
 # exactement comme avant. Option conservee SANS EFFET pour les scripts
 # existants (`run.ps1 -P10GPU`).
 p10-virgl-experimental = []
+# Image de banc : négociation et ouverture/fermeture d'un contexte Venus.
+banc-gpu-venus = []
 # Ancien chemin « present universel » de la PR #281 (copies plein ecran par
 # trame), remplace par le compositeur V2. Option conservee sans effet pour
 # ne casser aucune ligne de commande.
@@ -35,6 +37,8 @@ p10-universal-present = []
 # repasser en composition processeur sans pixel perime, puis le GPU reprendre
 # 5 s plus tard. Jamais dans `default` : voir tools/ci/run_gpu_composition.sh.
 banc-gpu-composition-panne = []
+# Banc UEFI : perdre VirtIO pendant une trame de couches sans transfert 2D.
+banc-gpu-perte-scanout = []
 # BANC DE CHARGE D'ENTREE-SORTIE.
 #
 # Lit le volume USB en boucle, arme des pannes artificielles et ETEINT la

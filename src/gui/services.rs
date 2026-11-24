@@ -937,6 +937,7 @@ fn fil_mesures_processus() -> ! {
         // BOUCHAUD_POINT_COOPERATIF_V1 : ce fil ne garde pas le coeur d'un
         // seul tenant pendant tout son releve.
         let mut depuis = crate::kernel::timer::monotonic_ns();
+        crate::kernel::system_metrics::publish_serial();
         releve_interne(Some(&mut depuis));
         crate::kernel::task::point_cooperatif(&mut depuis);
         // P18_SERVICE_GUARDIAN_V1: deux observateurs se couvrent mutuellement.

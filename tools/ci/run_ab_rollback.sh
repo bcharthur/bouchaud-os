@@ -376,7 +376,47 @@ except OSError:
 # attend LOG MOTIF [S]: the pattern appears in the log within S seconds.
 attend() { local f=$((SECONDS + ${3:-60})); while (( SECONDS < f )); do
   sed 's/\x1b\[[0-9;]*m//g' "$1" | tr -d '\r' | grep -aE "$2" >/dev/null && return 0; sleep 0.5; done; return 1; }
-commande() { envoie "$1" "$3"$'\r'; attend "$2" "$4" "${5:-60}"; }
+# QEMU ne lit que ce que le FIFO UART peut accepter. Garder le client
+# connecté jusqu'à la réponse pour que les octets en attente restent lisibles.
+# On ne valide que la sortie produite à partir de l'envoi de cette commande.
+commande() {
+  python3 - "$1" "$2" "$3" "$4" "${5:-60}" <<'PY'
+import re
+import socket
+import sys
+import time
+
+chemin, journal, commande, motif, delai = sys.argv[1:]
+echeance = time.monotonic() + int(delai)
+ansi = re.compile(rb"\x1b\[[0-9;]*m")
+attendu = re.compile(motif.encode(), re.MULTILINE)
+try:
+    with open(journal, "rb") as log, socket.socket(socket.AF_UNIX) as serie:
+        debut = log.seek(0, 2)
+        serie.settimeout(int(delai))
+        serie.connect(chemin)
+        serie.sendall(commande.encode() + b"\r")
+        while True:
+            log.seek(debut)
+            sortie = ansi.sub(b"", log.read()).replace(b"\r", b"")
+            if attendu.search(sortie):
+                sys.exit(0)
+            reste = echeance - time.monotonic()
+            if reste <= 0:
+                break
+            serie.settimeout(min(reste, 0.5))
+            try:
+                if not serie.recv(4096):
+                    # Le dernier octet peut déjà être dans le journal.
+                    log.seek(debut)
+                    sys.exit(0 if attendu.search(ansi.sub(b"", log.read()).replace(b"\r", b"")) else 1)
+            except socket.timeout:
+                continue
+except OSError as erreur:
+    print(f"AB_DIAG commande série {commande}: {erreur}", file=sys.stderr)
+sys.exit(1)
+PY
+}
 # One recovery session; prints R (every expectation met) or R!(what failed).
 dialogue() {
   local sock=$1 log=$2 ko=""
