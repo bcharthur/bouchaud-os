@@ -1113,7 +1113,20 @@ fn sous_jeton(octets: &[u8]) {
 // l'extinction vident l'anneau. Le demarrage, avant le fil, garde le chemin
 // synchrone. `console-async on|off` bascule a chaud, pour l'A/B.
 
-const CONSOLE_OCTETS: usize = 65536;
+// BOUCHAUD_CONSOLE_ANNEAU_RAFALES_V1 -- 64 Kio ne passaient pas les rafales.
+//
+// Banc WHPX simule (TCG, 1 vCPU, `serie-lente 20000` : une sortie de VM de
+// 20 us par octet COM1), smoke Ladybird complet : anneau plein
+// (`occupation_pire=65521`, 754 lignes refusees), 731 producteurs mis en
+// attente, attente pire 868 ms et moyenne 57 ms POUR ECRIRE UNE LIGNE DE
+// JOURNAL, 9 289 vidanges faites par les producteurs eux-memes au debit du
+// port. Les processus Ladybird qui journalisent (RequestServer, WebContent,
+// BrowserHost) etaient ainsi freines par leur propre journal : 25 a 44 ms de
+// noyau par tenue du coeur, devant le fil HID. Le debit moyen (~12 Kio/s)
+// reste sous la capacite du port (~50 Kio/s a 20 us/octet) : ce sont les
+// RAFALES (demarrage, releve periodique de 18 Kio) qu'il faut absorber.
+// 512 Kio en absorbent une dizaine de secondes ; c'est de la BSS, pas du tas.
+const CONSOLE_OCTETS: usize = 512 * 1024;
 const CONSOLE_HORODATAGE: usize = 8;
 const CONSOLE_FIL_MUET_NS: u64 = 2_000_000_000;
 const CONSOLE_SOMME_NS: u64 = 50_000_000;
