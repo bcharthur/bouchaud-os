@@ -102,6 +102,8 @@ python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # tools/verifie-scripts-ladybird-presents.py refuse un appel sans fichier.
 python3 tools/ladybird/prepare-network-live.py "$SRC"
 python3 tools/ladybird/prepare-ui-bouchaud.py "$SRC"
+# BOUCHAUD_SERVICES_UNIQUES_V1 : APRES UI/Bouchaud, dont il relit la cible.
+python3 tools/ladybird/prepare-services-uniques.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.
@@ -389,6 +391,28 @@ mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name WebDriver -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
+
+# BOUCHAUD_SERVICES_UNIQUES_V1 -- l'executable multi-appels, EXPERIMENTAL.
+#
+# Construit APRES les services separes et sans pouvoir les casser : un echec
+# est publie et l'artefact reste celui d'avant. Garde : deux enveloppes de
+# `main.cpp` ne doivent definir aucun symbole global fort commun (le lien
+# `--allow-multiple-definition` en garderait un en silence) ; seuls les
+# points d'entree renommes `bouchaud_main_*` sont propres a chacune.
+if cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target BouchaudServices; then
+    UNIQUE=$(find "$BUILD" -type f -name BouchaudServices -perm -111 -print -quit)
+    DOUBLONS=$(find "$BUILD" -path '*BouchaudServices*' -name 'main_*.cpp.o' -print0 \
+        | xargs -0 -r -n1 nm --defined-only -g 2>/dev/null \
+        | awk '$2 ~ /^[TDBR]$/ && $3 !~ /^_Z.*bouchaud_main_/ {print $3}' | sort | uniq -d)
+    if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ]; then
+        cp -f "$UNIQUE" "$OUT/BouchaudServices"
+        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices")"
+    else
+        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE binaire=${UNIQUE:-absent} doublons=$(echo "$DOUBLONS" | tr '\n' ' ')" >&2
+    fi
+else
+    echo "BOUCHAUD_SERVICES_UNIQUES_ECHEC construction : artefact inchange" >&2
+fi
 # BOUCHAUD_C22_NATIVE_POSTGC_V20_BINARY_GUARD: fail-closed on emitted executable,
 # not just on source strings or stale source-tree markers.
 python3 - "$OUT/WebContent" <<'PY_C22_WEB_BINARY_GUARD'
