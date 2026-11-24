@@ -27,6 +27,10 @@ struct BackingExtent {
     source: BackingSource,
     size: usize,
     generation: u64,
+    /// BOUCHAUD_SERVICES_UNIQUES_V1 : le noeud dont les pages servent CE
+    /// contenu dans le cache de pages propres. Lui-meme, sauf pour un lien
+    /// physique de l'archive (`alias`) : plusieurs noms, un seul jeu de pages.
+    canonique: usize,
 }
 
 static EXTENTS: SpinLock<Vec<BackingExtent>> = SpinLock::new(Vec::new());
@@ -100,6 +104,7 @@ pub fn register_disk(node: usize, drive: Drive, data_lba: u64, size: usize) {
         source: BackingSource::Disk { drive, data_lba },
         size,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+        canonique: node,
     });
 }
 
@@ -112,6 +117,7 @@ pub fn register_memory(node: usize, address: u64, size: usize) {
         source: BackingSource::Memory { address },
         size,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+        canonique: node,
     });
 }
 
@@ -122,7 +128,18 @@ pub fn is_memory_backed(node: usize) -> bool {
 }
 
 pub fn unregister(node: usize) {
-    EXTENTS.lock().retain(|extent| extent.node != node);
+    {
+        let mut extents = EXTENTS.lock();
+        extents.retain(|extent| extent.node != node);
+        // Les alias de ce noeud gardent leur contenu : le premier restant
+        // devient le canonique des autres. Les pages deja en cache sous
+        // l'ancien noeud ne sont plus atteintes (autre generation).
+        if let Some(heritier) = extents.iter().find(|e| e.canonique == node).map(|e| e.node) {
+            for extent in extents.iter_mut().filter(|e| e.canonique == node) {
+                extent.canonique = heritier;
+            }
+        }
+    }
     READ_CACHE.lock().retain(|entry| entry.node != node);
     READ_PATTERNS.lock().retain(|entry| entry.node != node);
 }
@@ -189,6 +206,48 @@ pub fn disk_len(node: usize) -> Option<usize> {
         .iter()
         .find(|extent| extent.node == node)
         .map(|extent| extent.size)
+}
+
+/// BOUCHAUD_SERVICES_UNIQUES_V1 -- LIEN PHYSIQUE : UN CONTENU, UN JEU DE PAGES.
+///
+/// `node` devient un second nom du contenu de `cible` (meme etendue disque ou
+/// memoire). Les projections de fichier se font sur le noeud CANONIQUE
+/// (`canonique`), donc sur les memes cles du cache de pages propres : les
+/// pages physiques d'un executable sont partagees entre ses noms, et ses
+/// droits restent ceux des segments ELF. Rend `false` si `cible` n'a pas
+/// d'etendue (contenu en ligne : l'appelant le recopie).
+pub fn alias(node: usize, cible: usize) -> bool {
+    let mut extents = EXTENTS.lock();
+    let Some(source) = extents.iter().find(|e| e.node == cible).copied() else {
+        return false;
+    };
+    extents.retain(|e| e.node != node);
+    extents.push(BackingExtent {
+        node,
+        source: source.source,
+        size: source.size,
+        generation: source.generation,
+        canonique: source.canonique,
+    });
+    drop(extents);
+    ALIAS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+static ALIAS: AtomicU64 = AtomicU64::new(0);
+
+/// Le noeud dont les pages servent `node` (lui-meme hors lien physique).
+pub fn canonique(node: usize) -> usize {
+    EXTENTS.lock()
+        .iter()
+        .find(|extent| extent.node == node)
+        .map(|extent| extent.canonique)
+        .unwrap_or(node)
+}
+
+/// Liens physiques enregistres depuis le demarrage.
+pub fn alias_enregistres() -> u64 {
+    ALIAS.load(Ordering::Relaxed)
 }
 
 pub fn generation(node: usize) -> Option<u64> {
