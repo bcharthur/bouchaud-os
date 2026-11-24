@@ -47,8 +47,6 @@ on:
       - 'src/kernel/update/**'
       - 'tools/ci/apt-installe.sh'
       - 'tools/ci/build_kernel.sh'
-      # BOUCHAUD_CHARGEUR_PAR_LOTS_V1 : le chargeur vendu et les manifestes
-      # qui le substituent fabriquent l'image que TOUS ces bancs demarrent.
       - 'third_party/bootloader-*/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -117,8 +115,6 @@ on:
       - 'src/kernel/update/**'
       - 'tools/ci/apt-installe.sh'
       - 'tools/ci/build_kernel.sh'
-      # BOUCHAUD_CHARGEUR_PAR_LOTS_V1 : le chargeur vendu et les manifestes
-      # qui le substituent fabriquent l'image que TOUS ces bancs demarrent.
       - 'third_party/bootloader-*/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
