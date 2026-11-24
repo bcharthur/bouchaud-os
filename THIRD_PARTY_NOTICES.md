@@ -20,7 +20,7 @@ par `Cargo.lock`.
 | linked_list_allocator 0.10 | Apache-2.0 / MIT | tas d'amorcage |
 | x86_64 0.14 | MIT / Apache-2.0 | structures du processeur |
 | pic8259 0.10 | Apache-2.0 / MIT | controleur d'interruptions historique |
-| bootloader 0.9, bootloader_api 0.11 | MIT / Apache-2.0 | chargeurs BIOS et UEFI |
+| bootloader 0.9, bootloader_api 0.11 | MIT / Apache-2.0 | chargeurs BIOS et UEFI ; 0.9.34 vendu dans `third_party/bootloader-0.9.34` (licences jointes) avec une seule modification : le stage 2 lit le noyau par lots de 64 secteurs |
 
 ## Incorpore aujourd'hui
 

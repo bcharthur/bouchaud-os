@@ -1861,8 +1861,10 @@ fn draine_verrouille() -> usize {
         TRAMES_ROUTEES.fetch_add(1, OrdreCompteur::Relaxed);
         route_trame(&buf[..n]);
     }
-    let instantane = e1000::instantane_rx();
-    crate::net::rx_recuperation::conclure_si_du(&instantane);
+    if crate::net::rx_recuperation::verdict_du() {
+        let instantane = e1000::instantane_rx();
+        crate::net::rx_recuperation::conclure_si_du(&instantane);
+    }
     // Si le budget est epuise, un autre passage terminera le drainage.
     // Ne pas jeter les descripteurs qui restent pour reparer trop tot.
     if traitees < TRAMES_PAR_PASSAGE && e1000::repare_si_demande() {

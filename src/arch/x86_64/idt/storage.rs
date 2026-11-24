@@ -6,6 +6,9 @@ extern "x86-interrupt" fn ata_primary_handler(stack: InterruptStackFrame) {
     // gestionnaires clavier et souris accusent deja sans lui ; ceux-ci le
     // prenaient par habitude.
     let _ = unsafe { ports::inb(0x1F7) };
+    // BOUCHAUD_ATA_IRQ_V1 : la fin d'une commande DMA ou d'une vidange
+    // reveille son attendant (`ata::irq`). Aucun verrou, aucune commande.
+    crate::drivers::ata::interruption_primaire();
     notify_end_of_interrupt(InterruptIndex::AtaPrimary.as_u8());
 }
 
