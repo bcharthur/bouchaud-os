@@ -92,7 +92,7 @@ function Verifie([string]$Nom, [bool]$Condition, [string]$Detail = '') {
 }
 # L'analyseur PowerShell sur les scripts touches : une erreur de syntaxe dans
 # run.ps1 ne se verrait sinon que sur Windows.
-foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1', 'tools/windows/Verifier-Ladybird.ps1', 'tools/windows/Banc-Bureau-Entrees.ps1')) {
+foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1', 'tools/windows/Verifier-Ladybird.ps1', 'tools/windows/Banc-Bureau-Entrees.ps1', 'tools/windows/Banc-Candidat.ps1')) {
     $jetons = $null; $erreursAnalyse = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $racine $f), [ref]$jetons, [ref]$erreursAnalyse)
     Verifie "analyse $f" ($erreursAnalyse.Count -eq 0) (($erreursAnalyse | ForEach-Object { $_.Message }) -join ' ; ')
@@ -215,6 +215,25 @@ if ($py) {
 else { Write-Host 'ECHEC disque de banc : python introuvable sur le runner'; $echecs++ }
 $sortie = & $mesure -Bootimage $img -DryRun -Repetitions 1 -AvecLadybird -Configurations @('whpx-smp4') *>&1 | Out-String -Width 4096
 Verifie 'mesure -AvecLadybird : la copie de banc est montee, jamais ladybird-browser.img' ($sortie -match 'ladybird-banc\.img,snapshot=on' -and $sortie -notmatch 'ladybird-browser\.img,snapshot') $sortie
+
+# BOUCHAUD_BANC_CANDIDAT_V1 -- Banc-Candidat.ps1 : bras alternes par paire,
+# copie de banc en snapshot, molette par le moniteur ; mesures lues dans un
+# journal synthetique (horloge de l'invite), fenetre de defilement respectee.
+$banc = Join-Path $racine 'tools/windows/Banc-Candidat.ps1'
+$sortie = & $banc -Main "$t/m.bin" -Candidat "$t/c.bin" -Paires 2 -Accel whpx -Smp 2 -DryRun *>&1 | Out-String -Width 4096
+$ordre = @([regex]::Matches($sortie, 'PLAN paire (\d) (\w+)') | ForEach-Object { "$($_.Groups[1].Value)$($_.Groups[2].Value)" }) -join ','
+Verifie 'banc candidat : alternance M C / C M' ($ordre -eq '1main,1candidat,2candidat,2main') $ordre
+Verifie 'banc candidat : WHPX qemu64+SSE4, moniteur, sans -cpu max' ($sortie -match '-accel whpx,kernel-irqchip=off -cpu qemu64,\+ssse3' -and $sortie -match '-monitor tcp:127\.0\.0\.1:\d+,server,nowait' -and $sortie -notmatch '-cpu max') $sortie
+$jl = Join-Path $t 'banc-serie.log'
+[System.IO.File]::WriteAllText($jl, (@(
+    'BOUCHAUD_BOOT_POINT bureau-premiere-trame t_ms=4473',
+    '[GPU-TRAMES] dessin_cpu_us_p50=9 p95=9 p99=9 max=9 presentation_us_p50=9 p95=9 p99=9 max=9',
+    '[GPU-TRAMES] dessin_cpu_us_p50=100 p95=200 p99=300 max=400 presentation_us_p50=10 p95=20 p99=30 max=40',
+    '[GPU-COMPOSITION] disponible=oui periode_ms=2000 trames_bureau=120 trames_clients=60 trames_gpu=0 blits=5 px_poses_gpu=0 px_montes_hote=0 px_client_copies_cpu=777 us_dessin_cpu_par_trame=1 us_presentation_par_trame=2 textures=0 fenetres_gpu=0 cpu_pct=42',
+    '[LB:PERF] trames=3 vues=1 degat_px=10 zone_px=20 copie_px=55 trames_partielles=1',
+    'CPU=1% RAM=2 DISK=x GPU=bga:f1,p2us,uN/A') -join "`n"))
+$m = & $banc -AnalyserJournal $jl | ConvertFrom-Json
+Verifie 'banc candidat : mesures du dernier releve' ($m.invite_noyau_bureau_ms -eq 4473 -and $m.dessin_us_p99 -eq 300 -and $m.presentation_us_p95 -eq 20 -and $m.fps_bureau -eq 60 -and $m.px_client_copies_cpu -eq 777 -and $m.cpu_invite_pct -eq 42 -and $m.lb_copie_px -eq 55 -and $m.backend_gpu -eq 'bga') ($m | ConvertTo-Json -Compress)
 
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }
