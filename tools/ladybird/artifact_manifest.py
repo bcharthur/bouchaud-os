@@ -40,6 +40,14 @@ REQUIRED_FILES = ELF_RUNTIME + (
     "V16_UI_CAPABLE",
     "V19_UI_CAPABLE",
 )
+# BOUCHAUD_MANIFESTE_FACULTATIFS_V1 -- un fichier FACULTATIF de l'artefact
+# (absent quand sa construction a echoue ou a ete refusee) est couvert comme
+# les autres des qu'il existe : taille, SHA-256, ELF statique. La table du
+# manifeste doit alors correspondre EXACTEMENT a ce qui est sur le disque :
+# present mais non declare, declare mais absent, ou divergent -> refus.
+# Avant, `BouchaudServices` (executable multi-appels, BOUCHAUD_SERVICES_UNIQUES)
+# arrivait dans l'artefact sans figurer au manifeste, donc sans verification.
+OPTIONAL_ELF = ("BouchaudServices",)
 MANIFEST_NAME = "BOUCHAUD_ARTIFACT_MANIFEST.json"
 
 
@@ -147,10 +155,13 @@ def build_manifest(root: Path, upstream: Path) -> dict:
         if not p.is_file():
             raise ManifestError(f"artefact incomplet: {name} absent")
     files = []
-    for name in REQUIRED_FILES:
+    presents = REQUIRED_FILES + tuple(n for n in OPTIONAL_ELF if (root / n).exists())
+    for name in presents:
         p = root / name
+        if not p.is_file() or p.is_symlink():
+            raise ManifestError(f"{name}: pas un fichier ordinaire")
         entry = {"path": name, "bytes": p.stat().st_size, "sha256": sha256_file(p)}
-        if name in ELF_RUNTIME:
+        if name in ELF_RUNTIME or name in OPTIONAL_ELF:
             has_interp = elf_has_interp(p)
             if has_interp:
                 raise ManifestError(f"{name}: PT_INTERP present, runtime non freestanding")
@@ -193,20 +204,25 @@ def verify_manifest(root: Path, upstream: Path, manifest_path: Path, check_head:
     if not isinstance(listed, list):
         raise ManifestError("liste files absente")
     by_path = {e.get("path"): e for e in listed if isinstance(e, dict)}
-    if set(by_path) != set(REQUIRED_FILES):
-        missing = sorted(set(REQUIRED_FILES) - set(by_path))
-        extra = sorted(set(by_path) - set(REQUIRED_FILES))
+    if len(by_path) != len(listed):
+        raise ManifestError("table artefact : entree invalide ou dupliquee")
+    # Les facultatifs PRESENTS SUR LE DISQUE font partie de l'attendu : un
+    # fichier ajoute apres coup, ou retire, ne passe pas.
+    attendus = set(REQUIRED_FILES) | {n for n in OPTIONAL_ELF if (root / n).exists() or (root / n).is_symlink()}
+    if set(by_path) != attendus:
+        missing = sorted(attendus - set(by_path))
+        extra = sorted(set(by_path) - attendus)
         raise ManifestError(f"table artefact divergente missing={missing} extra={extra}")
-    for name in REQUIRED_FILES:
+    for name in sorted(attendus):
         p = root / name
-        if not p.is_file():
+        if not p.is_file() or p.is_symlink():
             raise ManifestError(f"{name}: absent a la verification")
         entry = by_path[name]
         got_size = p.stat().st_size
         got_hash = sha256_file(p)
         if entry.get("bytes") != got_size or entry.get("sha256") != got_hash:
             raise ManifestError(f"{name}: taille/SHA-256 divergent")
-        if name in ELF_RUNTIME:
+        if name in ELF_RUNTIME or name in OPTIONAL_ELF:
             if elf_has_interp(p):
                 raise ManifestError(f"{name}: PT_INTERP present")
             if entry.get("elf_static") is not True:
