@@ -115,6 +115,22 @@ Banc `run_reveil_cible.sh` (allers-retours IPC/s, TCG) : main 3 848 / 3 393,
 dispersé pour conclure. `run_os_primitives.sh` : OK. `run_console_panique.sh`
 SMP4 2 000 lignes : 3/3.
 
+## Démarrage seul : #372 contre `main` (campagne 5)
+
+TCG, 3 paires, médiane [min–max]
+([données](../perf/campagnes/2026-11-24-tcg-main-pr372.json)) :
+
+| Mesure | main | #372 |
+|---|---:|---:|
+| QEMU → 1re ligne du noyau (hôte) | 3 877 [3 609–4 358] | **2 120** [2 119–2 123] |
+| QEMU → bureau (hôte) | 10 414 [10 264–10 995] | **8 994** [8 341–9 348] |
+| QEMU → 1re trame Ladybird (hôte) | 13 076 [13 042–13 745] | **11 735** [11 089–12 125] |
+| QEMU → page chargée (hôte) | 14 562 [14 510–15 302] | **13 350** [12 580–13 583] |
+| Noyau → bureau (invité) | 6 640 [6 528–6 642] | 6 872 [6 216–7 231] |
+
+Le gain est entièrement AVANT le noyau, comme attendu : le temps invité
+noyau → bureau ne change pas.
+
 ## Stabilité
 
 - Smoke BrowserHost fonctionnel (passages des campagnes) : `main` 12/12, `c2`/`c2b` 7/7, `c3` 8/9.
