@@ -89,6 +89,32 @@ Lecture :
   (PIC → BSP → `wake_wait_queue`, qui parcourt tout le registre des tâches →
   IPI) reste le prochain chantier.
 
+## Réveils : un seul garde de registre par parcours (campagne 4)
+
+`wake_wait_queue` parcourt tout le registre des tâches à chaque réveil et
+prenait un garde de lecture **par emplacement** (`cli`/`sti` et deux
+atomiques SeqCst sur le compteur global `LECTEURS`). Un seul garde couvre
+désormais le parcours. TCG, 3 paires, médiane [min–max]
+([données](../perf/campagnes/2026-11-24-tcg-main-pr371-c4.json)) :
+
+| Mesure | main | #371 | + garde unique |
+|---|---:|---:|---:|
+| Batterie JS de 10 Workers (ms) | 9 835 [9 681–11 497] | 9 428 [9 212–10 405] | **8 346** [8 308–8 347] |
+| `execve` d'un service Ladybird (µs) | 9 620 | 10 033 [9 631–10 836] | **8 207** [7 936–8 826] |
+| Lancement Ladybird → 1re image (ms) | 4 785 [4 570–4 815] | 4 459 [4 377–4 464] | 4 425 [3 950–4 601] |
+| Attente DMA totale (ms) | 1 089–1 149 | 1 143–1 181 | 1 042–1 080 |
+
+Dans cette campagne, le lancement de Ladybird est **plus rapide** avec #371
+qu'avec `main` (plages disjointes), alors que la campagne précédente donnait
++2 % avec recouvrement : sous TCG ce métrique varie d'une campagne à l'autre
+plus que l'effet cherché. L'attente DMA totale est revenue au niveau de
+`main` : la pénalité de réveil par IRQ a disparu.
+
+Banc `run_reveil_cible.sh` (allers-retours IPC/s, TCG) : main 3 848 / 3 393,
+#371 3 351 / 4 094, garde unique 4 503 / 4 025 / 4 269 / 3 378 — trop
+dispersé pour conclure. `run_os_primitives.sh` : OK. `run_console_panique.sh`
+SMP4 2 000 lignes : 3/3.
+
 ## Stabilité
 
 - Smoke BrowserHost fonctionnel (passages des campagnes) : `main` 12/12, `c2`/`c2b` 7/7, `c3` 8/9.
