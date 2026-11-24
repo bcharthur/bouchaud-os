@@ -199,3 +199,9 @@ opt-level = 2
 
 [profile.release]
 panic = "abort"
+
+# BOUCHAUD_CHARGEUR_PAR_LOTS_V1 : `bootloader` 0.9.34 (MIT/Apache-2.0),
+# vendored with ONE change: stage 2 loads the kernel 64 sectors per
+# `int 0x13` instead of one (see third_party/bootloader-0.9.34/src/stage_2.s).
+[patch.crates-io]
+bootloader = { path = "third_party/bootloader-0.9.34" }
