@@ -177,8 +177,70 @@ fn parcours_bus(bus: u8, profondeur: u8, visite: &mut dyn FnMut(&PciDevice) -> b
     true
 }
 
+// BOUCHAUD_PCI_INVENTAIRE_V1 -- LE BUS EST BALAYE UNE FOIS.
+//
+// Chaque `find_*` (NVMe, affichage, audio, xHCI, reseau) et `count` refaisait
+// le balayage complet : 256 bus x 32 emplacements, deux acces port par
+// lecture de configuration. Smoke Ladybird de `main@e18a954` : 99 000 acces
+// 0xCF8/0xCFC au demarrage, soit autant de sorties de VM sous KVM/WHPX. Les
+// champs d'un `PciDevice` sont des IDENTITES (fournisseur, classe, type
+// d'en-tete) : elles ne changent pas apres le demarrage, et rien ici ne gere
+// le branchement a chaud. Le premier parcours remplit l'inventaire ; les
+// suivants le relisent. Les BAR et capacites restent lus a la demande.
+//
+// Un inventaire plein, ou un parcours concurrent du premier, retombe sur le
+// balayage d'avant : le resultat est le meme, seulement plus cher.
+const INVENTAIRE_MAX: usize = 256;
+const INV_VIDE: u8 = 0;
+const INV_EN_COURS: u8 = 1;
+const INV_PRET: u8 = 2;
+const INV_DEBORDE: u8 = 3;
+static INVENTAIRE_ETAT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(INV_VIDE);
+static INVENTAIRE_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+struct Inventaire(core::cell::UnsafeCell<[Option<PciDevice>; INVENTAIRE_MAX]>);
+// SAFETY : ecrit par le seul gagnant de INV_VIDE -> INV_EN_COURS, lu
+// seulement apres la publication INV_PRET (Release/Acquire).
+unsafe impl Sync for Inventaire {}
+static INVENTAIRE: Inventaire = Inventaire(core::cell::UnsafeCell::new([None; INVENTAIRE_MAX]));
+
 /// Applique `visite` a toute la topologie, ponts compris.
 pub fn parcours(visite: &mut dyn FnMut(&PciDevice) -> bool) {
+    use core::sync::atomic::Ordering;
+    if INVENTAIRE_ETAT.load(Ordering::Acquire) == INV_VIDE
+        && INVENTAIRE_ETAT
+            .compare_exchange(INV_VIDE, INV_EN_COURS, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let table = unsafe { &mut *INVENTAIRE.0.get() };
+        let mut n = 0usize;
+        let mut deborde = false;
+        balayage(&mut |d| {
+            if n == INVENTAIRE_MAX {
+                deborde = true;
+                return false;
+            }
+            table[n] = Some(*d);
+            n += 1;
+            true
+        });
+        INVENTAIRE_N.store(n, Ordering::Relaxed);
+        INVENTAIRE_ETAT.store(if deborde { INV_DEBORDE } else { INV_PRET }, Ordering::Release);
+    }
+    if INVENTAIRE_ETAT.load(Ordering::Acquire) == INV_PRET {
+        let n = INVENTAIRE_N.load(Ordering::Relaxed);
+        let table = unsafe { &*INVENTAIRE.0.get() };
+        for d in table[..n].iter().flatten() {
+            if !visite(d) {
+                return;
+            }
+        }
+        return;
+    }
+    balayage(visite);
+}
+
+/// Le balayage complet du bus, sans inventaire.
+fn balayage(visite: &mut dyn FnMut(&PciDevice) -> bool) {
     // Bring-up physique : chaque numero de bus PCI est teste exactement
     // une fois. Cela evite les revisites/explosions de la recursion par ponts
     // sur les topologies PCIe reelles.
