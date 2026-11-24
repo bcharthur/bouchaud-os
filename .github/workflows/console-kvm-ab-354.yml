@@ -1,0 +1,59 @@
+name: console-kvm-ab-354
+
+# BOUCHAUD_A_B_CONSOLE_KVM_354 -- branche d'experience, jamais fusionnee.
+#
+# PR #354 est NO-GO sur `run_console_panique.sh` KVM SMP4 : 1 999/2 000
+# lignes (run 45256455788). Sous TCG (conteneur, 5 x 3 bras) : 15/15. Ce
+# travail compare main@e18a954 et la tete de #354 (ba3db64) sur LE MEME
+# runner KVM, en alternant, dix fois chacun.
+on:
+  push:
+    branches: [claude/bouchaud-perf-gpu-adozth-console-kvm]
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: QEMU
+        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Deux images (main, #354)
+        run: |
+          git fetch origin codex/p0-persistance-independante
+          git worktree add ../pr354 ba3db64724f1d90737b2a4b11ddd58acfa5ac1d7
+          mkdir -p images
+          git -C . checkout --detach e18a95491cc27d32c2a653422eb6604701b65e51
+          tools/ci/build_kernel.sh
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin images/main.bin
+          (cd ../pr354 && tools/ci/build_kernel.sh)
+          cp ../pr354/target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin images/pr354.bin
+          git -C . checkout -
+          sha256sum images/*.bin
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Alternance KVM SMP4, 2000 lignes, 10 x 2
+        run: |
+          mkdir -p journaux
+          for i in $(seq 1 10); do
+            if [ $((i % 2)) -eq 1 ]; then ordre="main pr354"; else ordre="pr354 main"; fi
+            for bras in $ordre; do
+              r=$(BO_QEMU_KVM=1 BO_SMP=4 timeout 300 tools/ci/run_console_panique.sh "images/$bras.bin" 2000 2>&1 \
+                  | grep -a 'CONSOLE_PANIQUE_OK\|CONSOLE_PANIQUE_ECHEC' | head -1)
+              cp console-panique.log "journaux/$bras-$i.log" || true
+              echo "AB_CONSOLE essai=$i bras=$bras ${r:-AUCUN_VERDICT}" | tee -a resultats.txt
+            done
+          done
+          echo "main  : $(grep -c 'bras=main CONSOLE_PANIQUE_OK' resultats.txt)/10"
+          echo "pr354 : $(grep -c 'bras=pr354 CONSOLE_PANIQUE_OK' resultats.txt)/10"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: console-kvm-ab-354
+          path: |
+            resultats.txt
+            journaux/
