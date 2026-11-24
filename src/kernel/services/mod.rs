@@ -972,6 +972,15 @@ pub fn pic_reveil(delta_us: u64, echeance_ns: u64, reprise_ns: u64) {
         crate::kernel::task::current_is_kernel_task(),
         if phase.est_vide() { "runtime" } else { phase.texte() },
     );
+    // BOUCHAUD_ELECTIONS_RECENTES_V1 : qui a tenu le coeur pendant l'attente.
+    {
+        let mut tenues = alloc::string::String::new();
+        crate::kernel::scheduler::elections::ecris(&mut tenues, cpu, echeance_ns, maintenant_ns);
+        crate::serial_println!("HID_LATENCY_TENUES delta_us={} cpu={}{}", delta_us, cpu, tenues);
+        // Et l'etat de la console a cet instant : contre-pression, lignes
+        // emises par les producteurs eux-memes, anneau plein.
+        crate::drivers::serial::journalise_bilan_console();
+    }
 
     // L'ETAT COMPLET, UNE FOIS, AU MOMENT OU IL EXPLIQUE QUELQUE CHOSE.
     //

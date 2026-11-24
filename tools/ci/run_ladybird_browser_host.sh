@@ -246,6 +246,12 @@ AUTORUN
 if [ "$AFFICHAGE" = venus ]; then
   sed -i "1i export LD_LIBRARY_PATH=/lib\nexport VK_DRIVER_FILES=/usr/share/vulkan/icd.d/bouchaud_venus.json\nexport BOUCHAUD_SKIA_BACKEND=$SKIA_BACKEND" "$SCENARIO/autorun"
 fi
+# BOUCHAUD_BANC_SERIE_LENTE_V1 : `BO_SMOKE_SERIE_LENTE_NS=N` fait couter N ns
+# de plus a chaque octet COM1 (commande `serie-lente`) : reproduit sous TCG la
+# sortie de VM par octet de WHPX/KVM. Vide par defaut : rien ne change.
+if [ -n "${BO_SMOKE_SERIE_LENTE_NS:-}" ]; then
+  sed -i "1i serie-lente ${BO_SMOKE_SERIE_LENTE_NS}" "$SCENARIO/autorun"
+fi
 if [ -n "$LIGNE_PROFIL" ]; then
   sed -i "1i $LIGNE_PROFIL" "$SCENARIO/autorun"
 fi
@@ -401,10 +407,14 @@ SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 # (p. ex. un second moniteur pour l'echantillonneur hote
 # tools/perf/echantillonneur_qemu.py). Vide par defaut : rien ne change.
 read -r -a QEMU_EXTRA <<< "${BO_SMOKE_QEMU_ARGS:-}"
+# BOUCHAUD_BANC_SMP_V1 : `BO_SMOKE_SMP=1` reproduit la configuration WHPX a
+# un vCPU (banc Windows). Defaut 4 : rien ne change.
+SMP=${BO_SMOKE_SMP:-4}
+case "$SMP" in 1|2|4) ;; *) echo "BO_SMOKE_SMP=$SMP : 1, 2 ou 4" >&2; exit 2 ;; esac
 qemu-system-x86_64 "${ACCEL_QEMU[@]}" ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
-  -m 8192 -smp 4 -cpu max "${AFFICHE[@]}" -no-reboot \
+  -m 8192 -smp "$SMP" -cpu max "${AFFICHE[@]}" -no-reboot \
   -netdev "user,id=net0,guestfwd=tcp:10.0.2.100:18082-cmd:nc 127.0.0.1 18082" -device e1000,netdev=net0 \
   -audiodev none,id=muet -device AC97,audiodev=muet \
   ${ECRAN[@]+"${ECRAN[@]}"} \
