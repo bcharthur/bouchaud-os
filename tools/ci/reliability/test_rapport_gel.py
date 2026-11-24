@@ -115,5 +115,47 @@ class Qemu(unittest.TestCase):
         self.assertTrue(any("qemu_verdict=boucle_noyau" in l for l in out))
 
 
+# Integration 45357161016 (#371), registres de `temoin.log.cpus` : coeur 0
+# attend le verrou (meme RIP sur 6/6), coeur 1 boucle dans `detenteur` mais
+# le releve 2 le prend dans une IRQ qu'il sert (IF=0, autre RIP).
+SIX = "\n".join(
+    [f"[QEMU-CPU] ech={i} cpu=0 rip=0x963a02 cpl=0 if=1 hlt=0 rsp=0x1 pile=[]" for i in range(1, 7)]
+    + [f"[QEMU-CPU] ech={i} cpu=1 rip={'0xa0da46' if i == 2 else '0xa3e9c2'} cpl=0 "
+       f"if={0 if i == 2 else 1} hlt=0 rsp=0x2 pile=[]" for i in range(1, 7)]
+    + [f"[QEMU-CPU] ech={i} cpu={c} rip=0x0 cpl=0 if=1 hlt=1 rsp=0x0 pile=[]" for i in range(1, 7) for c in (2, 3)])
+
+
+class Majorite(unittest.TestCase):
+    """BOUCHAUD_RAPPORT_GEL_MAJORITE_V1 : tous les releves, regle du banc."""
+
+    def verdicts(self, texte):
+        return [l for l in rg.rapport(texte) if "qemu_verdict=" in l]
+
+    def test_detenteur_vu_dans_une_irq_reste_une_boucle(self):
+        v = self.verdicts(SIX)
+        self.assertTrue(any("boucle_noyau coeur=1 rip=0xa3e9c2" in l and "5/6" in l for l in v), v)
+        self.assertTrue(any("boucle_noyau coeur=0 rip=0x963a02" in l and "6/6" in l for l in v), v)
+
+    def test_deux_releves_identiques_sur_six_ne_suffisent_pas(self):
+        texte = "\n".join(
+            f"[QEMU-CPU] ech={i} cpu=0 rip={hex(0x900000 + (0 if i <= 2 else i))} cpl=0 if=1 hlt=0 rsp=0x1 pile=[]"
+            for i in range(1, 7))
+        v = self.verdicts(texte)
+        self.assertFalse(any("boucle_noyau" in l for l in v), v)
+        self.assertTrue(any("vm_active" in l for l in v), v)
+
+    def test_un_coeur_qui_progresse_n_est_pas_une_boucle(self):
+        texte = "\n".join(
+            f"[QEMU-CPU] ech={i} cpu=0 rip={hex(0x900000 + i)} cpl=0 if=1 hlt=0 rsp=0x1 pile=[]"
+            for i in range(1, 7))
+        self.assertFalse(any("boucle_noyau" in l for l in self.verdicts(texte)))
+
+    def test_la_moitie_en_hlt_n_est_pas_une_boucle(self):
+        texte = "\n".join(
+            f"[QEMU-CPU] ech={i} cpu=0 rip=0x963a02 cpl=0 if=1 hlt={1 if i > 2 else 0} rsp=0x1 pile=[]"
+            for i in range(1, 7))
+        self.assertFalse(any("boucle_noyau" in l for l in self.verdicts(texte)))
+
+
 if __name__ == "__main__":
     unittest.main()

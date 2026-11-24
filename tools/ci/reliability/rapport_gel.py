@@ -145,22 +145,45 @@ def lecture_qemu(cpus: list, s) -> list:
     par_cpu = {}
     for c in cpus:
         par_cpu.setdefault(c.cpu, {})[c.ech] = c
+    # BOUCHAUD_RAPPORT_GEL_MAJORITE_V1 -- TOUS LES RELEVES, PAS LES DEUX PREMIERS.
+    #
+    # Le verdict ne lisait que les releves 1 et 2 et exigeait le meme RIP sur
+    # les deux. Un coeur fige qui boucle IF=1 SERT ses IRQ : un releve sur
+    # quelques-uns le trouve dans un gestionnaire. `run_souffrance_verrou.sh`
+    # avait deja corrige sa propre lecture pour cette raison (2 -> 6 releves,
+    # au moins 3 dans `detenteur`, integration 44089209830) ; ce rapport
+    # gardait l'ancienne regle. Integration 45357161016 (#371) : detenteur vu
+    # sur 5/6 releves au MEME RIP, le releve 2 dans une IRQ -> aucun verdict
+    # pour lui, banc rouge.
+    #
+    # Regle : un coeur boucle s'il est vu au MEME RIP noyau, hors HLT, sur au
+    # moins la moitie de ses releves et au moins deux. Avec deux releves,
+    # c'est exactement l'ancienne regle ; avec six, il en faut trois
+    # identiques -- la regle du banc.
     boucles = []
     for cpu in sorted(par_cpu):
         e = par_cpu[cpu]
-        a, b = e.get(1), e.get(2)
-        dernier = b or a
-        immobile = a is not None and b is not None and a.rip == b.rip and a.hlt == 0 and b.hlt == 0
-        if immobile and dernier.cpl == 0:
-            boucles.append(dernier)
+        n = len(e)
+        noyau_actif = [c for c in e.values() if c.cpl == 0 and c.hlt == 0]
+        comptes = {}
+        for c in noyau_actif:
+            comptes[c.rip] = comptes.get(c.rip, 0) + 1
+        rip_mode, k = max(comptes.items(), key=lambda kv: (kv[1], kv[0])) if comptes else (None, 0)
+        immobile = k >= max(2, (n + 1) // 2)
+        if immobile:
+            dernier = max((c for c in noyau_actif if c.rip == rip_mode), key=lambda c: c.ech)
+            boucles.append((dernier, k, n))
+        else:
+            dernier = e[max(e)]
         pile = " < ".join(s(x) for x in dernier.pile if s(x) != "?") or "-"
         out.append(f"RAPPORT_GEL qemu coeur={cpu} rip={dernier.rip:#x} [{s(dernier.rip)}] "
                    f"{'noyau' if dernier.cpl == 0 else 'utilisateur' if dernier.cpl == 3 else '?'} "
-                   f"if={dernier.si} hlt={dernier.hlt} immobile={'oui' if immobile else 'non'} pile: {pile}")
+                   f"if={dernier.si} hlt={dernier.hlt} immobile={'oui' if immobile else 'non'} "
+                   f"releves_au_meme_rip={k}/{n} pile: {pile}")
     if boucles:
-        for c in boucles:
+        for c, k, n in boucles:
             out.append(f"RAPPORT_GEL qemu_verdict=boucle_noyau coeur={c.cpu} rip={c.rip:#x} [{s(c.rip)}] if={c.si} "
-                       f"(meme RIP noyau a 1 s d'intervalle, hors HLT)")
+                       f"(meme RIP noyau sur {k}/{n} releves a 1 s d'intervalle, hors HLT)")
     elif all((e.get(2) or e.get(1)).hlt == 1 for e in par_cpu.values()):
         out.append("RAPPORT_GEL qemu_verdict=vm_au_repos tous les vCPU en HLT : aucune boucle, la machine "
                    "attend un reveil qui ne vient pas (cote navigateur/IPC ou reveil perdu)")
