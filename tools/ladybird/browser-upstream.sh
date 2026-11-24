@@ -416,9 +416,38 @@ $(bouchaud_symboles_forts "${fichiers[@]}")"
     done
     DOUBLONS=$(printf '%s\n' "$TOUS" | sed '/^$/d' | sort | uniq -d)
     case "$TOUS" in *objets_absents_*) DOUBLONS="$DOUBLONS $(printf '%s' "$TOUS" | grep -o 'objets_absents_[a-z]*')";; esac
+    # Garde fonctionnelle (les binaires sont des ELF Linux static-pie) : chaque
+    # service appele SOUS SON NOM via l'executable unique doit rendre la meme
+    # sortie `--help` et le meme code que l'executable separe -- dispatch
+    # argv[0], parseur d'arguments propre au service, initialisations
+    # statiques. BrowserHost n'a pas de `--help` (il lancerait le navigateur) :
+    # le smoke le couvre. Un nom inconnu doit rendre 127.
+    ECARTS=""
     if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ]; then
+        GARDE=$(mktemp -d)
+        mkdir -p "$GARDE/separe" "$GARDE/unique"
+        for s in WebContent WebWorker Compositor RequestServer ImageDecoder; do
+            ln -sf "$OUT/$s" "$GARDE/separe/$s"
+            ln -sf "$UNIQUE" "$GARDE/unique/$s"
+            a=$(cd "$GARDE/separe" && timeout 30 "./$s" --help 2>&1; echo "code=$?")
+            b=$(cd "$GARDE/unique" && timeout 30 "./$s" --help 2>&1; echo "code=$?")
+            if [ "$a" = "$b" ]; then
+                echo "BOUCHAUD_SERVICES_UNIQUES_DISPATCH service=$s identique=1 $(printf '%s' "$b" | tail -1)"
+            else
+                ECARTS="$ECARTS $s"
+                diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | head -10 >&2 || true
+            fi
+        done
+        ln -sf "$UNIQUE" "$GARDE/unique/ServiceInconnu"
+        (cd "$GARDE/unique" && timeout 30 ./ServiceInconnu >/dev/null 2>&1); code=$?
+        [ "$code" = 127 ] || ECARTS="$ECARTS inconnu_code=$code"
+        rm -rf "$GARDE"
+    fi
+    if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ] && [ -z "$ECARTS" ]; then
         cp -f "$UNIQUE" "$OUT/BouchaudServices"
-        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices") symboles_forts=$(printf '%s\n' "$TOUS" | sed '/^$/d' | wc -l) doublons=0"
+        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices") symboles_forts=$(printf '%s\n' "$TOUS" | sed '/^$/d' | wc -l) doublons=0 dispatch=5/5"
+    elif [ -n "$ECARTS" ]; then
+        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE dispatch_ecarts=$ECARTS" >&2
     else
         echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE binaire=${UNIQUE:-absent} doublons=$(echo "$DOUBLONS" | head -20 | tr '\n' ' ')" >&2
     fi
