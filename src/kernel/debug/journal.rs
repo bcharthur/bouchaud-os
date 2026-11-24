@@ -82,8 +82,31 @@ pub(crate) fn publish_metrics(sample: Sample) {
     METRIC_SEQUENCE.store(sequence.wrapping_add(2), Ordering::SeqCst);
 }
 
+/// BOUCHAUD_PREFIXE_METRIQUES_DELTA_V1 -- LE BLOC N'EST REPETE QUE S'IL CHANGE.
+///
+/// Smoke Ladybird de `main@e18a954` : 3 875 lignes, 900 Kio de serie, dont
+/// 431 Kio (48 %) de ce seul prefixe -- le MEME bloc de metriques recopie sur
+/// chaque ligne entre deux echantillons. Chaque octet est une ecriture sur le
+/// port COM1, donc une sortie de VM sous KVM/WHPX (909 000 au total).
+///
+/// Le bloc est desormais ecrit quand l'echantillon a change depuis la ligne
+/// precedente, et remplace sinon par `=` : `[12:00:01][=][FPS: 21] ...`. Le
+/// format garde ses deux groupes entre crochets avant `[FPS:` -- celui que
+/// les analyseurs retirent (`^(\[[^]]*\]){2}\[FPS:[^]]*\] `). Chaque
+/// echantillon publie apparait au moins une fois dans le journal.
+static SEQUENCE_EMISE: AtomicU64 = AtomicU64::new(u64::MAX);
+
 fn ajoute_metriques(out: &mut Prefixe) {
     let sequence = METRIC_SEQUENCE.load(Ordering::SeqCst);
+    if sequence & 1 == 0 {
+        // Avant le premier echantillon, l'etat « indisponible » a sa propre
+        // marque (impaire, donc jamais une sequence publiee stable).
+        let marque = if METRIC_LENGTH.load(Ordering::SeqCst) == 0 { u64::MAX - 2 } else { sequence };
+        if SEQUENCE_EMISE.swap(marque, Ordering::Relaxed) == marque {
+            let _ = out.write_str("=");
+            return;
+        }
+    }
     if sequence & 1 == 0 {
         let len = METRIC_LENGTH.load(Ordering::SeqCst);
         if len != 0 {
