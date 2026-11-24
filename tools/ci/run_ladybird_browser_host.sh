@@ -381,7 +381,11 @@ SILENCE_MAX=${BO_SMOKE_SILENCE_S:-120}
 # `[SMP-PF] c1=0 c2=0 c3=0` -- : le navigateur saturait un coeur pendant que
 # trois autres n'existaient pas. Un test qui fait tourner le produit dans une
 # configuration que personne n'expedie ne mesure pas le produit.
-qemu-system-x86_64 "${ACCEL_QEMU[@]}" \
+# BOUCHAUD_BANC_PERF_V2 : `BO_SMOKE_QEMU_ARGS` ajoute des arguments QEMU
+# (p. ex. un second moniteur pour l'echantillonneur hote
+# tools/perf/echantillonneur_qemu.py). Vide par defaut : rien ne change.
+read -r -a QEMU_EXTRA <<< "${BO_SMOKE_QEMU_ARGS:-}"
+qemu-system-x86_64 "${ACCEL_QEMU[@]}" ${QEMU_EXTRA[@]+"${QEMU_EXTRA[@]}"} \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file=ladybird-browser-host${SUFFIXE}.img \
   -m 8192 -smp 4 -cpu max "${AFFICHE[@]}" -no-reboot \
