@@ -16,6 +16,7 @@ pub mod runqueue;
 pub mod equilibrage;
 pub mod secours;
 pub mod sonde_latence;
+pub mod elections;
 
 pub use crate::kernel::task::OrdonnanceurStats;
 
