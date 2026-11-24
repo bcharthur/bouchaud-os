@@ -102,7 +102,7 @@ python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # tools/verifie-scripts-ladybird-presents.py refuse un appel sans fichier.
 python3 tools/ladybird/prepare-network-live.py "$SRC"
 python3 tools/ladybird/prepare-ui-bouchaud.py "$SRC"
-# BOUCHAUD_SERVICES_UNIQUES_V1 : APRES UI/Bouchaud, dont il relit la cible.
+# BOUCHAUD_SERVICES_UNIQUES_V2 : APRES UI/Bouchaud, dont il relit la cible.
 python3 tools/ladybird/prepare-services-uniques.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
@@ -392,23 +392,35 @@ find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageD
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
 
-# BOUCHAUD_SERVICES_UNIQUES_V1 -- l'executable multi-appels, EXPERIMENTAL.
+# BOUCHAUD_SERVICES_UNIQUES_V2 -- l'executable multi-appels, EXPERIMENTAL.
 #
 # Construit APRES les services separes et sans pouvoir les casser : un echec
-# est publie et l'artefact reste celui d'avant. Garde : deux enveloppes de
-# `main.cpp` ne doivent definir aucun symbole global fort commun (le lien
-# `--allow-multiple-definition` en garderait un en silence) ; seuls les
-# points d'entree renommes `bouchaud_main_*` sont propres a chacune.
+# est publie et l'artefact reste celui d'avant. Garde : deux services ne
+# doivent definir aucun symbole global FORT commun (le lien
+# `--allow-multiple-definition` en garderait un en silence). V2 examine, par
+# service, TOUS ses objets (`bouchaud_<service>`) et sa bibliotheque propre
+# `lib<service>service.a`, pas seulement l'enveloppe de `main.cpp` ; seuls
+# les points d'entree renommes `bouchaud_main_*` sont propres a chacun.
+bouchaud_symboles_forts() {
+    nm --defined-only -g "$@" 2>/dev/null \
+        | awk 'NF == 3 && $2 ~ /^[TDBR]$/ && $3 !~ /bouchaud_main_/ {print $3}' | sort -u
+}
 if cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target BouchaudServices; then
     UNIQUE=$(find "$BUILD" -type f -name BouchaudServices -perm -111 -print -quit)
-    DOUBLONS=$(find "$BUILD" -path '*BouchaudServices*' -name 'main_*.cpp.o' -print0 \
-        | xargs -0 -r -n1 nm --defined-only -g 2>/dev/null \
-        | awk '$2 ~ /^[TDBR]$/ && $3 !~ /^_Z.*bouchaud_main_/ {print $3}' | sort | uniq -d)
+    TOUS=""
+    for bas in webcontent webworker compositor imagedecoder requestserver bouchaudbrowserhost; do
+        mapfile -t fichiers < <(find "$BUILD" \( -path "*/bouchaud_${bas}.dir/*" -name '*.o' \) -o -name "lib${bas}service.a")
+        [ "${#fichiers[@]}" -gt 0 ] || { TOUS="$TOUS objets_absents_$bas"; continue; }
+        TOUS="$TOUS
+$(bouchaud_symboles_forts "${fichiers[@]}")"
+    done
+    DOUBLONS=$(printf '%s\n' "$TOUS" | sed '/^$/d' | sort | uniq -d)
+    case "$TOUS" in *objets_absents_*) DOUBLONS="$DOUBLONS $(printf '%s' "$TOUS" | grep -o 'objets_absents_[a-z]*')";; esac
     if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ]; then
         cp -f "$UNIQUE" "$OUT/BouchaudServices"
-        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices")"
+        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices") symboles_forts=$(printf '%s\n' "$TOUS" | sed '/^$/d' | wc -l) doublons=0"
     else
-        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE binaire=${UNIQUE:-absent} doublons=$(echo "$DOUBLONS" | tr '\n' ' ')" >&2
+        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE binaire=${UNIQUE:-absent} doublons=$(echo "$DOUBLONS" | head -20 | tr '\n' ' ')" >&2
     fi
 else
     echo "BOUCHAUD_SERVICES_UNIQUES_ECHEC construction : artefact inchange" >&2
