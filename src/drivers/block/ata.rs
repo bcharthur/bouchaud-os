@@ -545,6 +545,10 @@ pub fn probe() {
     }
     PROBED_ATOMIQUE.store(true, Ordering::Release);
     drop(_controller);
+    // BOUCHAUD_ATA_IRQ_V1 : la sonde est sequentielle, sur le BSP, apres
+    // l'initialisation du PIC -- le seul moment ou demasquer IRQ14 ne court
+    // contre aucun autre lecture-modification-ecriture du masque.
+    irq::arme();
     let (master, slave) = capacities();
     crate::kernel::dmesg::log_fmt(format_args!(
         "ata: hda {} secteurs ({} Mio), hdb {} secteurs ({} Mio)",
@@ -935,6 +939,14 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
             outb(LBA_LOW, (lba & 0xFF) as u8);
             outb(LBA_MID, ((lba >> 8) & 0xFF) as u8);
             outb(LBA_HIGH, ((lba >> 16) & 0xFF) as u8);
+        }
+        // BOUCHAUD_ATA_IRQ_V1 : voir `irq`. La ligne n'est ouverte que pour
+        // cette commande ; `select_lba` la referme avant la suivante.
+        let dort = irq::peut_dormir();
+        if dort {
+            irq::autorise_interruption();
+        }
+        unsafe {
             if !emet_commande(if ecriture { CMD_WRITE_DMA } else { CMD_READ_DMA }, lba) {
                 // Refus de la regle : le bus-master n'a jamais demarre. Ce
                 // n'est pas une panne du DMA (`echec` le desactiverait).
@@ -950,6 +962,22 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
         let limite = 5 * crate::kernel::timer::TICKS_PER_SECOND;
         let mut tours = 0u64;
         let debut_ns = crate::kernel::timer::monotonic_ns();
+        if dort {
+            let mut dernier = 0u8;
+            let fini = irq::attend(irq::LIMITE_NS, &mut || {
+                dernier = unsafe { inb(bm + 2) };
+                dernier & BM_ST_ERREUR != 0 || dernier & BM_ST_ACTIF == 0
+            });
+            ATTENTE_NS.fetch_add(
+                crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns),
+                Ordering::Relaxed,
+            );
+            if !fini {
+                unsafe { outb(bm, 0) };
+                return echec("delai", dernier);
+            }
+            return termine(bm, dernier);
+        }
         let bm_statut = loop {
             let st = unsafe { inb(bm + 2) };
             if st & BM_ST_ERREUR != 0 || st & BM_ST_ACTIF == 0 {
@@ -974,6 +1002,12 @@ prdt_sous_4gio={} tampon_sous_4gio={} prdt_alignee={} prdt_dans_64k={}",
                 return echec("delai", st);
             }
         };
+        termine(bm, bm_statut)
+    }
+
+    /// Fin commune d'un transfert : arret du bus-master, controle d'erreur,
+    /// acquittement.
+    fn termine(bm: u16, bm_statut: u8) -> bool {
         unsafe { outb(bm, 0) };
         if !wait_not_busy() {
             return echec("occupe-apres-transfert", bm_statut);
@@ -1023,6 +1057,11 @@ pub fn publie_controleur(maintenant_ms: u64) {
         dma::lots_ecrits(),
         VIDANGES.load(core::sync::atomic::Ordering::Relaxed),
         VIDANGES_ECHOUEES.load(core::sync::atomic::Ordering::Relaxed),
+    ));
+    let (irq_recues, attentes, en_rotation, sommeils, relectures, echues, armee) = irq::stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "ATA_IRQ t={} armee={} irq={} attentes={} en_rotation={} sommeils={} vues_a_la_relecture={} echues={}",
+        maintenant_ms, armee as u8, irq_recues, attentes, en_rotation, sommeils, relectures, echues,
     ));
 }
 
@@ -1212,14 +1251,217 @@ fn flush(drive: Drive) -> bool {
     if !wait_not_busy() {
         return false;
     }
+    // BOUCHAUD_ATA_IRQ_V1 : `FLUSH CACHE` est la commande la plus longue du
+    // pilote (sous QEMU, un `fsync` de l'image sur l'hote). Run de reference
+    // main@e18a954 : 66 vidanges, 10 756 lectures du registre d'etat CHACUNE
+    // -- 710 000 acces port, autant de sorties de VM sous KVM/WHPX. On dort
+    // desormais sur l'IRQ14 de fin de commande.
+    let dort = irq::peut_dormir();
+    if dort {
+        irq::autorise_interruption();
+    }
     if !unsafe { emet_commande(CMD_FLUSH_CACHE, 0) } {
         return false;
+    }
+    if dort {
+        let fini = irq::attend(irq::LIMITE_NS, &mut || {
+            let st = unsafe { inb(ALT_STATUS) };
+            st == 0xFF || st & ST_BUSY == 0
+        });
+        if !fini {
+            return false;
+        }
     }
     if !wait_not_busy() {
         return false;
     }
     let statut = unsafe { inb(STATUS) };
     statut & (ST_ERR | ST_DF) == 0
+}
+
+/// BOUCHAUD_ATA_IRQ_V1 -- ATTENDRE LA FIN D'UNE COMMANDE SANS INTERROGER.
+///
+/// # Ce qui a ete mesure
+///
+/// Compte des acces MMIO/port du smoke Ladybird de `main@e18a954` (trace QEMU
+/// `memory_region_ops_*`, une ligne par acces, donc par sortie de VM sous un
+/// hyperviseur) : apres le demarrage du noyau, 970 000 lectures du statut du
+/// bus-master (170 par `READ DMA`) et 710 000 lectures du statut ATA (10 756
+/// par `FLUSH CACHE`). Les attentes tournaient sur le registre.
+///
+/// # Ce qui change
+///
+/// Pour une commande DMA ou une vidange, le pilote ouvre la ligne
+/// d'interruption (`nIEN` = 0) juste avant la commande, tourne une dizaine de
+/// microsecondes, puis DORT sur `ACHEVEMENTS`, que le gestionnaire de l'IRQ14
+/// reveille. Le motif est celui, deja eprouve, de virtio-gpu
+/// (`virtio_gpu_irq::attend`) : ticket pris AVANT la derniere relecture, donc
+/// aucun reveil perdu ; sommeil BORNE (`RELECTURE_NS`) et relecture du
+/// registre a chaque reveil, donc une IRQ perdue coute une milliseconde, pas
+/// un blocage.
+///
+/// # Quand on ne dort pas
+///
+/// * avant `arme()` (demarrage, sonde) et hors d'une tache : interrogation
+///   d'avant, inchangee ;
+/// * interruptions masquees : idem ;
+/// * si huit attentes dormantes ont abouti sans qu'AUCUNE IRQ14 ne soit
+///   jamais arrivee, la plateforme ne la livre pas : le pilote revient
+///   definitivement a l'interrogation et le dit (`ATA_IRQ repli`).
+///
+/// Toute autre commande (PIO, IDENTIFY) garde `nIEN` = 1 : `select` et
+/// `select_lba` le reposent avant chaque commande.
+mod irq {
+    use super::*;
+    use crate::drivers::virtio_gpu_irq::{self as attente, Dormeur, Reveil};
+    use core::sync::atomic::AtomicBool;
+
+    /// Borne d'une attente, comme `wait_not_busy`.
+    pub const LIMITE_NS: u64 = 5_000_000_000;
+    /// Rotation ESPACEE avant de dormir (`rotation_espacee`).
+    ///
+    /// Premiere campagne A/B (TCG, 3 paires) avec 10 us de rotation : attente
+    /// DMA moyenne 190 us -> 307 us, lancement de Ladybird -> premiere image
+    /// +6 %. Le reveil par IRQ (PIC -> BSP -> file -> IPI -> election) coutait
+    /// ~117 us a CHAQUE lecture d'une faute de page. On tourne donc jusqu'a
+    /// 200 us, mais en espacant les lectures du registre (pas double de 1 a
+    /// 32 us, attente sans E/S entre deux) : une dizaine d'acces au lieu de
+    /// 170, et la fin d'un transfert court est vue a 32 us pres. Au-dela, on
+    /// dort sur l'IRQ (vidanges, disque lent).
+    const ROTATION_NS: u64 = 200_000;
+    const PAS_INITIAL_NS: u64 = 1_000;
+    const PAS_MAX_NS: u64 = 32_000;
+    /// Un sommeil ne depasse jamais cela sans relire le registre.
+    const RELECTURE_NS: u64 = 1_000_000;
+    /// Attentes dormantes sans aucune IRQ avant de renoncer.
+    const SANS_IRQ_MAX: u64 = 8;
+
+    static ARMEE: AtomicBool = AtomicBool::new(false);
+    static ACHEVEMENTS: crate::kernel::sync::WaitQueue = crate::kernel::sync::WaitQueue::new();
+    static IRQ_RECUES: AtomicU64 = AtomicU64::new(0);
+    static ATTENTES: AtomicU64 = AtomicU64::new(0);
+    static EN_ROTATION: AtomicU64 = AtomicU64::new(0);
+    static SOMMEILS: AtomicU64 = AtomicU64::new(0);
+    static VUS_PAR_RELECTURE: AtomicU64 = AtomicU64::new(0);
+    static ECHUES: AtomicU64 = AtomicU64::new(0);
+
+    /// Demasque IRQ14 au PIC. Appele une fois, par la sonde (sequentielle).
+    pub fn arme() {
+        if ARMEE.load(Ordering::Acquire) || !crate::arch::x86_64::interrupts::enabled() {
+            return;
+        }
+        ::x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::arch::x86_64::interrupts::unmask_irq(14);
+        });
+        ARMEE.store(true, Ordering::Release);
+        crate::kernel::dmesg::log("ATA_IRQ armee irq=14 attente=sommeil");
+    }
+
+    /// Le gestionnaire de l'IRQ14 : compte et reveille. L'attendant relit le
+    /// registre lui-meme ; une interruption de trop n'acheve rien.
+    pub fn interruption() {
+        IRQ_RECUES.fetch_add(1, Ordering::Relaxed);
+        ACHEVEMENTS.wake_all();
+    }
+
+    /// Le contexte permet-il de dormir ? Meme regle que l'attente du verrou
+    /// du controleur (`lock_controller_mesure`), plus une tache courante.
+    pub fn peut_dormir() -> bool {
+        ARMEE.load(Ordering::Acquire)
+            && crate::arch::x86_64::cpu::interrupts_enabled()
+            && crate::kernel::task::try_current().is_some()
+    }
+
+    /// Ouvre la ligne d'interruption pour la commande qui suit.
+    pub fn autorise_interruption() {
+        unsafe { outb(DEVICE_CONTROL, 0) };
+    }
+
+    struct Monde;
+
+    impl Dormeur for Monde {
+        fn maintenant(&mut self) -> u64 {
+            crate::kernel::timer::monotonic_ns()
+        }
+        fn dors(&mut self, jusqu_a: u64, pret: &mut dyn FnMut() -> bool) -> Reveil {
+            let ticket = ACHEVEMENTS.ticket();
+            if pret() {
+                return Reveil::DejaPret;
+            }
+            if ACHEVEMENTS.wait_until_noyau(ticket, jusqu_a) || ACHEVEMENTS.signale_depuis(ticket) {
+                Reveil::Interruption
+            } else {
+                Reveil::Borne
+            }
+        }
+    }
+
+    /// Lit `pret` a intervalles doubles (1, 2, 4... 32 us), sans aucun acces
+    /// materiel entre deux lectures, pendant au plus `duree_ns`.
+    fn rotation_espacee(pret: &mut dyn FnMut() -> bool, duree_ns: u64) -> bool {
+        let debut = crate::kernel::timer::monotonic_ns();
+        let mut pas = PAS_INITIAL_NS;
+        loop {
+            if pret() {
+                return true;
+            }
+            let t = crate::kernel::timer::monotonic_ns();
+            if t.saturating_sub(debut) >= duree_ns {
+                return false;
+            }
+            let fin = t.saturating_add(pas);
+            while crate::kernel::timer::monotonic_ns() < fin {
+                core::hint::spin_loop();
+            }
+            pas = (pas * 2).min(PAS_MAX_NS);
+        }
+    }
+
+    /// Attend `pret`, au plus `limite_ns`. Rend `pret` atteint.
+    pub fn attend(limite_ns: u64, pret: &mut dyn FnMut() -> bool) -> bool {
+        let rang = ATTENTES.fetch_add(1, Ordering::Relaxed) + 1;
+        let echeance = crate::kernel::timer::monotonic_ns().saturating_add(limite_ns);
+        if rotation_espacee(pret, ROTATION_NS.min(limite_ns)) {
+            EN_ROTATION.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        let b = attente::attend(pret, &mut Monde, echeance, 0, RELECTURE_NS);
+        SOMMEILS.fetch_add(u64::from(b.sommeils), Ordering::Relaxed);
+        if b.vu_par_relecture {
+            VUS_PAR_RELECTURE.fetch_add(1, Ordering::Relaxed);
+        }
+        if !b.reussi {
+            ECHUES.fetch_add(1, Ordering::Relaxed);
+        }
+        if rang >= SANS_IRQ_MAX && IRQ_RECUES.load(Ordering::Relaxed) == 0
+            && ARMEE.swap(false, Ordering::AcqRel)
+        {
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ATA_IRQ repli raison=aucune-irq attentes={} relectures={}",
+                rang, VUS_PAR_RELECTURE.load(Ordering::Relaxed)
+            ));
+        }
+        b.reussi
+    }
+
+    /// (irq recues, attentes dormantes, vues en rotation, sommeils, vues
+    /// seulement a la relecture bornee, echues, armee).
+    pub fn stats() -> (u64, u64, u64, u64, u64, u64, bool) {
+        (
+            IRQ_RECUES.load(Ordering::Relaxed),
+            ATTENTES.load(Ordering::Relaxed),
+            EN_ROTATION.load(Ordering::Relaxed),
+            SOMMEILS.load(Ordering::Relaxed),
+            VUS_PAR_RELECTURE.load(Ordering::Relaxed),
+            ECHUES.load(Ordering::Relaxed),
+            ARMEE.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Appele par le gestionnaire de l'IRQ14 (`idt/storage.rs`).
+pub fn interruption_primaire() {
+    irq::interruption();
 }
 
 /// Transfere un secteur vers le port de donnees.
