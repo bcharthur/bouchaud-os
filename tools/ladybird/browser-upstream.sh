@@ -439,7 +439,11 @@ $(bouchaud_symboles_forts "${fichiers[@]}")"
             fi
         done
         ln -sf "$UNIQUE" "$GARDE/unique/ServiceInconnu"
-        (cd "$GARDE/unique" && timeout 30 ./ServiceInconnu >/dev/null 2>&1); code=$?
+        # `set -e` : le 127 ATTENDU ne doit pas terminer le script (runs
+        # 45461280743 et 45476169319 : binaire construit, 5/5 identiques, puis
+        # sortie 127 du script lui-meme, avant BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT).
+        code=0
+        (cd "$GARDE/unique" && timeout 30 ./ServiceInconnu >/dev/null 2>&1) || code=$?
         [ "$code" = 127 ] || ECARTS="$ECARTS inconnu_code=$code"
         rm -rf "$GARDE"
     fi
