@@ -46,6 +46,7 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
 pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
     -> Option<Arc<Process>>
 {
+    let image_java_sure = crate::kernel::security::policy::lanceur_java_de_confiance(name);
     let space = AddressSpace::new()?;
     let pid = crate::kernel::process::spawn(name, uid.min(u16::MAX as u32) as u16);
     let process = Arc::new(Process {
@@ -59,7 +60,7 @@ pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid,
-            gid, ecran: None }),
+            gid, ecran: None, image_java_sure }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
         temps_recycle: TempsRecycle::neuf(),

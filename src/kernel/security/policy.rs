@@ -31,13 +31,98 @@ pub struct Snapshot {
 static CONTEXTS: SpinLock<Vec<Entry>> = SpinLock::new(Vec::new());
 static CHECKS: AtomicU64 = AtomicU64::new(0);
 
-fn make_entry(pid: u32, image: &str, uid: u32, gid: u32) -> Entry {
+// ---------------------------------------------------------------------------
+// BOUCHAUD_JIT_RWX_V1 -- l'exception W^X du lanceur Java.
+// ---------------------------------------------------------------------------
+
+/// `image` est-il un lanceur Java installe par root ?
+///
+/// Le CHEMIN (`profile::runtime_java_image`) et la PROPRIETE : le fichier et
+/// chacun de ses repertoires, depuis `/`, appartiennent a root et ne sont
+/// inscriptibles ni par le groupe ni par les autres. Sinon, n'importe quel
+/// utilisateur capable d'ecrire un repertoire du chemin pourrait y deposer un
+/// `java` de sa fabrication et obtenir des pages RWX. Le RAMFS n'a pas de lien
+/// symbolique : le chemin parcouru est le chemin execute.
+///
+/// Prend le verrou du systeme de fichiers : a appeler hors de tout verrou de
+/// processus et de politique (exec, creation de processus).
+pub fn lanceur_java_de_confiance(image: &str) -> bool {
+    if !profile::runtime_java_image(image) {
+        return false;
+    }
+    let fs = crate::fs::ramfs::fs();
+    let sain = |noeud: usize| -> bool {
+        noeud < fs.nodes.len()
+            && fs.nodes[noeud].used
+            && fs.nodes[noeud].uid == 0
+            && fs.nodes[noeud].mode & 0o022 == 0
+    };
+    let mut courant = 0usize;
+    if !sain(courant) {
+        return false;
+    }
+    for morceau in image.trim_start_matches('/').split('/') {
+        let Some(enfant) = fs.find_child(courant, morceau) else {
+            return false;
+        };
+        if !sain(enfant) {
+            return false;
+        }
+        courant = enfant;
+    }
+    fs.nodes[courant].kind == crate::fs::ramfs::NodeKind::File
+}
+
+static JIT_RWX_ACCORDES: AtomicU64 = AtomicU64::new(0);
+
+/// Combien de processus ont recu `JIT_RWX`.
+pub fn jit_rwx_accordes() -> u64 {
+    JIT_RWX_ACCORDES.load(Ordering::Relaxed)
+}
+
+/// Ajoute `JIT_RWX` si -- et seulement si -- le profil y est eligible (Java,
+/// hors `no_new_privs`) ET l'image a ete verifiee a l'exec.
+fn accorde_jit_rwx(
+    capacites: Capabilities,
+    profile: profile::SecurityProfile,
+    no_new_privs: bool,
+    image_java_sure: bool,
+    pid: u32,
+    image: &str,
+) -> Capabilities {
+    if !(profile::eligible_jit_rwx(profile, no_new_privs) && image_java_sure) {
+        return capacites.without(Capabilities::JIT_RWX);
+    }
+    if !capacites.contains(Capabilities::JIT_RWX) {
+        JIT_RWX_ACCORDES.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "[SECURITY-JIT-RWX] pid={} image={} accorde=1 raison=lanceur-java-racine",
+            pid, image,
+        ));
+    }
+    // `JIT_RWX` sans `JIT` ne servirait a rien : la regle ordinaire refuse
+    // toute memoire anonyme executable sans `JIT` (`AnonymousExecute`). Un
+    // utilisateur NON root qui lance `java` part du profil `User`, qui ne la
+    // porte pas (revue #341). Les memes conditions accordent donc les deux ;
+    // `JIT` est strictement moins que `JIT_RWX`.
+    capacites.union(Capabilities::JIT_RWX).union(Capabilities::JIT)
+}
+
+fn make_entry(pid: u32, image: &str, uid: u32, gid: u32, image_java_sure: bool) -> Entry {
     let profile = profile::classify(image, uid);
+    let nnp = profile::sandboxe(profile);
     Entry {
         pid,
         image: image.to_string(),
         credentials: Credentials::new(uid, gid),
-        capabilities: profile::initial_capabilities(image, uid),
+        capabilities: accorde_jit_rwx(
+            profile::initial_capabilities(image, uid),
+            profile,
+            nnp,
+            image_java_sure,
+            pid,
+            image,
+        ),
         profile,
         // BOUCHAUD_C6_NO_NEW_PRIVS_IMPLICITE_V1
         //
@@ -65,11 +150,12 @@ fn ensure_entry<'a>(
     image: &str,
     uid: u32,
     gid: u32,
+    image_java_sure: bool,
 ) -> &'a mut Entry {
     let index = match contexts.iter().position(|entry| entry.pid == pid) {
         Some(index) => index,
         None => {
-            contexts.push(make_entry(pid, image, uid, gid));
+            contexts.push(make_entry(pid, image, uid, gid, image_java_sure));
             contexts.len() - 1
         }
     };
@@ -81,8 +167,14 @@ fn ensure_entry<'a>(
     if entry.credentials.euid != uid || entry.credentials.egid != gid {
         entry.credentials = Credentials::new(uid, gid);
         let new_profile = profile::classify(image, uid);
-        entry.capabilities =
-            profile::transition_capabilities(entry.capabilities, new_profile);
+        entry.capabilities = accorde_jit_rwx(
+            profile::transition_capabilities(entry.capabilities, new_profile),
+            new_profile,
+            entry.no_new_privs,
+            image_java_sure,
+            pid,
+            image,
+        );
         entry.profile = new_profile;
     }
 
@@ -98,7 +190,8 @@ fn ensure_entry<'a>(
             image,
             entry.credentials.euid,
         );
-        entry.capabilities = capacites;
+        entry.capabilities =
+            accorde_jit_rwx(capacites, new_profile, nnp, image_java_sure, pid, image);
         entry.profile = new_profile;
         entry.no_new_privs = nnp;
         entry.image.clear();
@@ -126,6 +219,7 @@ pub fn current() -> Snapshot {
     let uid = metadata.uid;
     let gid = metadata.gid;
     let image = metadata.name.clone();
+    let image_java_sure = metadata.image_java_sure;
 
     let out = {
         let mut contexts = CONTEXTS.lock();
@@ -135,6 +229,7 @@ pub fn current() -> Snapshot {
             image.as_str(),
             uid,
             gid,
+            image_java_sure,
         ))
     };
     drop(metadata);
@@ -182,6 +277,7 @@ pub fn set_uid_current(target: u32) -> Result<Snapshot, CredentialError> {
             image.as_str(),
             metadata.uid,
             metadata.gid,
+            metadata.image_java_sure,
         );
         entry.credentials.set_uid(target, entry.capabilities)?;
 
@@ -210,6 +306,7 @@ pub fn set_gid_current(target: u32) -> Result<Snapshot, CredentialError> {
             image.as_str(),
             metadata.uid,
             metadata.gid,
+            metadata.image_java_sure,
         );
         entry.credentials.set_gid(target, entry.capabilities)?;
 
@@ -230,6 +327,7 @@ pub fn set_no_new_privs_current() {
         metadata.name.as_str(),
         metadata.uid,
         metadata.gid,
+        metadata.image_java_sure,
     );
     entry.no_new_privs = true;
 }
@@ -263,6 +361,7 @@ pub fn apply_profile(pid: u32, wanted: SecurityProfile) -> bool {
         metadata.name.as_str(),
         metadata.uid,
         metadata.gid,
+        metadata.image_java_sure,
     );
     entry.capabilities =
         profile::transition_capabilities(entry.capabilities, wanted);
@@ -289,12 +388,14 @@ pub fn inherit(parent_pid: u32, child_pid: u32) {
     let parent_image = parent_metadata.name.clone();
     let parent_uid = parent_metadata.uid;
     let parent_gid = parent_metadata.gid;
+    let parent_java_sure = parent_metadata.image_java_sure;
     drop(parent_metadata);
 
     let child_metadata = child.metadata.lock();
     let child_image = child_metadata.name.clone();
     let child_uid = child_metadata.uid;
     let child_gid = child_metadata.gid;
+    let child_java_sure = child_metadata.image_java_sure;
     drop(child_metadata);
 
     let mut contexts = CONTEXTS.lock();
@@ -305,6 +406,7 @@ pub fn inherit(parent_pid: u32, child_pid: u32) {
             parent_image.as_str(),
             parent_uid,
             parent_gid,
+            parent_java_sure,
         );
         parent_entry.clone()
     };
@@ -332,7 +434,7 @@ pub fn inherit(parent_pid: u32, child_pid: u32) {
     let mut child_entry = inherited;
     child_entry.pid = child_pid;
     contexts.push(child_entry);
-    let entree = ensure_entry(&mut contexts, child_pid, child_image.as_str(), child_uid, child_gid);
+    let entree = ensure_entry(&mut contexts, child_pid, child_image.as_str(), child_uid, child_gid, child_java_sure);
     entree.no_new_privs |= deja_confine;
 }
 

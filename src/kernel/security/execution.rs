@@ -33,6 +33,8 @@ pub const fn appelant_peut_executer(profil: super::profile::SecurityProfile) -> 
     use super::profile::SecurityProfile as P;
     match profil {
         P::System | P::User | P::BrowserBroker => true,
+        // Un lanceur Java lance la JVM du jeu : c'est sa fonction.
+        P::RuntimeJava => true,
         // Les roles qui traitent des donnees venues du reseau. Aucun d'eux n'a
         // de raison legitime de lancer un programme.
         P::BrowserContent | P::BrowserNetwork | P::Untrusted => false,

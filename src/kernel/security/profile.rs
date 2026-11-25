@@ -21,6 +21,8 @@ pub enum SecurityProfile {
     /// le reseau l'aurait casse, le lui laisser l'aurait donne au moteur de
     /// rendu. Les separer est ce qui rend la regle exprimable.
     BrowserNetwork,
+    /// BOUCHAUD_JIT_RWX_V1 : un lanceur Java installe par root.
+    RuntimeJava,
     Untrusted,
 }
 
@@ -39,6 +41,28 @@ fn browser_content_image(image: &str) -> bool {
         // classe COURTIER : non sandboxe, avec DEVICE_IO, NET_CONNECT et le
         // droit de lancer des processus. C'est un role de RENDU.
         || image.ends_with("/Compositor")
+}
+
+/// `image` est-il un lanceur Java installe sous `/usr/lib/jvm` ?
+///
+/// Forme EXACTE : `/usr/lib/jvm/<jdk>/bin/java` ou
+/// `/usr/lib/jvm/<jdk>/jre/bin/java`, `<jdk>` etant un seul composant non
+/// vide. Aucun `.`, `..`, double barre ni autre nom : un `java` copie ailleurs,
+/// ou nomme autrement, n'est qu'un programme ordinaire. Le chemin seul ne
+/// suffit pas : `policy::accorde_jit_rwx` exige aussi que le fichier et ses
+/// repertoires appartiennent a root et ne soient pas inscriptibles par d'autres.
+pub fn runtime_java_image(image: &str) -> bool {
+    let Some(reste) = image.strip_prefix("/usr/lib/jvm/") else {
+        return false;
+    };
+    let mut morceaux = reste.split('/');
+    let Some(jdk) = morceaux.next() else { return false };
+    if jdk.is_empty() || jdk == "." || jdk == ".." {
+        return false;
+    }
+    let suite: [Option<&str>; 4] = [morceaux.next(), morceaux.next(), morceaux.next(), morceaux.next()];
+    matches!(suite, [Some("bin"), Some("java"), None, None])
+        || matches!(suite, [Some("jre"), Some("bin"), Some("java"), None])
 }
 
 fn browser_network_image(image: &str) -> bool {
@@ -116,6 +140,10 @@ pub fn classify(image: &str, uid: u32) -> SecurityProfile {
         return SecurityProfile::BrowserBroker;
     }
 
+    if runtime_java_image(image) {
+        return SecurityProfile::RuntimeJava;
+    }
+
     if uid == 0 {
         SecurityProfile::System
     } else {
@@ -156,8 +184,25 @@ pub const fn capabilities(profile: SecurityProfile) -> Capabilities {
                 | Capabilities::IPC_TRANSFER.0
                 | Capabilities::NET_CONNECT.0
         ),
+        // BOUCHAUD_JIT_RWX_V1 : ce qu'un programme Java ordinaire utilise --
+        // lancer d'autres processus (un lanceur de jeu lance la JVM du jeu),
+        // le reseau, le JIT. `JIT_RWX` n'est PAS ici : il ne passe pas par
+        // l'intersection des capacites, il est accorde a part, apres
+        // verification du proprietaire (`policy::accorde_jit_rwx`).
+        SecurityProfile::RuntimeJava => Capabilities(
+            Capabilities::EXEC.0
+                | Capabilities::JIT.0
+                | Capabilities::IPC_TRANSFER.0
+                | Capabilities::NET_CONNECT.0
+        ),
         SecurityProfile::Untrusted => Capabilities::EXEC,
     }
+}
+
+/// Ce profil peut-il recevoir `JIT_RWX` ? Jamais sous `no_new_privs` : un
+/// processus sandboxe ne gagne aucune autorite en executant `java`.
+pub const fn eligible_jit_rwx(profile: SecurityProfile, no_new_privs: bool) -> bool {
+    matches!(profile, SecurityProfile::RuntimeJava) && !no_new_privs
 }
 
 /// Authority available to a brand-new process from its login identity.  A

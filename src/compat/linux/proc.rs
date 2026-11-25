@@ -65,9 +65,10 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     };
     let apres_espace_ns = crate::kernel::timer::monotonic_ns();
     let files = parent.files.lock().clone();
-    let (cwd, uid, gid, name, ecran) = {
+    let (cwd, uid, gid, name, ecran, image_java_sure) = {
         let metadata = parent.metadata.lock();
-        (metadata.cwd, metadata.uid, metadata.gid, metadata.name.clone(), metadata.ecran)
+        (metadata.cwd, metadata.uid, metadata.gid, metadata.name.clone(), metadata.ecran,
+         metadata.image_java_sure)
     };
     let signals = parent.signals.lock().clone();
     let parent_pid = parent.pid;
@@ -113,7 +114,7 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         mm: Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
             partages, limite_as, promesses, clean_pages })),
         files: Arc::new(FileTable::new(files)),
-        metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
+        metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran, image_java_sure }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(child_signals),
         temps_recycle: task::TempsRecycle::neuf(),
@@ -362,7 +363,14 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
     let nom_journal = path.clone();
     // Releve TOT : `process` n'est plus empruntable au point no-return.
     let pid_journal = process.pid;
-    process.metadata.lock().name = path;
+    // BOUCHAUD_JIT_RWX_V1 : verifie ICI, avant de reprendre le verrou du
+    // processus -- la verification prend celui du systeme de fichiers.
+    let image_java_sure = crate::kernel::security::policy::lanceur_java_de_confiance(&path);
+    {
+        let mut metadata = process.metadata.lock();
+        metadata.name = path;
+        metadata.image_java_sure = image_java_sure;
+    }
     // BOUCHAUD_EOF_HORS_CLOSE_V1 : le pere de `posix_spawn` attend la fin de
     // fichier de ce tube CLOEXEC pour savoir que l'exec a reussi.
     let fermes = process.files.lock().close_on_exec();
