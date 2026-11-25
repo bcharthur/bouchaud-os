@@ -174,6 +174,16 @@ jobs:
           cp serie-faute-multifil.log serie-faute-multifil-smp8.log
           BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
           cp serie-faute-multifil.log serie-faute-multifil-kvm.log
+      - name: Futex -- un reveil compte n'est jamais perdu (attendant temporise, condvar glibc), SMP1 et SMP4 (TCG)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 (#376) : un attendant temporise choisi
+        # par FUTEX_WAKE mais qui reprend apres son echeance rendait ETIMEDOUT ;
+        # le reveil etait perdu pour l'autre attendant, et la condvar de la
+        # glibc se figeait (gel d'ImageDecoder). Avant correctif : reveils
+        # perdus et gel du niveau condvar en SMP1 et SMP4 ; Linux : 0.
+        run: |
+          tools/ci/run_futex_reveil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60 1
+          tools/ci/run_futex_reveil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60 4
       - name: Extinction pendant que des orphelins tiennent le disque -- SMP1 et SMP4 (TCG)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_EXTINCTION_FIL_NOYAU_V1 : l'autorun s'eteint depuis le

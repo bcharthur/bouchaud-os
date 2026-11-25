@@ -36,3 +36,5 @@ Regles :
 
 Pour simuler sans rien lancer : `-DryRun`. Pour analyser un journal seul : `-AnalyserJournal serie.log`.
 Controle en CI : `tools/ci/test-scripts-windows-trigkey.ps1`.
+
+Pour un rapport avant/après automatisé (services séparés contre BouchaudServices, ou noyau avant contre après un correctif), voir [BANC_WHPX_AVANT_APRES.md](BANC_WHPX_AVANT_APRES.md).

@@ -101,6 +101,31 @@ impl WaitQueue {
 
         let (notified, loops) =
             crate::kernel::task::finish_park_current_on_detached(deadline_ns);
+        // BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 -- UN REVEIL COMPTE EST UN REVEIL.
+        //
+        // `finish_park_current_on_detached` juge « notifie » a l'HEURE de la
+        // reprise : `maintenant < echeance`. Une tache choisie par un
+        // reveilleur (Blocked -> Ready gagne, `wake_wait_queue` la compte et
+        // s'arrete a `limit`) mais qui ne reprend le coeur qu'APRES son
+        // echeance se declarait expiree. Le reveil etait alors consomme sans
+        // etre livre : FUTEX_WAKE rendait 1, l'attendant rendait ETIMEDOUT.
+        // Sous Linux, un attendant retire de la file par un reveilleur rend 0,
+        // quelle que soit l'heure de sa reprise.
+        //
+        // Consequence (#376, gel d'ImageDecoder) : la condvar de la glibc
+        // envoie l'attendant « expire » dans __condvar_cancel_waiting sans
+        // prendre le signal ; le signal reste poste (g_signals = 2, g_size = 0)
+        // et l'autre attendant dort pour toujours -- meme un broadcast ne le
+        // reveille plus. tools/ci/run_futex_reveil.sh, avant : 33/40
+        // violations et gel en SMP1, 13/40 et gel en SMP4 ; Linux : 0.
+        //
+        // Tout reveilleur avance la generation de la file (SeqCst) AVANT sa
+        // transition Blocked -> Ready, et notre lecture de l'etat est Acquire :
+        // si un reveil nous a fait reprendre, la generation a bouge depuis
+        // notre ticket. Un signal survenu pendant l'attente compte donc comme
+        // une notification ; au pire c'est un reveil parasite, que toute
+        // attente du noyau et tout appelant de futex revalident deja.
+        let notified = notified || self.point.ticket() != ticket.0;
         WAITQ_DETACHED_SCHEDULE_LOOPS.fetch_add(loops, Ordering::Relaxed);
 
         let elapsed = crate::kernel::timer::monotonic_ns().saturating_sub(start);

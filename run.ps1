@@ -134,7 +134,12 @@ param(
     # leurs pages sur un seul noeud. TCG, 6 paires (PR #373) : lectures disque
     # -49 %, RAM page chargee -50 Mio, premiere trame -2,4 s. Desactive par
     # defaut tant qu'une qualification WHPX n'est pas faite.
-    [switch]$ServicesUniques
+    [switch]$ServicesUniques,
+
+    # BOUCHAUD_BANC_AVANT_APRES_V1 -- construit le noyau et le disque, puis
+    # s'arrete AVANT QEMU (aucune fenetre). Sert a preparer les bootimages et
+    # les disques d'un banc (tools\windows\Banc-AvantApres.ps1).
+    [switch]$PreparerSeulement
 )
 
 $ErrorActionPreference = "Stop"
@@ -1541,6 +1546,12 @@ if ($Fullscreen) {
 # =============================================================================
 # Demarrage QEMU
 # =============================================================================
+
+if ($PreparerSeulement) {
+    $disquePrepare = if ($LadybirdMode) { $LadybirdImage } else { "" }
+    Write-Host ("PREPARATION_TERMINEE bootimage={0} disque={1}" -f $BootImage, $disquePrepare) -ForegroundColor Green
+    exit 0
+}
 
 Write-Section "Demarrage QEMU"
 
