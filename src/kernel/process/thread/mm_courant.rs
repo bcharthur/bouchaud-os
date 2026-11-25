@@ -293,6 +293,17 @@ fn mm_des_morts() -> Option<Arc<Mm>> {
 /// Revient toujours, et ne laisse aucune reference vivante dans son cadre :
 /// `sortie_du_fil` ne revient pas, et ce qu'elle garderait serait perdu.
 pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
+    #[cfg(feature = "banc-sans-espace-rendu")]
+    {
+        let _ = emprunteur;
+        return;
+    }
+    #[cfg(not(feature = "banc-sans-espace-rendu"))]
+    rend_espace_a_la_mort_effectif(emprunteur)
+}
+
+#[cfg(not(feature = "banc-sans-espace-rendu"))]
+fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
     let tache = current();
     if tache.noyau || emprunteur {
         return;

@@ -46,6 +46,10 @@ banc-gpu-perte-scanout = []
 # reglage a l'execution laisserait la possibilite de l'armer par accident. Voir
 # `platform/pc/banc_io.rs` et `tools/ci/run_trigkey_ladybird_io_stress.sh`.
 banc-io = []
+# BANC TEMOIN (jamais dans `default`) : desactive BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1
+# (l'espace d'un mort repart a sa recolte, comme avant) pour isoler sa part
+# dans un incident de tempete-exec.
+banc-sans-espace-rendu = []
 # BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) -- TEMOIN DU NOYAU FIGE.
 # Un fil noyau prend un verrou et tourne sans le rendre ; le demarrage l'attend.
 # Sur deux coeurs, plus rien ne s'ordonnance : seule la ligne
