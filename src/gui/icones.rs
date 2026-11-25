@@ -198,7 +198,13 @@ pub fn pour_kind(kind: usize) -> Option<usize> {
 pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
     use crate::gui::window::App;
     Some(match app {
-        App::Application { .. } => return None,
+        // BOUCHAUD_ICONE_PAR_IMAGE_V1 : une application d'Atelier passee en
+        // ring 3 garde l'icone qu'elle avait dans le noyau -- designee par
+        // le programme lance, pas par le titre que le client choisit.
+        App::Application { client } => match client.image.as_str() {
+            crate::gui::window_manager::CHEMIN_NOTES => 6,
+            _ => return None,
+        },
         App::Navigateur { .. } => 0,
         App::Doom { .. } => 11,
         App::Terminal { .. } => 2,
