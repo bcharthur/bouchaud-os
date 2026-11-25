@@ -102,6 +102,8 @@ python3 tools/ladybird/prepare-full-browser-host.py "$SRC"
 # tools/verifie-scripts-ladybird-presents.py refuse un appel sans fichier.
 python3 tools/ladybird/prepare-network-live.py "$SRC"
 python3 tools/ladybird/prepare-ui-bouchaud.py "$SRC"
+# BOUCHAUD_SERVICES_UNIQUES_V2 : APRES UI/Bouchaud, dont il relit la cible.
+python3 tools/ladybird/prepare-services-uniques.py "$SRC"
 
 # Prepare from a clean upstream tree, then preserve timestamps ONLY for equal
 # content. Ninja can reuse its dependency graph without hiding changed headers.
@@ -389,6 +391,73 @@ mkdir -p "$OUT"
 find "$BUILD" -type f \( -name WebContent -o -name RequestServer -o -name ImageDecoder -o -name WebWorker -o -name Compositor -o -name WebDriver -o -name BouchaudBrowserHost \) -perm -111 -exec cp -f {} "$OUT/" \;
 
 [ -x "$OUT/WebContent" ] || { echo "WebContent non produit" >&2; exit 1; }
+
+# BOUCHAUD_SERVICES_UNIQUES_V2 -- l'executable multi-appels, EXPERIMENTAL.
+#
+# Construit APRES les services separes et sans pouvoir les casser : un echec
+# est publie et l'artefact reste celui d'avant. Garde : deux services ne
+# doivent definir aucun symbole global FORT commun (le lien
+# `--allow-multiple-definition` en garderait un en silence). V2 examine, par
+# service, TOUS ses objets (`bouchaud_<service>`) et sa bibliotheque propre
+# `lib<service>service.a`, pas seulement l'enveloppe de `main.cpp` ; seuls
+# les points d'entree renommes `bouchaud_main_*` sont propres a chacun.
+bouchaud_symboles_forts() {
+    nm --defined-only -g "$@" 2>/dev/null \
+        | awk 'NF == 3 && $2 ~ /^[TDBR]$/ && $3 !~ /bouchaud_main_/ {print $3}' | sort -u
+}
+if cmake --build "$BUILD" --parallel "${BO_JOBS:-$(nproc)}" --target BouchaudServices; then
+    UNIQUE=$(find "$BUILD" -type f -name BouchaudServices -perm -111 -print -quit)
+    TOUS=""
+    for bas in webcontent webworker compositor imagedecoder requestserver bouchaudbrowserhost; do
+        mapfile -t fichiers < <(find "$BUILD" \( -path "*/bouchaud_${bas}.dir/*" -name '*.o' \) -o -name "lib${bas}service.a")
+        [ "${#fichiers[@]}" -gt 0 ] || { TOUS="$TOUS objets_absents_$bas"; continue; }
+        TOUS="$TOUS
+$(bouchaud_symboles_forts "${fichiers[@]}")"
+    done
+    DOUBLONS=$(printf '%s\n' "$TOUS" | sed '/^$/d' | sort | uniq -d)
+    case "$TOUS" in *objets_absents_*) DOUBLONS="$DOUBLONS $(printf '%s' "$TOUS" | grep -o 'objets_absents_[a-z]*')";; esac
+    # Garde fonctionnelle (les binaires sont des ELF Linux static-pie) : chaque
+    # service appele SOUS SON NOM via l'executable unique doit rendre la meme
+    # sortie `--help` et le meme code que l'executable separe -- dispatch
+    # argv[0], parseur d'arguments propre au service, initialisations
+    # statiques. BrowserHost n'a pas de `--help` (il lancerait le navigateur) :
+    # le smoke le couvre. Un nom inconnu doit rendre 127.
+    ECARTS=""
+    if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ]; then
+        GARDE=$(mktemp -d)
+        mkdir -p "$GARDE/separe" "$GARDE/unique"
+        for s in WebContent WebWorker Compositor RequestServer ImageDecoder; do
+            ln -sf "$OUT/$s" "$GARDE/separe/$s"
+            ln -sf "$UNIQUE" "$GARDE/unique/$s"
+            a=$(cd "$GARDE/separe" && timeout 30 "./$s" --help 2>&1; echo "code=$?")
+            b=$(cd "$GARDE/unique" && timeout 30 "./$s" --help 2>&1; echo "code=$?")
+            if [ "$a" = "$b" ]; then
+                echo "BOUCHAUD_SERVICES_UNIQUES_DISPATCH service=$s identique=1 $(printf '%s' "$b" | tail -1)"
+            else
+                ECARTS="$ECARTS $s"
+                diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | head -10 >&2 || true
+            fi
+        done
+        ln -sf "$UNIQUE" "$GARDE/unique/ServiceInconnu"
+        # `set -e` : le 127 ATTENDU ne doit pas terminer le script (runs
+        # 45461280743 et 45476169319 : binaire construit, 5/5 identiques, puis
+        # sortie 127 du script lui-meme, avant BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT).
+        code=0
+        (cd "$GARDE/unique" && timeout 30 ./ServiceInconnu >/dev/null 2>&1) || code=$?
+        [ "$code" = 127 ] || ECARTS="$ECARTS inconnu_code=$code"
+        rm -rf "$GARDE"
+    fi
+    if [ -n "$UNIQUE" ] && [ -z "$DOUBLONS" ] && [ -z "$ECARTS" ]; then
+        cp -f "$UNIQUE" "$OUT/BouchaudServices"
+        echo "BOUCHAUD_SERVICES_UNIQUES_CONSTRUIT octets=$(stat -c %s "$OUT/BouchaudServices") symboles_forts=$(printf '%s\n' "$TOUS" | sed '/^$/d' | wc -l) doublons=0 dispatch=5/5"
+    elif [ -n "$ECARTS" ]; then
+        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE dispatch_ecarts=$ECARTS" >&2
+    else
+        echo "BOUCHAUD_SERVICES_UNIQUES_REFUSE binaire=${UNIQUE:-absent} doublons=$(echo "$DOUBLONS" | head -20 | tr '\n' ' ')" >&2
+    fi
+else
+    echo "BOUCHAUD_SERVICES_UNIQUES_ECHEC construction : artefact inchange" >&2
+fi
 # BOUCHAUD_C22_NATIVE_POSTGC_V20_BINARY_GUARD: fail-closed on emitted executable,
 # not just on source strings or stale source-tree markers.
 python3 - "$OUT/WebContent" <<'PY_C22_WEB_BINARY_GUARD'

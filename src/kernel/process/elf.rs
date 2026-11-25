@@ -284,8 +284,10 @@ pub fn load_node_lazy(
                     debut: page_start,
                     fin: page_end,
                     drapeaux,
+                    // BOUCHAUD_SERVICES_UNIQUES_V1 : le noeud CANONIQUE, pour
+                    // que les noms d'un meme executable partagent ses pages.
                     backing: crate::kernel::task::PromesseBacking::File {
-                        node,
+                        node: crate::fs::backing::canonique(node),
                         mapping_start: vaddr,
                         file_offset: ph.offset,
                         file_size: ph.filesz,

@@ -5,7 +5,10 @@ BOUCHAUD_UI_V1
 
 Statique (toujours) :
   1. `browser-upstream.sh` appelle les preparateurs dans l'ordre attendu, et
-     `prepare-ui-bouchaud.py` en DERNIER (il verifie que WebContent est propre) ;
+     `prepare-ui-bouchaud.py` en dernier des preparateurs qui MODIFIENT les
+     services (il verifie que WebContent est propre), suivi seulement de
+     `prepare-services-uniques.py`, qui ne modifie aucun service et relit les
+     cibles -- dont UI/Bouchaud (BOUCHAUD_SERVICES_UNIQUES_V1) ;
   2. aucun preparateur de l'ancien pont WebContent n'est appele ni present ;
   3. aucun preparateur restant n'ecrit le chrome, le canal GUI ou la route de
      capture dans `Services/WebContent` ;
@@ -53,6 +56,7 @@ ORDRE = [
     "prepare-full-browser-host.py",
     "prepare-network-live.py",
     "prepare-ui-bouchaud.py",
+    "prepare-services-uniques.py",
 ]
 RETIRES = [
     "prepare-m11-chrome.py", "prepare-m11-page-registry.py", "prepare-m11-input-ownership.py",
