@@ -58,10 +58,13 @@
     "end": "HEALTH_OSI_L1_BEGIN",
     "requires": [
       "[ring3] page mmap anonyme accessible en ecriture",
-      "[poll-selftest] OK"
+      "OK : ring 3, syscall/sysret, mmap et exit_group fonctionnels",
+      "[poll-selftest] OK",
+      "RESULTAT : M5 wakeup poll/pipe OK"
     ],
     "forbids": [
-      "ECHEC",
+      "ECHEC :",
+      "RESULTAT : ECHEC M5 wakeup poll/pipe",
       "panic"
     ]
   },
