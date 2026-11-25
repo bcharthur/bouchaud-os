@@ -14,6 +14,7 @@
 //! reveiller elle-meme depuis un autre thread : c'est exactement ce que fait la
 //! boucle d'evenements de Qt (le « wakeup pipe »).
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::kernel::sync::SpinLock;
@@ -87,6 +88,10 @@ pub enum FdKind {
     /// des instantanes, pas des vues vivantes »), et elle suffit aux
     /// consommateurs reels, qui ouvrent, lisent d'un trait et referment.
     Instantane(Arc<Vec<u8>>),
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire servi par un systeme
+    /// monte et absent du RAMFS (`/proc/<pid>`, `/dev/input`) : ses entrees
+    /// (inode stable, nom, repertoire ?) relevees a l'ouverture.
+    DossierMonte(Arc<Vec<(u64, String, bool)>>),
 }
 
 /// Etat partage d'un tube.
@@ -729,6 +734,18 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
     Some(match ouverture {
         crate::fs::vfs::Ouverture::Objet(kind) => kind,
         crate::fs::vfs::Ouverture::Contenu(octets) => FdKind::Instantane(Arc::new(octets)),
+        crate::fs::vfs::Ouverture::Dossier(_) => {
+            // BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire que le RAMFS
+            // possede aussi (`/proc`, `/dev`) reste SON noeud : `getdents`
+            // y ajoute les entrees du systeme monte (union).
+            if crate::fs::ramfs::fs().resolve(path, 0).is_some() {
+                return None;
+            }
+            let entrees = montages().liste(path)?;
+            FdKind::DossierMonte(Arc::new(
+                entrees.into_iter().map(|(inode, e)| (inode, e.nom, e.dossier)).collect(),
+            ))
+        }
     })
 }
 
@@ -771,6 +788,32 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for DevFs {
             _ => return None,
         };
         Some(crate::fs::vfs::Ouverture::Objet(kind))
+    }
+
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : exactement ce que `ouvre` sert --
+    /// le noeud de rendu n'est liste que si la carte le fournit.
+    fn liste(&self, relatif: &str) -> Option<Vec<crate::fs::vfs::Entree>> {
+        use crate::fs::vfs::Entree;
+        let gpu = crate::drivers::virtio_gpu::capset_render_id().is_some();
+        Some(match relatif {
+            "" => {
+                let mut e: Vec<Entree> = [
+                    "null", "zero", "random", "urandom", "tty", "console", "stdin", "stdout",
+                    "stderr", "tty0", "tty1", "tty2", "fb0", "fb", "dsp", "dsp0", "audio",
+                ].iter().map(|n| Entree::fichier(n)).collect();
+                for d in ["input", "vc", "graphics", "sound"] {
+                    e.push(Entree::dossier(d));
+                }
+                if gpu { e.push(Entree::dossier("dri")); }
+                e
+            }
+            "input" => alloc::vec![Entree::fichier("event0"), Entree::fichier("event1")],
+            "vc" => alloc::vec![Entree::fichier("0")],
+            "graphics" => alloc::vec![Entree::fichier("fb0")],
+            "sound" => alloc::vec![Entree::fichier("dsp")],
+            "dri" if gpu => alloc::vec![Entree::fichier("renderD128")],
+            _ => return None,
+        })
     }
 }
 
@@ -834,6 +877,35 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
         };
         Some(Contenu(octets))
     }
+
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : `ls /proc` montre les processus
+    /// VIVANTS (un repertoire par pid, releve a l'ouverture) ; chaque
+    /// repertoire liste ce que `ouvre` sait y servir.
+    fn liste(&self, relatif: &str) -> Option<Vec<crate::fs::vfs::Entree>> {
+        use crate::fs::vfs::Entree;
+        const PAR_PID: [&str; 2] = ["stat", "status"];
+        Some(match relatif {
+            "" => {
+                let mut e: Vec<Entree> = ["meminfo", "uptime", "mounts", "stat"]
+                    .iter().map(|n| Entree::fichier(n)).collect();
+                e.push(Entree::dossier("self"));
+                e.push(Entree::dossier("bouchaud"));
+                for process in crate::kernel::task::processes() {
+                    e.push(Entree { nom: alloc::format!("{}", process.pid), dossier: true });
+                }
+                e
+            }
+            "self" => ["stat", "status", "maps", "smaps", "mounts", "reveil", "fil"]
+                .iter().map(|n| Entree::fichier(n)).collect(),
+            "bouchaud" => alloc::vec![Entree::fichier("memoire"), Entree::fichier("ota")],
+            pid if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
+                let pid = pid.parse::<u32>().ok()?;
+                crate::kernel::task::process_by_pid(pid)?;
+                PAR_PID.iter().map(|n| Entree::fichier(n)).collect()
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// `/proc/meminfo`, au moment de l'ouverture (meme format que l'instantane).
@@ -843,6 +915,24 @@ fn proc_meminfo() -> Vec<u8> {
     alloc::format!(
         "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n",
         total_kb, libre_kb, libre_kb
+        if path == "/proc/stat" {
+            return Some(Contenu(proc_stat_global()));
+        }
+        if path == "/proc/self/stat" {
+            let pid = crate::kernel::task::current_process().pid;
+            return proc_stat_processus(pid).map(Contenu);
+        }
+        // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
+        // appelant depuis la lecture precedente, decompose, et le pire ecart
+        // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
+        if path == "/proc/self/reveil" {
+            return Some(Contenu(proc_reveil()));
+        }
+        // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
+        // chaque reveil par la sonde (jamais remis a zero).
+        if path == "/proc/self/fil" {
+            return Some(Contenu(proc_fil()));
+        }
     ).into_bytes()
 }
 

@@ -25,3 +25,16 @@ pub fn inode_de(relatif: &str) -> u64 {
     h | 1
 }
 
+
+/// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 -- l'union d'un repertoire RAMFS et du
+/// systeme monte dessus : ajoute a `base` les entrees de `montees` dont le nom
+/// n'y figure pas encore (le RAMFS garde son entree : meme nom, une seule
+/// ligne dans `ls`, et c'est l'ouverture qui choisit le systeme monte).
+/// Ordre stable : celui de `base`, puis celui de `montees`. Pur.
+pub fn ajoute_absents<T>(base: &mut alloc::vec::Vec<T>, montees: impl IntoIterator<Item = T>, nom: impl Fn(&T) -> &str) {
+    for entree in montees {
+        if !base.iter().any(|b| nom(b) == nom(&entree)) {
+            base.push(entree);
+        }
+    }
+}

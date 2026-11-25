@@ -11,6 +11,14 @@
  *   union      /proc/cpuinfo (instantane RAMFS) reste lisible sous le montage
  *   inconnu    /proc/nexiste-pas : ENOENT
  *
+ * BOUCHAUD_VFS_DOSSIERS_MONTES_V1 (getdents sur les montages) :
+ *   liste_proc  readdir(/proc) montre l'appelant, un fils vivant, `self`,
+ *               et garde cpuinfo (union avec l'instantane RAMFS)
+ *   dossier_pid /proc/<fils> est un repertoire (stat S_ISDIR, opendir) qui
+ *               contient `status` ; apres wait(), il a DISPARU (ENOENT, et
+ *               absent de readdir)
+ *   liste_dev   readdir(/dev) contient null, readdir(/dev/input) event0
+ *
  *     VFS_PROBE_OK              VFS_PROBE_FAIL raison=...
  */
 #define _GNU_SOURCE
@@ -19,6 +27,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static char tampon[16384];
@@ -41,6 +53,69 @@ static long champ_kb(const char *nom)
     if (lit("/proc/meminfo") <= 0) return -1;
     char *p = strstr(tampon, nom);
     return p ? atol(p + strlen(nom)) : -1;
+}
+
+/* 1 si readdir(chemin) contient `nom`, 0 sinon, -errno si opendir echoue. */
+static int contient(const char *chemin, const char *nom, int *entrees)
+{
+    DIR *d = opendir(chemin);
+    if (!d) return -errno;
+    int trouve = 0, n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        n++;
+        if (!strcmp(e->d_name, nom)) trouve++;
+    }
+    closedir(d);
+    if (entrees) *entrees = n;
+    return trouve;
+}
+
+static int dossiers_montes(void)
+{
+    char moi[16], chemin[64];
+    snprintf(moi, sizeof moi, "%d", (int)getpid());
+    int tube[2];
+    if (pipe(tube) != 0) return echec("pipe", errno);
+    pid_t fils = fork();
+    if (fils < 0) return echec("fork", errno);
+    if (fils == 0) { char c; close(tube[1]); if (read(tube[0], &c, 1) < 0) _exit(1); _exit(0); }
+    close(tube[0]);
+    char sien[16];
+    snprintf(sien, sizeof sien, "%d", (int)fils);
+
+    int n = 0;
+    int a = contient("/proc", moi, &n), b = contient("/proc", sien, NULL);
+    int c = contient("/proc", "self", NULL), d = contient("/proc", "cpuinfo", NULL);
+    int m = contient("/proc", "meminfo", NULL);
+    printf("VFS_PROBE_LISTE_PROC entrees=%d moi=%d fils=%d self=%d cpuinfo=%d meminfo=%d\n", n, a, b, c, d, m);
+    if (a != 1 || b != 1 || c != 1 || d != 1 || m != 1) return echec("liste_proc", n);
+    printf("VFS_PROBE_ETAPE liste_proc=ok\n");
+
+    snprintf(chemin, sizeof chemin, "/proc/%d", (int)fils);
+    struct stat st;
+    if (stat(chemin, &st) != 0 || !S_ISDIR(st.st_mode)) return echec("pid_pas_dossier", errno);
+    if (contient(chemin, "status", NULL) != 1) return echec("pid_sans_status", 0);
+    snprintf(chemin, sizeof chemin, "/proc/%d/status", (int)fils);
+    if (lit(chemin) <= 0) return echec("pid_status", 0);
+    char attendu[32];
+    snprintf(attendu, sizeof attendu, "Pid:\t%d\n", (int)fils);
+    if (!strstr(tampon, attendu)) return echec("pid_status_pid", fils);
+
+    if (write(tube[1], "x", 1) != 1) return echec("tube", errno);
+    close(tube[1]);
+    int etat;
+    if (waitpid(fils, &etat, 0) != fils) return echec("waitpid", errno);
+    snprintf(chemin, sizeof chemin, "/proc/%d", (int)fils);
+    errno = 0;
+    if (stat(chemin, &st) == 0 || errno != ENOENT) return echec("pid_survit", errno);
+    if (contient("/proc", sien, NULL) != 0) return echec("pid_liste_apres_wait", 0);
+    printf("VFS_PROBE_ETAPE dossier_pid=ok\n");
+
+    if (contient("/dev", "null", &n) != 1) return echec("liste_dev", n);
+    if (contient("/dev/input", "event0", NULL) != 1) return echec("liste_dev_input", 0);
+    printf("VFS_PROBE_ETAPE liste_dev=ok\n");
+    return 0;
 }
 
 int main(void)
@@ -88,6 +163,7 @@ int main(void)
 
     if (open("/proc/nexiste-pas", O_RDONLY) >= 0 || errno != ENOENT) return echec("inconnu", errno);
     printf("VFS_PROBE_ETAPE inconnu=ok\n");
+    if (dossiers_montes()) return 1;
     printf("VFS_PROBE_OK\n");
     return 0;
 }

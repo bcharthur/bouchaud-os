@@ -31,13 +31,14 @@
 //! Module sans dependance a `kernel::fd` : l'ouverture rend un `Ouverture`
 //! generique que l'appelant convertit.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::kernel::sync::SpinLock;
 
 #[path = "chemins.rs"]
 mod chemins;
-pub use chemins::{inode_de, sous_point};
+pub use chemins::{ajoute_absents, inode_de, sous_point};
 
 /// Identite stable d'un fichier servi par un systeme monte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,22 @@ pub struct Vnode {
 pub enum Ouverture<O> {
     Objet(O),
     Contenu(Vec<u8>),
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire du systeme monte, avec
+    /// ses entrees RELEVEES a l'ouverture (`/proc/<pid>` n'existe que tant que
+    /// le processus vit : pas de noeud RAMFS a tenir a jour).
+    Dossier(Vec<Entree>),
+}
+
+/// Une entree de repertoire servie par un systeme monte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entree {
+    pub nom: String,
+    pub dossier: bool,
+}
+
+impl Entree {
+    pub fn fichier(nom: &str) -> Self { Self { nom: String::from(nom), dossier: false } }
+    pub fn dossier(nom: &str) -> Self { Self { nom: String::from(nom), dossier: true } }
 }
 
 /// Un systeme de fichiers montable.
@@ -63,6 +80,8 @@ pub trait SystemeFichiers<O>: Send + Sync {
     fn nom(&self) -> &'static str;
     /// Ouvre `relatif`, ou `None` si ce systeme ne le connait pas.
     fn ouvre(&self, relatif: &str) -> Option<Ouverture<O>>;
+    /// Les entrees du repertoire `relatif`, ou `None` si ce n'en est pas un.
+    fn liste(&self, _relatif: &str) -> Option<Vec<Entree>> { None }
 }
 
 /// Un montage : point (canonique, sans `/` final sauf la racine) et systeme.
@@ -104,8 +123,26 @@ impl<O: 'static> Table<O> {
     /// Ouvre `chemin` par le systeme monte qui le couvre, et son identite.
     pub fn ouvre(&self, chemin: &str) -> Option<(Ouverture<O>, Vnode)> {
         let (systeme, id, relatif) = self.resout(chemin)?;
-        let ouverture = systeme.ouvre(relatif)?;
+        let ouverture = match systeme.ouvre(relatif) {
+            Some(ouverture) => ouverture,
+            None => Ouverture::Dossier(systeme.liste(relatif)?),
+        };
         Some((ouverture, Vnode { systeme: id, inode: inode_de(relatif) }))
+    }
+
+    /// Les entrees que le systeme monte sur `chemin` y sert, avec leur inode
+    /// stable ; `None` si aucun montage ne couvre ce repertoire.
+    pub fn liste(&self, chemin: &str) -> Option<Vec<(u64, Entree)>> {
+        let (systeme, _, relatif) = self.resout(chemin)?;
+        let entrees = systeme.liste(relatif)?;
+        Some(entrees.into_iter().map(|e| {
+            let inode = if relatif.is_empty() {
+                inode_de(&e.nom)
+            } else {
+                inode_de(&alloc::format!("{}/{}", relatif, e.nom))
+            };
+            (inode, e)
+        }).collect())
     }
 
     /// (point, nom du systeme), dans l'ordre de montage : `/proc/mounts`.

@@ -372,7 +372,7 @@ pub fn lit_octets(fd: i32, buffer: u64, count: usize, non_bloquant: bool) -> i64
             }
             (fin - offset) as i64
         }
-        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Dir(_) | FdKind::DossierMonte(_) => -errno::EISDIR,
         FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
         #[cfg(feature = "banc-gpu-venus")]
         FdKind::GpuFence(_) => -errno::EINVAL,
@@ -744,7 +744,7 @@ pub fn ecrit_octets(fd: i32, data: &[u8]) -> i64 {
             }
             data.len() as i64
         }
-        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Dir(_) | FdKind::DossierMonte(_) => -errno::EISDIR,
         FdKind::Framebuffer | FdKind::VirtualTerminal | FdKind::GpuRender(_) => -errno::EINVAL,
         #[cfg(feature = "banc-gpu-venus")]
         FdKind::GpuFence(_) => -errno::EINVAL,
@@ -1113,7 +1113,7 @@ pub fn sys_pread(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
             }
             (fin - offset) as i64
         }
-        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Dir(_) | FdKind::DossierMonte(_) => -errno::EISDIR,
         FdKind::Pipe(..) | FdKind::Socket(_) | FdKind::SocketPair(..) => -errno::ESPIPE,
         // Peripheriques sans position (null, zero, random...) : le decalage
         // n'a pas de sens, la lecture est la lecture ordinaire.
@@ -1155,7 +1155,7 @@ pub fn sys_pwrite(fd: i32, buffer: u64, count: usize, offset: i64) -> i64 {
             fs.touche(node); // BOUCHAUD_MTIME_STABLE_V1
             data.len() as i64
         }
-        FdKind::Dir(_) => -errno::EISDIR,
+        FdKind::Dir(_) | FdKind::DossierMonte(_) => -errno::EISDIR,
         FdKind::Pipe(..) | FdKind::Socket(_) | FdKind::SocketPair(..) => -errno::ESPIPE,
         _ => sys_write(fd, buffer, count),
     }
@@ -1777,6 +1777,7 @@ pub fn sys_stat_path(path_addr: u64, out: u64, _no_follow: bool) -> i64 {
         // caractere par caractere, et un `S_IFCHR` lui interdirait de chercher.
         let (mode, taille) = match kind {
             FdKind::Instantane(ref contenu) => (S_IFREG | 0o444, contenu.len() as u64),
+            FdKind::DossierMonte(_) => (S_IFDIR | 0o555, 0),
             FdKind::Framebuffer | FdKind::InputKeyboard | FdKind::InputMouse => {
                 (S_IFCHR | 0o660, 0)
             }
@@ -1831,6 +1832,7 @@ pub fn sys_fstat(fd: i32, out: u64) -> i64 {
         FdKind::Instantane(ref contenu) => {
             stat_bytes(0, S_IFREG | 0o444, 0, 0, contenu.len() as u64)
         }
+        FdKind::DossierMonte(_) => stat_bytes(0, S_IFDIR | 0o555, 0, 0, 0),
         FdKind::Framebuffer => {
             let (_, hauteur, pas) = geometrie_ecran();
             stat_bytes(1, S_IFCHR | 0o660, 0, 0, (pas * hauteur) as u64)
@@ -1900,6 +1902,7 @@ pub fn sys_statx(dirfd: i32, path_addr: u64, _flags: u32, _mask: u32, out: u64) 
                 Some(FdKind::Instantane(contenu)) => {
                     (S_IFREG | 0o444, contenu.len() as u64, 0, 0, 1, maintenant)
                 }
+                Some(FdKind::DossierMonte(_)) => (S_IFDIR | 0o555, 0, 0, 0, 1, maintenant),
                 _ => (S_IFCHR | 0o666, 0, 0, 0, 1, maintenant),
             }
         }
@@ -1971,9 +1974,10 @@ pub fn sys_readlink(path_addr: u64, buffer: u64, size: usize) -> i64 {
 /// `getdents64` : `struct linux_dirent64` a la suite dans le tampon.
 pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
     let process = task::current_process();
-    let (node, start) = match process.files.lock().get(fd) {
+    let (source, start) = match process.files.lock().get(fd) {
         Some(desc) => match desc.kind {
-            FdKind::Dir(node) => (node, desc.offset),
+            FdKind::Dir(node) => (Ok(node), desc.offset),
+            FdKind::DossierMonte(ref entrees) => (Err(entrees.clone()), desc.offset),
             _ => return -errno::ENOTDIR,
         },
         None => return -errno::EBADF,
@@ -1983,20 +1987,38 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
     // loin serait faux deux fois : `user_write` ci-dessous peut declencher une
     // faute de demande, donc rentrer a nouveau dans le RAMFS, et le report de
     // l'offset prend `FdTable`, de rang inferieur a `Vfs`.
-    let children: Vec<(usize, String, bool)> = {
-        let fs = ramfs::fs();
-        let mut children = Vec::new();
-        for index in 0..ramfs::MAX_NODES {
-            if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
-                let entry = &fs.nodes[index];
-                children.push((
-                    index,
-                    entry.name_str().to_string(),
-                    entry.kind == NodeKind::Dir,
-                ));
+    let children: Vec<(u64, String, bool)> = match source {
+        Err(entrees) => entrees.as_ref().clone(),
+        Ok(node) => {
+            let (mut children, chemin) = {
+                let fs = ramfs::fs();
+                let mut children = Vec::new();
+                for index in 0..ramfs::MAX_NODES {
+                    if fs.nodes[index].used && fs.nodes[index].parent == node && index != node {
+                        let entry = &fs.nodes[index];
+                        children.push((
+                            index as u64,
+                            entry.name_str().to_string(),
+                            entry.kind == NodeKind::Dir,
+                        ));
+                    }
+                }
+                (children, ramfs::path_string(&fs, node))
+            };
+            // BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire RAMFS couvert
+            // par un montage (`/proc`, `/dev`) liste AUSSI ce que le systeme
+            // monte y sert -- les pids vivants, les peripheriques. Releve
+            // hors du garde RAMFS (procfs prend la table des processus).
+            let chemin = if chemin.is_empty() { String::from("/") } else { chemin };
+            if let Some(montees) = crate::kernel::fd::montages().liste(&chemin) {
+                crate::fs::vfs::ajoute_absents(
+                    &mut children,
+                    montees.into_iter().map(|(inode, e)| (inode, e.nom, e.dossier)),
+                    |e| e.1.as_str(),
+                );
             }
+            children
         }
-        children
     };
 
     let mut out: Vec<u8> = Vec::new();
@@ -2007,7 +2029,7 @@ pub fn sys_getdents64(fd: i32, buffer: u64, size: usize) -> i64 {
             break;
         }
         let mut entry = alloc::vec![0u8; record];
-        entry[0..8].copy_from_slice(&(inode as u64).to_le_bytes()); // d_ino
+        entry[0..8].copy_from_slice(&inode.to_le_bytes()); // d_ino
         entry[8..16].copy_from_slice(&((consumed + 1) as u64).to_le_bytes()); // d_off
         entry[16..18].copy_from_slice(&(record as u16).to_le_bytes()); // d_reclen
         entry[18] = if is_dir { 4 } else { 8 }; // DT_DIR / DT_REG
