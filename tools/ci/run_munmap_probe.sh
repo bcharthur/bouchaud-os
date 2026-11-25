@@ -16,7 +16,7 @@ SMP=${5:-1}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 musl-gcc -O2 -static-pie -fPIE -Wl,-z,noexecstack tools/userland/munmap-probe.c -o "$T/munmap-probe"
-if readelf -l "$T/munmap-probe" | grep -q 'Requesting program interpreter'; then
+if readelf -l "$T/munmap-probe" | grep 'Requesting program interpreter' >/dev/null; then
   echo 'munmap-probe doit etre statique' >&2
   exit 1
 fi
