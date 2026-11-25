@@ -895,6 +895,14 @@ orphelins_recoltes={} oom_victimes={} oom_abandons={} oom_attentes={} quarantain
             oom_victimes, oom_abandons, oom_attentes,
             crate::kernel::task::quarantaine_len(),
         );
+        // BOUCHAUD_COW_V1 / BOUCHAUD_PAGE_ZERO_V1.
+        let (partagees, partages, exclusives, copies, promotions, echecs) = crate::kernel::vmm::cow_stats();
+        let (zero_projetees, zero_materialisees) = crate::kernel::vmm::page_zero_stats();
+        crate::serial_println!(
+            "[MEM-COW] frames_partagees={} partages={} redevenues_exclusives={} copies={} promotions={} \
+echecs_allocation={} zero_projetees={} zero_materialisees={}",
+            partagees, partages, exclusives, copies, promotions, echecs, zero_projetees, zero_materialisees,
+        );
     }
     let (fenetre_preempt, fenetre_verrou) = crate::kernel::scheduler::preempt::fenetres_migrees();
     crate::serial_println!(

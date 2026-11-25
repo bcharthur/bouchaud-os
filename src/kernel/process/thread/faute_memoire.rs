@@ -473,6 +473,9 @@ pub fn oublie_les_fautes(pid: u32) {
     }
 }
 
+/// Fautes de lecture servies par la page zero partagee (BOUCHAUD_PAGE_ZERO_V1).
+pub static FAULTS_ZERO_PARTAGEE: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultOutcome {
     Resolved,
@@ -618,6 +621,18 @@ fn record_fault_outcome(outcome: FaultOutcome) {
 /// Resolve one demand-fault attempt. Mapping replacement is a typed retry,
 /// never an accidental SIGSEGV; a genuine missing/protected VMA is Invalid.
 pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome {
+    peuple(adresse, protection_fault, false)
+}
+
+/// BOUCHAUD_PAGE_ZERO_V1 : la meme chose pour un acces en LECTURE. Une page
+/// anonyme jamais ecrite est alors projetee sur la page zero partagee, en
+/// lecture seule et copie-a-l'ecriture : aucune frame privee n'est allouee
+/// tant que personne n'y ecrit.
+pub fn peuple_en_lecture(adresse: u64) -> FaultOutcome {
+    peuple(adresse, false, true)
+}
+
+fn peuple(adresse: u64, protection_fault: bool, lecture: bool) -> FaultOutcome {
     if !crate::kernel::vmm::is_user_addr(adresse) || !in_user_task() || protection_fault {
         record_fault_outcome(FaultOutcome::Invalid);
         return FaultOutcome::Invalid;
@@ -714,7 +729,7 @@ pub fn peuple_a_la_demande(adresse: u64, protection_fault: bool) -> FaultOutcome
         }
     }
 
-    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token, &mut note);
+    let loaded = peuple_page_loader(&processus, adresse, fault_pml4, &token, &mut note, lecture);
     let outcome = {
         let mut state = record.state.lock();
         match *state {
@@ -753,6 +768,7 @@ fn peuple_page_loader(
     fault_pml4: u64,
     token: &MappingToken,
     note: &mut Note,
+    lecture: bool,
 ) -> FaultOutcome {
     stall_pf_phase(210, adresse);
     stall_pf_phase(211, adresse);
@@ -782,6 +798,14 @@ fn peuple_page_loader(
             stall_pf_phase(220, page);
             let zero_id = effective.id;
             let zero_flags = effective.drapeaux;
+            // BOUCHAUD_PAGE_ZERO_V1 : une LECTURE d'une page anonyme jamais
+            // ecrite ne coute plus de frame. Pas d'anticipation sur ce chemin :
+            // anticiper, ce serait allouer ce qu'on vient d'eviter.
+            if lecture && p.space.mappe_page_zero(page, zero_flags) {
+                FAULTS_ZERO_PARTAGEE.fetch_add(1, Ordering::Relaxed);
+                note.pose(crate::kernel::fautes::Categorie::Zero);
+                return FaultOutcome::Resolved;
+            }
             if !p.space.map_alloc_accounted(
                 page,
                 crate::kernel::vmm::PAGE_SIZE,

@@ -22,10 +22,12 @@ fn resident_range(addr: u64, len: usize, write: bool) -> bool {
         let present = process.mm.lock().space.translate(page).is_some();
         drop(process);
 
-        if !present
-            && crate::kernel::task::peuple_a_la_demande(page, false)
-                != crate::kernel::task::FaultOutcome::Resolved
-        {
+        let peuplee = || if write {
+            crate::kernel::task::peuple_a_la_demande(page, false)
+        } else {
+            crate::kernel::task::peuple_en_lecture(page)
+        };
+        if !present && peuplee() != crate::kernel::task::FaultOutcome::Resolved {
             return false;
         }
 

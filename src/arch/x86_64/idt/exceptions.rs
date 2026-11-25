@@ -584,10 +584,19 @@ extern "x86-interrupt" fn page_fault_handler(
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         let mut retries = 0u32;
         let outcome = loop {
-            let outcome = crate::kernel::task::peuple_a_la_demande(
-                addr,
-                code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
-            );
+            // BOUCHAUD_PAGE_ZERO_V1 : une faute de LECTURE (ni ecriture ni
+            // instruction) sur une page absente peut etre servie par la page
+            // zero partagee.
+            let lecture = !code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+                && !code.contains(PageFaultErrorCode::INSTRUCTION_FETCH);
+            let outcome = if lecture && !code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+                crate::kernel::task::peuple_en_lecture(addr)
+            } else {
+                crate::kernel::task::peuple_a_la_demande(
+                    addr,
+                    code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
+                )
+            };
             if outcome != crate::kernel::task::FaultOutcome::Retry {
                 break outcome;
             }

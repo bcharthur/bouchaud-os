@@ -176,6 +176,45 @@ static COW: crate::kernel::sync::SpinLock<crate::kernel::cow::TableCow> =
 static COW_COPIES: AtomicU64 = AtomicU64::new(0);
 static COW_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
 static COW_ECHECS_ALLOCATION: AtomicU64 = AtomicU64::new(0);
+static PAGES_ZERO_PROJETEES: AtomicU64 = AtomicU64::new(0);
+static PAGES_ZERO_MATERIALISEES: AtomicU64 = AtomicU64::new(0);
+
+/// (projections de la page zero, pages zero devenues privees par ecriture)
+pub fn page_zero_stats() -> (u64, u64) {
+    (PAGES_ZERO_PROJETEES.load(Ordering::Relaxed), PAGES_ZERO_MATERIALISEES.load(Ordering::Relaxed))
+}
+
+// BOUCHAUD_PAGE_ZERO_V1 -- UNE frame de zeros, partagee par toute la machine.
+//
+// Allouee a la premiere lecture d'une page anonyme, jamais rendue, jamais
+// possedee par un espace (absente de tous les `pages`) : `munmap`, la mort et
+// `fork` la traitent comme une frame empruntee. Toujours projetee en lecture
+// seule avec `PTE_COW` : la premiere ecriture passe par `prepare_casse_cow`,
+// qui lui substitue une frame privee neuve (et ne la « rend » jamais).
+static PAGE_ZERO: AtomicU64 = AtomicU64::new(0);
+
+/// La frame zero, allouee au premier besoin. `None` si l'allocation echoue.
+pub fn page_zero() -> Option<u64> {
+    let actuelle = PAGE_ZERO.load(Ordering::Acquire);
+    if actuelle != 0 {
+        return Some(actuelle);
+    }
+    let neuve = alloc_frame()?;
+    match PAGE_ZERO.compare_exchange(0, neuve, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Some(neuve),
+        Err(gagnante) => {
+            free_frame(neuve);
+            Some(gagnante)
+        }
+    }
+}
+
+/// `phys` (alignee ou non) est-elle dans la page zero ?
+#[inline]
+pub fn est_page_zero(phys: u64) -> bool {
+    let zero = PAGE_ZERO.load(Ordering::Acquire);
+    zero != 0 && phys & ADDR_MASK == zero
+}
 
 /// Un espace cesse de posseder ces frames : rend celles que plus personne ne
 /// possede. Une seule prise de la table pour tout le lot.
@@ -194,6 +233,10 @@ fn frames_a_liberer(frames: impl IntoIterator<Item = u64>) -> Vec<u64> {
 /// Un espace cesse de posseder `frame` (apres une copie a l'ecriture, APRES
 /// le shootdown qui a retire l'ancienne traduction de tous ses coeurs).
 pub fn rend_frame_possedee(frame: u64) {
+    // La page zero n'est possedee par personne : la remplacer ne rend rien.
+    if est_page_zero(frame) {
+        return;
+    }
     let liberer = COW.lock().rend(frame) == crate::kernel::cow::Rendu::Liberer;
     if liberer {
         free_frame(frame);
@@ -218,8 +261,15 @@ pub fn cow_stats() -> (usize, u64, u64, u64, u64, u64) {
 /// Issue de la casse d'une copie-a-l'ecriture sur une page.
 #[must_use]
 pub enum CasseCow {
-    /// La PTE n'est pas COW (absente, deja inscriptible, ou jamais partagee).
+    /// La PTE n'est pas COW et n'est pas inscriptible (absente, en lecture
+    /// seule pour de bon) : l'ecriture reste une faute.
     PasCow,
+    /// La PTE est deja inscriptible : un frere a casse la copie entre la faute
+    /// et le verrou. Decide sous le MEME verrou que le reste -- relire
+    /// l'inscriptibilite a part laissait un `fork` concurrent remettre la page
+    /// en COW entre les deux lectures, et tuer un fil qui avait le droit
+    /// d'ecrire (tempete-exec, mode fork : `COW_REFUS ... proprietaires=2`).
+    DejaInscriptible,
     /// Seul proprietaire : la PTE est devenue inscriptible, sans copie.
     Promue,
     /// Copiee dans une frame neuve. L'appelant DOIT executer `invalidation`
@@ -1635,11 +1685,19 @@ impl AddressSpace {
             None => return CasseCow::PasCow,
         };
         let ancienne_pte = *entree;
-        if ancienne_pte & PTE_PRESENT == 0 || ancienne_pte & PTE_COW == 0 {
+        if ancienne_pte & PTE_PRESENT == 0 {
             return CasseCow::PasCow;
         }
+        if ancienne_pte & PTE_COW == 0 {
+            return if ancienne_pte & (PTE_WRITE | PTE_USER) == PTE_WRITE | PTE_USER {
+                CasseCow::DejaInscriptible
+            } else {
+                CasseCow::PasCow
+            };
+        }
         let ancienne = ancienne_pte & ADDR_MASK;
-        if !self.pages.contains(&ancienne) {
+        let depuis_zero = est_page_zero(ancienne);
+        if !depuis_zero && !self.pages.contains(&ancienne) {
             // Une PTE COW sur une frame que l'espace ne possede pas viole
             // l'invariant : refuser plutot que d'ecrire dans la frame d'un
             // autre.
@@ -1651,7 +1709,7 @@ impl AddressSpace {
         }
         let drapeaux = (ancienne_pte & !ADDR_MASK & !PTE_COW_BITS)
             | if ecriture_permise { PTE_WRITE } else { 0 };
-        if !COW.lock().est_partagee(ancienne) {
+        if !depuis_zero && !COW.lock().est_partagee(ancienne) {
             // Seul proprietaire : promotion sur place. Elargir un droit ne
             // laisse aucune traduction dangereuse ailleurs (au pire une faute
             // de plus, qui verra la page inscriptible).
@@ -1660,28 +1718,65 @@ impl AddressSpace {
             COW_PROMOTIONS.fetch_add(1, Ordering::Relaxed);
             return CasseCow::Promue;
         }
-        let neuve = match alloc_frame_a_recouvrir() {
+        // Depuis la page zero : une frame mise a zero, rien a copier.
+        let neuve = match if depuis_zero { alloc_frame() } else { alloc_frame_a_recouvrir() } {
             Some(f) => f,
             None => {
                 COW_ECHECS_ALLOCATION.fetch_add(1, Ordering::Relaxed);
                 return CasseCow::SansMemoire;
             }
         };
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                memory::phys_to_virt(ancienne),
-                memory::phys_to_virt(neuve),
-                PAGE_SIZE as usize,
-            );
+        if !depuis_zero {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    memory::phys_to_virt(ancienne),
+                    memory::phys_to_virt(neuve),
+                    PAGE_SIZE as usize,
+                );
+            }
         }
         // Le contenu precede la PTE (P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1).
         core::sync::atomic::fence(Ordering::Release);
         *entree = neuve | drapeaux;
         flush(page);
-        self.pages.remove(&ancienne);
+        if depuis_zero {
+            // La page quitte la classe « partagee » pour devenir anonyme.
+            self.resident.unmapped(ancienne_pte);
+            *entree = (neuve | drapeaux) & !PTE_RSS_KIND_MASK | ResidentKind::Anonymous.bits();
+            self.resident.mapped(*entree);
+            PAGES_ZERO_MATERIALISEES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.pages.remove(&ancienne);
+            COW_COPIES.fetch_add(1, Ordering::Relaxed);
+        }
         self.pages.insert(neuve);
-        COW_COPIES.fetch_add(1, Ordering::Relaxed);
         CasseCow::Copiee { invalidation: self.invalidation(page, PAGE_SIZE), ancienne }
+    }
+
+    /// BOUCHAUD_PAGE_ZERO_V1 : projette `page` (absente) sur la page zero,
+    /// en lecture seule et copie-a-l'ecriture ; `drapeaux` sont ceux de la
+    /// VMA (le droit d'ecrire devient `PTE_COW_ECRITURE`). Faux si la page
+    /// zero n'existe pas ou si une PTE est deja la.
+    pub fn mappe_page_zero(&mut self, page: u64, drapeaux: u64) -> bool {
+        let Some(zero) = page_zero() else { return false };
+        let mut pte = (drapeaux & !PTE_WRITE & !PTE_COW_BITS) | PTE_COW;
+        if drapeaux & PTE_WRITE != 0 {
+            pte |= PTE_COW_ECRITURE;
+        }
+        if self.map_accounted(page & !(PAGE_SIZE - 1), zero, pte, ResidentKind::Shared) {
+            PAGES_ZERO_PROJETEES.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Diagnostic d'une faute d'ecriture non resolue : (PTE brute, frame
+    /// possedee, nombre de proprietaires de la frame).
+    pub fn etat_cow(&mut self, page: u64) -> Option<(u64, bool, u32)> {
+        let pte = *self.entry_mut(page & !(PAGE_SIZE - 1), false)?;
+        let frame = pte & ADDR_MASK;
+        Some((pte, self.pages.contains(&frame), COW.lock().proprietaires(frame)))
     }
 
     /// La PTE de `page` est-elle en copie-a-l'ecriture ?
@@ -1922,7 +2017,7 @@ impl AddressSpace {
                     rend_frame_possedee(ancienne);
                 }
                 CasseCow::SansMemoire => return false,
-                CasseCow::PasCow | CasseCow::Promue => {}
+                CasseCow::PasCow | CasseCow::Promue | CasseCow::DejaInscriptible => {}
             }
             page += PAGE_SIZE;
         }

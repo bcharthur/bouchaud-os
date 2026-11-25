@@ -9,7 +9,10 @@ fn wait_word_key(uaddr: u64) -> Option<CleMot> {
         let mut mm = process.mm.lock();
         match mm.space.translate(uaddr) {
             // Frame empruntee : identite physique, partagee entre processus.
-            Some(phys) if !mm.space.owns_frame(phys) => (0, phys),
+            // La page zero n'est empruntee a personne : elle est commune a
+            // TOUS les processus, une cle physique les melangerait.
+            Some(phys) if !mm.space.owns_frame(phys)
+                && !crate::kernel::vmm::est_page_zero(phys) => (0, phys),
             // Frame privee, ou pas encore residente : identite virtuelle.
             _ => (mm.space.pml4(), uaddr),
         }

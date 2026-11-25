@@ -37,14 +37,20 @@ pub fn casse_cow_courant(adresse: u64) -> IssueCow {
                 crate::kernel::vmm::rend_frame_possedee(ancienne);
                 return IssueCow::Resolue;
             }
+            crate::kernel::vmm::CasseCow::DejaInscriptible => return IssueCow::Resolue,
             crate::kernel::vmm::CasseCow::PasCow => {
-                // Un frere a pu casser la meme page entre la faute et le
-                // verrou : la faute est alors deja resolue.
-                return if process.mm.lock().space.writable(page) {
-                    IssueCow::Resolue
-                } else {
-                    IssueCow::PasCow
-                };
+                // Decide sous le verrou de `prepare_casse_cow` : la page n'est
+                // ni COW inscriptible ni inscriptible. Releve pour le cas ou
+                // la faute serait inattendue (un SIGSEGV suit).
+                if let Some((pte, possedee, proprietaires)) = process.mm.lock().space.etat_cow(page) {
+                    if pte & crate::kernel::vmm::PTE_PRESENT != 0 {
+                        crate::kernel::dmesg::log_fmt(format_args!(
+                            "COW_REFUS pid={} page={:#x} pte={:#x} possedee={} proprietaires={}",
+                            process.pid, page, pte, possedee, proprietaires,
+                        ));
+                    }
+                }
+                return IssueCow::PasCow;
             }
             crate::kernel::vmm::CasseCow::SansMemoire => {
                 // BOUCHAUD_OOM_CONTROLE_V1 : la copie manque de frame comme

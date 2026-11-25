@@ -371,7 +371,14 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
         });
 
         if !present {
-            if task::peuple_a_la_demande(page, false) != task::FaultOutcome::Resolved {
+            // BOUCHAUD_PAGE_ZERO_V1 : une lecture du noyau ne materialise pas
+            // de frame privee ; une ecriture, si (puis casse la COW).
+            let issue = if write {
+                task::peuple_a_la_demande(page, false)
+            } else {
+                task::peuple_en_lecture(page)
+            };
+            if issue != task::FaultOutcome::Resolved {
                 return false;
             }
             // La page vient d'etre peuplee : son droit d'ecriture se lit
