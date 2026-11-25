@@ -213,6 +213,13 @@ pub mod kernel {
         pub fn log(_: &str) {}
     }
 
+    /// `heap::phys_dans_arene` traduit par le decalage de la carte directe
+    /// (BOUCHAUD_SHM_PROJECTION_V1). Sur l'hote, aucune carte : decalage nul,
+    /// et la fonction n'est pas exercee ici.
+    pub mod memory {
+        pub fn phys_offset() -> u64 { 0 }
+    }
+
     /// Le verrou du compagnon. Le vrai masque les interruptions ; l'hote n'en a
     /// pas, et la propriete mise a l'epreuve -- l'exclusion mutuelle -- est la
     /// meme.

@@ -744,25 +744,19 @@ fn shm_map(args: [u64; 6]) -> Result<u64> {
         Object::SharedRegion(region) => region.projection().ok_or(Error::NoSpace)?,
         _ => return Err(Error::WrongType),
     };
-    crate::kernel::abi::mem::projette_region_native(
-        phys, longueur, prot & 2 != 0, alloc::sync::Arc::clone(&entry.object),
-    )
-    .map_err(|errno| if errno == -crate::kernel::abi::errno::EACCES {
-        Error::AccessDenied
-    } else if errno == -crate::kernel::abi::errno::EINVAL {
-        Error::InvalidArgument
-    } else {
-        Error::NoSpace
-    })
+    // BOUCHAUD_PROJECTION_NEUTRE_V1 : la mecanique VM neutre, pas la
+    // compatibilite Linux.
+    use crate::kernel::projection::{projette_region, ErreurProjection};
+    projette_region(phys, longueur, prot & 2 != 0, alloc::sync::Arc::clone(&entry.object))
+        .map_err(|e| match e {
+            ErreurProjection::Argument => Error::InvalidArgument,
+            ErreurProjection::Espace => Error::NoSpace,
+        })
 }
 
 /// `bo_shm_unmap(adresse)` : l'adresse exacte qu'a rendue `bo_shm_map`.
 fn shm_unmap(args: [u64; 6]) -> Result<u64> {
-    let longueur = crate::kernel::abi::mem::longueur_region_native(args[0])
-        .ok_or(Error::InvalidArgument)?;
-    if crate::kernel::abi::mem::sys_munmap(args[0], longueur) < 0 {
-        return Err(Error::InvalidArgument);
-    }
+    crate::kernel::projection::retire_projection(args[0]).map_err(|_| Error::InvalidArgument)?;
     Ok(0)
 }
 

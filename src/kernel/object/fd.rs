@@ -785,19 +785,32 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
         // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
         // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
         // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
-        if crate::kernel::system_metrics::PROC_PATH.strip_prefix("/proc/") == Some(relatif) {
+        // Le chemin complet : les contrats (Ladybird, sonde d'ordonnanceur)
+        // designent ces fichiers par leur nom public.
+        let chemin = alloc::format!("/proc/{}", relatif);
+        let path = chemin.as_str();
+        if path == crate::kernel::system_metrics::PROC_PATH {
             return Some(Contenu(crate::kernel::system_metrics::proc_snapshot()));
         }
+        if path == "/proc/stat" {
+            return Some(Contenu(proc_stat_global()));
+        }
+        if path == "/proc/self/stat" {
+            let pid = crate::kernel::task::current_process().pid;
+            return proc_stat_processus(pid).map(Contenu);
+        }
+        // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
+        // appelant depuis la lecture precedente, decompose, et le pire ecart
+        // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
+        if path == "/proc/self/reveil" {
+            return Some(Contenu(proc_reveil()));
+        }
+        // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
+        // chaque reveil par la sonde (jamais remis a zero).
+        if path == "/proc/self/fil" {
+            return Some(Contenu(proc_fil()));
+        }
         let octets = match relatif {
-            "stat" => proc_stat_global(),
-            "self/stat" => proc_stat_processus(crate::kernel::task::current_process().pid)?,
-            // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
-            // appelant depuis la lecture precedente, decompose, et le pire ecart
-            // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
-            "self/reveil" => proc_reveil(),
-            // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
-            // chaque reveil par la sonde (jamais remis a zero).
-            "self/fil" => proc_fil(),
             // BOUCHAUD_OTA_ANNEAU3_V1 : l'etat d'autorite des mises a jour, pour
             // l'agent OTA en anneau 3 (lecture seule, regenere a chaque ouverture).
             "bouchaud/ota" => crate::kernel::update::ota::instantane(),
@@ -810,8 +823,7 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
             "bouchaud/memoire" => proc_memoire_bouchaud(),
             "self/status" => proc_status(crate::kernel::task::current_process().pid)?,
             _ => {
-                let chemin = alloc::format!("/proc/{}", relatif);
-                if let Some(pid) = proc_pid_stat_depuis_chemin(&chemin) {
+                if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
                     proc_stat_processus(pid)?
                 } else if let Some(pid) = relatif.strip_suffix("/status").and_then(|p| p.parse::<u32>().ok()) {
                     proc_status(pid)?

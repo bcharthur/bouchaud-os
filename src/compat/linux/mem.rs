@@ -94,23 +94,14 @@ fn execute_process_invalidation(
     invalidation.execute();
 }
 
+/// BOUCHAUD_PROJECTION_NEUTRE_V1 : la mecanique est dans `kernel::projection`.
 fn finish_mapping_replacement(
     process: &Arc<task::Process>,
     retirement: Option<vmm::UnmapRetirement>,
     shared_nodes: &[usize],
     clean_pages: &[crate::kernel::clean_page_cache::Key],
 ) {
-    if let Some(retirement) = retirement {
-        execute_process_invalidation(process, retirement.invalidation());
-        process.mm.lock().space.finish_unmap(retirement);
-    }
-    // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
-    for &node in shared_nodes {
-        partage::demappe(node);
-    }
-    for &key in clean_pages {
-        crate::kernel::clean_page_cache::release(key);
-    }
+    crate::kernel::projection::finit_remplacement(process, retirement, shared_nodes, clean_pages);
 }
 
 pub const PROT_NONE: u32 = 0;
@@ -304,22 +295,7 @@ fn choisit_base_mmap(
         }
     }
 
-    let limite = vmm::user_slot_base()
-        .checked_add(vmm::USER_SPACE_SIZE)
-        .ok_or(-errno::ENOMEM)?;
-    let base = vma::trouve_trou(
-        &process.promesses,
-        process.mmap_next,
-        length,
-        limite,
-    )
-    .ok_or(-errno::ENOMEM)?;
-
-    process.mmap_next = base
-        .checked_add(length)
-        .and_then(|value| value.checked_add(PAGE_SIZE))
-        .ok_or(-errno::ENOMEM)?;
-    Ok(base)
+    crate::kernel::projection::trouve_base(process, length).ok_or(-errno::ENOMEM)
 }
 
 fn installe_vma(
@@ -329,30 +305,8 @@ fn installe_vma(
     drapeaux: u64,
     backing: Backing,
     fixed: bool,
-) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
-    let fin = base + length;
-    let (retirement, shared_nodes, clean_pages) = if fixed {
-        let shared_nodes = process.retire_partages(base, length);
-        let clean_pages = process.retire_clean_pages(base, length);
-        let retirement = process.space.prepare_unmap(base, length);
-        vma::retire(&mut process.promesses, base, fin);
-        #[cfg(feature = "banc-gpu-venus")]
-        process.space.retire_baux_gpu_sans_vma(&process.promesses);
-        (Some(retirement), shared_nodes, clean_pages)
-    } else {
-        (None, alloc::vec::Vec::new(), alloc::vec::Vec::new())
-    };
-    vma::remplace(
-        &mut process.promesses,
-        Vma {
-            id: vma::nouvelle_identite(),
-            debut: base,
-            fin,
-            drapeaux,
-            backing,
-        },
-    );
-    (retirement, shared_nodes, clean_pages)
+) -> crate::kernel::projection::Remplaces {
+    crate::kernel::projection::installe_vma(process, base, length, drapeaux, backing, fixed)
 }
 
 #[cfg(feature = "banc-gpu-venus")]
@@ -621,45 +575,15 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
         Some(value) => value & !(PAGE_SIZE - 1),
         None => return -errno::EINVAL,
     };
-    let fin = match addr.checked_add(length) {
-        Some(fin) => fin,
-        None => return -errno::EINVAL,
-    };
+    if addr.checked_add(length).is_none() {
+        return -errno::EINVAL;
+    }
 
     // V14: the VM/caches have their own domains; avoid a TASKS/BKL lookup.
     let process = super::processus_courant();
-    let regions_rendues;
-    let (retirement, liberes, clean_liberes, pml4) = {
-        let mut process = process.mm.lock();
-        let liberes = process.retire_partages(addr, length);
-        let clean_liberes = process.retire_clean_pages(addr, length);
-        regions_rendues = process.retire_regions_natives(addr, length);
-        vma::retire(&mut process.promesses, addr, fin);
-        let retirement = process.space.prepare_unmap(addr, length);
-        #[cfg(feature = "banc-gpu-venus")]
-        {
-            let mm = &mut *process;
-            mm.space.retire_baux_gpu_sans_vma(&mm.promesses);
-        }
-        let pml4 = process.space.pml4();
-        (retirement, liberes, clean_liberes, pml4)
-    };
-
-    task::retire_fault_range(pml4, addr, length);
-
-    // No Mm guard crosses this window; remote faults and the IPI handler can progress.
-    execute_process_invalidation(&process, retirement.invalidation());
-
-    process.mm.lock().space.finish_unmap(retirement);
-    // Apres l'invalidation : plus aucun coeur ne peut lire ces frames.
-    drop(regions_rendues);
-
-    for node in liberes {
-        partage::demappe(node);
-    }
-    for key in clean_liberes {
-        crate::kernel::clean_page_cache::release(key);
-    }
+    // BOUCHAUD_PROJECTION_NEUTRE_V1 : meme sequence (invalidation, frames,
+    // regions natives, cache partage), partagee avec `bo_shm_unmap`.
+    crate::kernel::projection::demappe(&process, addr, length);
     c22_trace_vma_syscall(process.pid, "munmap", addr, length, 0, 0, 0);
     0
 }
@@ -945,47 +869,4 @@ pub fn sys_msync(addr: u64, _length: u64) -> i64 {
     0
 }
 
-/// BOUCHAUD_SHM_PROJECTION_V1 -- projette une `SharedRegion` native dans le
-/// processus courant, a une adresse choisie par le noyau. `phys` est le debut
-/// physique de la region (contigue), `longueur` sa taille arrondie a la page.
-/// Rend l'adresse, ou un errno negatif. Les droits ont ete verifies par
-/// l'appelant (handle) ; W^X l'est ici.
-pub fn projette_region_native(
-    phys: u64,
-    longueur: u64,
-    ecriture: bool,
-    region: alloc::sync::Arc<crate::kernel::native::object::Object>,
-) -> Result<u64, i64> {
-    if longueur == 0 || longueur & (PAGE_SIZE - 1) != 0 || phys & (PAGE_SIZE - 1) != 0 {
-        return Err(-errno::EINVAL);
-    }
-    let prot = PROT_READ | if ecriture { PROT_WRITE } else { 0 };
-    let drapeaux = prot_to_flags_verifie(prot).ok_or(-errno::EACCES)?;
-    let process_rc = task::current_process();
-    let mut process = process_rc.mm.lock();
-    if !process.tient_sous_limite(longueur) {
-        return Err(-errno::ENOMEM);
-    }
-    let base = choisit_base_mmap(&mut process, 0, longueur, MAP_SHARED)?;
-    let (retirement, liberes, clean_liberes) = installe_vma(
-        &mut process,
-        base,
-        longueur,
-        drapeaux,
-        Backing::RegionNative { phys_base: phys, mapping_start: base },
-        false,
-    );
-    process.regions_natives.push(task::RegionProjetee { base, length: longueur, region });
-    drop(process);
-    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
-    c22_trace_vma_syscall(process_rc.pid, "shm_map", base, longueur, prot, MAP_SHARED, base as i64);
-    Ok(base)
-}
-
-/// La longueur de la projection native qui commence exactement a `base`.
-pub fn longueur_region_native(base: u64) -> Option<u64> {
-    let process = task::current_process();
-    let mm = process.mm.lock();
-    mm.regions_natives.iter().find(|r| r.base == base).map(|r| r.length)
-}
 

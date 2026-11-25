@@ -141,6 +141,8 @@ pub mod reveil_precis;
 pub mod vma;
 #[path = "memory/frames_libres.rs"]
 pub mod frames_libres;
+#[path = "memory/projection.rs"]
+pub mod projection;
 #[path = "memory/virtual.rs"]
 pub mod vmm;
 
