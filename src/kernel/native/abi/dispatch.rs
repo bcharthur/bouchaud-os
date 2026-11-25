@@ -680,6 +680,9 @@ fn dispatch_inner(number: u64, args: [u64; 6]) -> Result<u64> {
             }
         }
 
+        numbers::SHM_MAP => shm_map(args),
+        numbers::SHM_UNMAP => shm_unmap(args),
+
         numbers::PROCESS_SPAWN => process_spawn(args),
         numbers::PROCESS_INFO => process_info(args),
         numbers::PROCESS_KILL => process_kill(args),
@@ -719,3 +722,41 @@ pub fn self_check() {
     debug_assert!(!numbers::is_native(0));
     debug_assert_eq!(ABI_VERSION_PACKED, 0x0001_0001);
 }
+
+/// BOUCHAUD_SHM_PROJECTION_V1 : `bo_shm_map(region, prot)`.
+///
+/// Refus deterministes : `prot` vide ou inconnu -> InvalidArgument ; droit MAP,
+/// READ (prot & 1) ou WRITE (prot & 2) absent du handle -> AccessDenied (une
+/// attenuation au transfert retire donc la projection inscriptible) ; region
+/// hors de l'arene physique -> NoSpace ; plafond RLIMIT_AS -> NoSpace.
+fn shm_map(args: [u64; 6]) -> Result<u64> {
+    let prot = args[1];
+    if prot == 0 || prot & !3 != 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let mut droits = Rights::MAP;
+    if prot & 1 != 0 { droits = droits | Rights::READ; }
+    if prot & 2 != 0 { droits = droits | Rights::WRITE; }
+    let entry = handle::current_table().lookup_kind(
+        HandleId::from_raw(args[0]), droits, ObjectKind::SharedRegion
+    )?;
+    let (phys, longueur) = match entry.object.as_ref() {
+        Object::SharedRegion(region) => region.projection().ok_or(Error::NoSpace)?,
+        _ => return Err(Error::WrongType),
+    };
+    // BOUCHAUD_PROJECTION_NEUTRE_V1 : la mecanique VM neutre, pas la
+    // compatibilite Linux.
+    use crate::kernel::projection::{projette_region, ErreurProjection};
+    projette_region(phys, longueur, prot & 2 != 0, alloc::sync::Arc::clone(&entry.object))
+        .map_err(|e| match e {
+            ErreurProjection::Argument => Error::InvalidArgument,
+            ErreurProjection::Espace => Error::NoSpace,
+        })
+}
+
+/// `bo_shm_unmap(adresse)` : l'adresse exacte qu'a rendue `bo_shm_map`.
+fn shm_unmap(args: [u64; 6]) -> Result<u64> {
+    crate::kernel::projection::retire_projection(args[0]).map_err(|_| Error::InvalidArgument)?;
+    Ok(0)
+}
+

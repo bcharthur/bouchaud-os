@@ -875,6 +875,36 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         crate::kernel::task::processus_crees_detruits().0,
         crate::kernel::task::processus_crees_detruits().1,
     );
+    // Audit du 25/11 (chantiers C, D, B) : ce que le cycle de vie des
+    // processus a rendu ou evite, une ligne a part pour ne deplacer aucun
+    // champ des lignes que les bancs analysent deja.
+    {
+        let (vf_crees, vf_exec, vf_sortie, vf_attente_ns, vf_pire_ns) = crate::kernel::task::vfork_stats();
+        let (rendus, pages_rendues, gardes) = crate::kernel::task::espaces_rendus_stats();
+        let (oom_victimes, oom_abandons, oom_attentes) = crate::kernel::task::oom_stats();
+        // Le releve est aussi l'occasion de rendre les espaces de morts dont
+        // plus aucun coeur ne tient le CR3 (BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1).
+        crate::kernel::task::vide_quarantaine();
+        crate::serial_println!(
+            "[PROC-CYCLE] vfork={} vfork_execve={} vfork_sortie={} vfork_attente_ms={} vfork_pire_ms={} \
+espaces_rendus_a_la_mort={} pages_rendues_a_la_mort={} espaces_gardes_empruntes={} \
+orphelins_recoltes={} oom_victimes={} oom_abandons={} oom_attentes={} quarantaine={} barrieres_cr3={}",
+            vf_crees, vf_exec, vf_sortie, vf_attente_ns / 1_000_000, vf_pire_ns / 1_000_000,
+            rendus, pages_rendues, gardes,
+            crate::kernel::task::orphelins_recoltes(),
+            oom_victimes, oom_abandons, oom_attentes,
+            crate::kernel::task::quarantaine_len(),
+            crate::kernel::vmm::barrieres_cr3(),
+        );
+        // BOUCHAUD_COW_V1 / BOUCHAUD_PAGE_ZERO_V1.
+        let (partagees, partages, exclusives, copies, promotions, echecs) = crate::kernel::vmm::cow_stats();
+        let (zero_projetees, zero_materialisees) = crate::kernel::vmm::page_zero_stats();
+        crate::serial_println!(
+            "[MEM-COW] frames_partagees={} partages={} redevenues_exclusives={} copies={} promotions={} \
+echecs_allocation={} zero_projetees={} zero_materialisees={}",
+            partagees, partages, exclusives, copies, promotions, echecs, zero_projetees, zero_materialisees,
+        );
+    }
     let (fenetre_preempt, fenetre_verrou) = crate::kernel::scheduler::preempt::fenetres_migrees();
     crate::serial_println!(
         "[PROC-STAT] fenetre_migree preempt={} verrou={} lectures_porteuses={}",

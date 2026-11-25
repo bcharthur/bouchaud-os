@@ -94,23 +94,14 @@ fn execute_process_invalidation(
     invalidation.execute();
 }
 
+/// BOUCHAUD_PROJECTION_NEUTRE_V1 : la mecanique est dans `kernel::projection`.
 fn finish_mapping_replacement(
     process: &Arc<task::Process>,
     retirement: Option<vmm::UnmapRetirement>,
     shared_nodes: &[usize],
     clean_pages: &[crate::kernel::clean_page_cache::Key],
 ) {
-    if let Some(retirement) = retirement {
-        execute_process_invalidation(process, retirement.invalidation());
-        process.mm.lock().space.finish_unmap(retirement);
-    }
-    // Une frame MAP_SHARED ne peut être rendue qu'après le même ACK TLB.
-    for &node in shared_nodes {
-        partage::demappe(node);
-    }
-    for &key in clean_pages {
-        crate::kernel::clean_page_cache::release(key);
-    }
+    crate::kernel::projection::finit_remplacement(process, retirement, shared_nodes, clean_pages);
 }
 
 pub const PROT_NONE: u32 = 0;
@@ -304,22 +295,7 @@ fn choisit_base_mmap(
         }
     }
 
-    let limite = vmm::user_slot_base()
-        .checked_add(vmm::USER_SPACE_SIZE)
-        .ok_or(-errno::ENOMEM)?;
-    let base = vma::trouve_trou(
-        &process.promesses,
-        process.mmap_next,
-        length,
-        limite,
-    )
-    .ok_or(-errno::ENOMEM)?;
-
-    process.mmap_next = base
-        .checked_add(length)
-        .and_then(|value| value.checked_add(PAGE_SIZE))
-        .ok_or(-errno::ENOMEM)?;
-    Ok(base)
+    crate::kernel::projection::trouve_base(process, length).ok_or(-errno::ENOMEM)
 }
 
 fn installe_vma(
@@ -329,30 +305,8 @@ fn installe_vma(
     drapeaux: u64,
     backing: Backing,
     fixed: bool,
-) -> (Option<vmm::UnmapRetirement>, alloc::vec::Vec<usize>, alloc::vec::Vec<crate::kernel::clean_page_cache::Key>) {
-    let fin = base + length;
-    let (retirement, shared_nodes, clean_pages) = if fixed {
-        let shared_nodes = process.retire_partages(base, length);
-        let clean_pages = process.retire_clean_pages(base, length);
-        let retirement = process.space.prepare_unmap(base, length);
-        vma::retire(&mut process.promesses, base, fin);
-        #[cfg(feature = "banc-gpu-venus")]
-        process.space.retire_baux_gpu_sans_vma(&process.promesses);
-        (Some(retirement), shared_nodes, clean_pages)
-    } else {
-        (None, alloc::vec::Vec::new(), alloc::vec::Vec::new())
-    };
-    vma::remplace(
-        &mut process.promesses,
-        Vma {
-            id: vma::nouvelle_identite(),
-            debut: base,
-            fin,
-            drapeaux,
-            backing,
-        },
-    );
-    (retirement, shared_nodes, clean_pages)
+) -> crate::kernel::projection::Remplaces {
+    crate::kernel::projection::installe_vma(process, base, length, drapeaux, backing, fixed)
 }
 
 #[cfg(feature = "banc-gpu-venus")]
@@ -405,14 +359,43 @@ pub fn sys_mmap(
         _ => None,
     };
     let ecran = process_rc.metadata.lock().ecran;
+    // BOUCHAUD_MAP_SHARED_ANONYME_V1 : `MAP_SHARED|MAP_ANONYMOUS` retombait
+    // sur `Backing::Zero`, c'est-a-dire une memoire PRIVEE : apres `fork`, le
+    // fils et le pere ne se voyaient plus (cow-probe, epreuve `partage`, sur
+    // l'image d'avant : le fils ecrit 42, le pere lit 1). C'est un nœud
+    // anonyme -- un `memfd` sans descripteur -- projete en `SharedFile` : les
+    // deux processus designent les memes frames du cache partage, et le nœud
+    // disparait avec sa derniere projection (`partage::demappe`). Cree AVANT
+    // le verrou `Mm` : l'arborescence ne se prend pas sous lui.
+    let anonyme_partage = if flags & MAP_ANONYMOUS != 0 && map_type == MAP_SHARED {
+        let node = match crate::fs::ramfs::fs().cree_anonyme("anon-partage") {
+            Ok(node) => node,
+            Err(_) => return -errno::ENOMEM,
+        };
+        partage::mappe(node);
+        Some(node)
+    } else {
+        None
+    };
+    let rend_anonyme = |node: Option<usize>| {
+        if let Some(node) = node {
+            partage::demappe(node);
+        }
+    };
     let mut process = process_rc.mm.lock();
     let base = match choisit_base_mmap(&mut process, addr, length, flags) {
         Ok(base) => base,
-        Err(error) => return error,
+        Err(error) => {
+            drop(process);
+            rend_anonyme(anonyme_partage);
+            return error;
+        }
     };
     let fixed = flags & MAP_FIXED != 0;
 
     let Some(drapeaux) = prot_to_flags_verifie(prot) else {
+        drop(process);
+        rend_anonyme(anonyme_partage);
         return -errno::EACCES;
     };
 
@@ -497,7 +480,15 @@ pub fn sys_mmap(
     }
 
     let mut new_shared_node = None;
-    let backing = if flags & MAP_ANONYMOUS != 0 {
+    let backing = if let Some(node) = anonyme_partage {
+        new_shared_node = Some(node);
+        Backing::SharedFile {
+            node,
+            mapping_start: base,
+            file_offset: 0,
+            file_size: length,
+        }
+    } else if flags & MAP_ANONYMOUS != 0 {
         Backing::Zero
     } else {
         let node = match fd_kind {
@@ -531,6 +522,7 @@ pub fn sys_mmap(
     };
 
     if !fixed && !process.tient_sous_limite(length) {
+        drop(process);
         if let Backing::SharedFile { node, .. } = backing {
             partage::demappe(node);
         }
@@ -583,41 +575,15 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
         Some(value) => value & !(PAGE_SIZE - 1),
         None => return -errno::EINVAL,
     };
-    let fin = match addr.checked_add(length) {
-        Some(fin) => fin,
-        None => return -errno::EINVAL,
-    };
+    if addr.checked_add(length).is_none() {
+        return -errno::EINVAL;
+    }
 
     // V14: the VM/caches have their own domains; avoid a TASKS/BKL lookup.
     let process = super::processus_courant();
-    let (retirement, liberes, clean_liberes, pml4) = {
-        let mut process = process.mm.lock();
-        let liberes = process.retire_partages(addr, length);
-        let clean_liberes = process.retire_clean_pages(addr, length);
-        vma::retire(&mut process.promesses, addr, fin);
-        let retirement = process.space.prepare_unmap(addr, length);
-        #[cfg(feature = "banc-gpu-venus")]
-        {
-            let mm = &mut *process;
-            mm.space.retire_baux_gpu_sans_vma(&mm.promesses);
-        }
-        let pml4 = process.space.pml4();
-        (retirement, liberes, clean_liberes, pml4)
-    };
-
-    task::retire_fault_range(pml4, addr, length);
-
-    // No Mm guard crosses this window; remote faults and the IPI handler can progress.
-    execute_process_invalidation(&process, retirement.invalidation());
-
-    process.mm.lock().space.finish_unmap(retirement);
-
-    for node in liberes {
-        partage::demappe(node);
-    }
-    for key in clean_liberes {
-        crate::kernel::clean_page_cache::release(key);
-    }
+    // BOUCHAUD_PROJECTION_NEUTRE_V1 : meme sequence (invalidation, frames,
+    // regions natives, cache partage), partagee avec `bo_shm_unmap`.
+    crate::kernel::projection::demappe(&process, addr, length);
     c22_trace_vma_syscall(process.pid, "munmap", addr, length, 0, 0, 0);
     0
 }
@@ -902,3 +868,5 @@ pub fn sys_msync(addr: u64, _length: u64) -> i64 {
     }
     0
 }
+
+

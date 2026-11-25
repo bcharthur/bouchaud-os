@@ -61,6 +61,12 @@ cp "$TRAVAIL/composited/composited-slice" "$SORTIE/bin/composited"
 # Le bureau noyau ne dessine plus de calculatrice : il lance celle-ci.
 musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/calculatrice-gui" \
   userland/apps/calculatrice/calculatrice-gui.c
+# BOUCHAUD_NOTES_RING3_V1 : Bouchaud Notes est elle aussi une application ring 3.
+musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/notes-gui" \
+  userland/apps/notes/notes-gui.c
+# BOUCHAUD_JOURNAL_RING3_V1 : le Journal aussi (trace lue dans /proc/bouchaud).
+musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/journal-gui" \
+  userland/apps/journal/journal-gui.c
 
 # --- DOOM ------------------------------------------------------------------------
 [ -x target/doom-bouchaud/doom-bouchaud ] || tools/doom/build-linux.sh >/dev/null
@@ -110,7 +116,7 @@ EOF
 
 LIVRABLE=oui; [ "$LADYBIRD" = present ] || LIVRABLE=non
 {
-  printf 'services=serviced,healthd,updated,logd,ota\ncomposited=present\ncalculatrice=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
+  printf 'services=serviced,healthd,updated,logd,ota\ncomposited=present\ncalculatrice=present\nnotes=present\ndoom=present\nladybird=%s\n' "$LADYBIRD"
   printf 'ota=stable\nlivrable=%s\n' "$LIVRABLE"
 } > "$SORTIE/etc/bouchaud/composants"
 echo "SYSTEME_ASSEMBLE version=$VERSION commit=${COMMIT:0:12} sequence=$SEQUENCE ladybird=$LADYBIRD livrable=$LIVRABLE fichiers=$(find "$SORTIE" -type f | wc -l) octets=$(du -sb "$SORTIE" | cut -f1)"

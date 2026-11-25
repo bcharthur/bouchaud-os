@@ -402,6 +402,28 @@ jobs:
         run: BO_SMP=4 OUT=tempete-exec-smp4 tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 40
       - name: Tempete fork+exec, SMP1
         run: BO_SMP=1 OUT=tempete-exec-smp1 tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 30
+      - name: Acces a /dev/kvm
+        run: sudo chmod 666 /dev/kvm && test -w /dev/kvm
+      - name: Tempete fork+exec, KVM strict SMP1/2/4
+        run: |
+          for smp in 1 2 4; do
+            sortie="tempete-exec-kvm-smp${smp}"
+            BO_QEMU_KVM=1 BO_SMP="$smp" BO_TEMPETE_MASQUE_IRQ="$((smp == 4))" OUT="$sortie" tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 40
+            grep -aE 'BOUCHAUD_CPU_ISA hyperviseur=KVMKVMKVM([[:space:]]|$)' "$sortie/serie.log"
+          done
+      - name: Retrait de memoire et OOM, KVM SMP2
+        run: BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-mort-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie oom" 2 1024
+      - name: Victime OOM en quarantaine, KVM SMP2
+        run: |
+          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+          cargo bootimage --features banc-oom-quarantaine
+          BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-quarantaine-kvm.log" tools/ci/run_memoire_mort.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin oom 2 1024
+          awk '
+            /BANC_OOM_QUARANTAINE pid=/ { victime = $NF }
+            /BANC_OOM_ATTEND_QUARANTAINE pid=/ && $NF == victime { attend = victime }
+            /BANC_OOM_ESPACE_RENDU pid=/ && $NF == attend { rendu = attend }
+            END { exit !(rendu != "") }
+          ' memoire-quarantaine-kvm.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -409,6 +431,9 @@ jobs:
           path: |
             tempete-exec-smp4/serie.log*
             tempete-exec-smp1/serie.log*
+            tempete-exec-kvm-smp*/serie.log*
+            memoire-mort-kvm.log
+            memoire-quarantaine-kvm.log
           if-no-files-found: warn
 
   atelier-reactivite:

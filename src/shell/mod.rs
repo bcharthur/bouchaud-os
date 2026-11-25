@@ -1219,11 +1219,12 @@ fn fil_dormeur_masqueur() -> ! {
     // masquage. Lectures seules, sans allocation : le verdict n'en depend pas.
     let mut observe = ObservationSilence::default();
     let debut_masque = crate::kernel::timer::monotonic_ns();
+    let mut ack_cr3 = 0;
     x86_64::instructions::interrupts::without_interrupts(|| {
         DORMEUR_MASQUE.store(true, Ordering::Release);
         let fin = crate::kernel::timer::monotonic_ns().saturating_add(duree.saturating_mul(1_000_000));
         while crate::kernel::timer::monotonic_ns() < fin {
-            crate::arch::x86_64::smp::sert_shootdowns_en_attente();
+            ack_cr3 += crate::arch::x86_64::smp::sert_shootdowns_en_attente();
             for c in 0..en_ligne {
                 if c != ici && crate::kernel::task::coeur_electeur_au_repos(c) {
                     vus_au_repos |= 1u64 << c;
@@ -1234,6 +1235,7 @@ fn fil_dormeur_masqueur() -> ! {
         }
         DORMEUR_MASQUE.store(false, Ordering::Release);
     });
+    crate::serial_println!("SERIE_DORMEUR_ACK_CR3 coeur={} acquittements={}", ici, ack_cr3);
     let tours = DORMEUR_TOURS.load(Ordering::Acquire).saturating_sub(tours_avant);
     // L'ecart compte aussi le silence EN COURS a la fin du masquage : un
     // dormeur bloque tout du long n'a jamais mesure son propre ecart.

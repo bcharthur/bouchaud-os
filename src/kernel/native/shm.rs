@@ -1,4 +1,3 @@
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::kernel::sync::SpinLock;
@@ -13,17 +12,126 @@ pub const MAX_SHARED_REGION: usize = 64 * 1024 * 1024;
 /// Shared kernel region.
 ///
 /// The object is genuinely shared between processes when its handle is passed
-/// through a channel.  V1 exposes safe read/write syscalls; the MAP right is
-/// already carried by the handle so a later zero-copy mmap backend can replace
-/// this storage without changing the ABI.
+/// through a channel. Since ABI 1.7 (BOUCHAUD_SHM_PROJECTION_V1) it can also be
+/// MAPPED into a process (`bo_shm_map`): the storage is a page-aligned,
+/// page-granular block of the kernel heap arena, which is physically
+/// contiguous, so its frames are projected as-is -- no copy, and the kernel
+/// keeps its contiguous view (`avec_octets*`, used by the compositor).
 pub struct SharedRegion {
-    bytes: SpinLock<Vec<u8>>,
+    bytes: SpinLock<Tampon>,
+    /// Le processus a qui la region est comptee (son createur) : la region
+    /// peut circuler, la charge reste a qui l'a demandee.
+    compte: u32,
+}
+
+// BOUCHAUD_SHM_QUOTA_V1 -- le stockage d'une region vit dans le TAS NOYAU.
+// Sans borne, un processus creait des regions de 64 Mio jusqu'a epuiser le
+// tas de tout le noyau. Deux plafonds, relatifs a l'arene : un quart par
+// processus createur, la moitie pour toute la machine. Refus deterministe
+// (NoSpace) AVANT toute allocation ; la charge est rendue a la destruction
+// de la region (dernier handle, derniere projection).
+static COMPTES: SpinLock<alloc::collections::BTreeMap<u32, usize>> =
+    SpinLock::new(alloc::collections::BTreeMap::new());
+static TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn plafonds() -> (usize, usize) {
+    let arene = crate::kernel::heap::taille_arene();
+    if arene == 0 { (MAX_SHARED_REGION, MAX_SHARED_REGION) } else { (arene / 4, arene / 2) }
+}
+
+fn reserve(pid: u32, octets: usize) -> Result<()> {
+    let (par_processus, global) = plafonds();
+    let mut comptes = COMPTES.lock();
+    let actuel = comptes.get(&pid).copied().unwrap_or(0);
+    let total = TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    if actuel.saturating_add(octets) > par_processus || total.saturating_add(octets) > global {
+        return Err(Error::NoSpace);
+    }
+    comptes.insert(pid, actuel + octets);
+    TOTAL.fetch_add(octets, core::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+fn rend(pid: u32, octets: usize) {
+    let mut comptes = COMPTES.lock();
+    if let Some(c) = comptes.get_mut(&pid) {
+        *c = c.saturating_sub(octets);
+        if *c == 0 { comptes.remove(&pid); }
+    }
+    TOTAL.fetch_sub(octets.min(TOTAL.load(core::sync::atomic::Ordering::Relaxed)), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Octets de regions comptes a `pid`, et pour toute la machine.
+pub fn charge(pid: u32) -> (usize, usize) {
+    (COMPTES.lock().get(&pid).copied().unwrap_or(0), TOTAL.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+impl Drop for SharedRegion {
+    fn drop(&mut self) {
+        let alloue = self.bytes.lock().alloue;
+        rend(self.compte, alloue);
+    }
+}
+
+/// Page-aligned zeroed storage, rounded up to whole pages: nothing else of the
+/// kernel heap can share a frame with a mapped region.
+pub struct Tampon {
+    ptr: core::ptr::NonNull<u8>,
+    len: usize,
+    alloue: usize,
+}
+
+// The buffer is owned exclusively by its region; access goes through the lock.
+unsafe impl Send for Tampon {}
+unsafe impl Sync for Tampon {}
+
+const PAGE: usize = 4096;
+
+impl Tampon {
+    fn nouveau(len: usize) -> Result<Self> {
+        let alloue = len.checked_add(PAGE - 1).ok_or(Error::TooLarge)? & !(PAGE - 1);
+        let layout = core::alloc::Layout::from_size_align(alloue, PAGE).map_err(|_| Error::TooLarge)?;
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        let ptr = core::ptr::NonNull::new(ptr).ok_or(Error::NoSpace)?;
+        Ok(Self { ptr, len, alloue })
+    }
+}
+
+impl core::ops::Deref for Tampon {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) } }
+}
+
+impl core::ops::DerefMut for Tampon {
+    fn deref_mut(&mut self) -> &mut [u8] { unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) } }
+}
+
+impl Drop for Tampon {
+    fn drop(&mut self) {
+        let layout = core::alloc::Layout::from_size_align(self.alloue, PAGE).expect("shm: layout");
+        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), layout) }
+    }
 }
 
 impl SharedRegion {
     pub fn new(size: usize) -> Result<Self> {
         if size == 0 || size > MAX_SHARED_REGION { return Err(Error::TooLarge); }
-        Ok(Self { bytes: SpinLock::new(vec![0u8; size]) })
+        let compte = crate::kernel::task::current_process_local().map(|p| p.pid).unwrap_or(0);
+        let alloue = size.checked_add(PAGE - 1).ok_or(Error::TooLarge)? & !(PAGE - 1);
+        reserve(compte, alloue)?;
+        match Tampon::nouveau(size) {
+            Ok(tampon) => Ok(Self { bytes: SpinLock::new(tampon), compte }),
+            Err(e) => { rend(compte, alloue); Err(e) }
+        }
+    }
+
+    /// BOUCHAUD_SHM_PROJECTION_V1 : (adresse physique, octets projetables --
+    /// la taille arrondie a la page). `None` si le stockage n'est pas dans
+    /// l'arene physique du tas (il n'est alors jamais projete).
+    pub fn projection(&self) -> Option<(u64, u64)> {
+        let tampon = self.bytes.lock();
+        let phys = crate::kernel::heap::phys_dans_arene(tampon.ptr.as_ptr(), tampon.alloue)?;
+        (phys % PAGE as u64 == 0).then_some((phys, tampon.alloue as u64))
     }
 
     pub fn len(&self) -> usize { self.bytes.lock().len() }

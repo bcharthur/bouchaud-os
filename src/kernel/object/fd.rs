@@ -14,6 +14,7 @@
 //! reveiller elle-meme depuis un autre thread : c'est exactement ce que fait la
 //! boucle d'evenements de Qt (le « wakeup pipe »).
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::kernel::sync::SpinLock;
@@ -87,6 +88,10 @@ pub enum FdKind {
     /// des instantanes, pas des vues vivantes »), et elle suffit aux
     /// consommateurs reels, qui ouvrent, lisent d'un trait et referment.
     Instantane(Arc<Vec<u8>>),
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire servi par un systeme
+    /// monte et absent du RAMFS (`/proc/<pid>`, `/dev/input`) : ses entrees
+    /// (inode stable, nom, repertoire ?) relevees a l'ouverture.
+    DossierMonte(Arc<Vec<(u64, String, bool)>>),
 }
 
 /// Etat partage d'un tube.
@@ -723,60 +728,264 @@ impl FdTable {
 /// Resout un chemin de peripherique en descripteur, ou `None` si ce n'en est
 /// pas un (le chemin sera alors cherche dans le RAMFS).
 pub fn device_for_path(path: &str) -> Option<FdKind> {
-    // BOUCHAUD_V13_PROC_STATS_DYNAMIQUES_OPEN
-    // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
-    // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
-    // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
-    if path == crate::kernel::system_metrics::PROC_PATH {
-        return Some(FdKind::Instantane(Arc::new(crate::kernel::system_metrics::proc_snapshot())));
-    }
-    if path == "/proc/stat" {
-        return Some(FdKind::Instantane(Arc::new(proc_stat_global())));
-    }
-    if path == "/proc/self/stat" {
-        let pid = crate::kernel::task::current_process().pid;
-        return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
-    }
-    // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
-    // appelant depuis la lecture precedente, decompose, et le pire ecart
-    // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
-    if path == "/proc/self/reveil" {
-        return Some(FdKind::Instantane(Arc::new(proc_reveil())));
-    }
-    // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
-    // chaque reveil par la sonde (jamais remis a zero).
-    if path == "/proc/self/fil" {
-        return Some(FdKind::Instantane(Arc::new(proc_fil())));
-    }
-    // BOUCHAUD_OTA_ANNEAU3_V1 : l'etat d'autorite des mises a jour, pour
-    // l'agent OTA en anneau 3 (lecture seule, regenere a chaque ouverture).
-    if path == "/proc/bouchaud/ota" {
-        return Some(FdKind::Instantane(Arc::new(crate::kernel::update::ota::instantane())));
-    }
-    if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
-        return proc_stat_processus(pid).map(|v| FdKind::Instantane(Arc::new(v)));
-    }
-    match path {
-        "/dev/null" => Some(FdKind::Null),
-        "/dev/zero" => Some(FdKind::Zero),
-        "/dev/dri/renderD128" => crate::drivers::virtio_gpu::capset_render_id()
-            .map(|_| FdKind::GpuRender(Arc::new(()))),
-        "/dev/random" | "/dev/urandom" => Some(FdKind::Random),
-        "/dev/tty" | "/dev/console" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" => Some(FdKind::Console),
-        // Les consoles virtuelles sont ouvertes par le plugin linuxfb de Qt
-        // pour basculer le terminal en mode graphique.
-        "/dev/tty0" | "/dev/tty1" | "/dev/tty2" | "/dev/vc/0" => Some(FdKind::VirtualTerminal),
-        "/dev/fb0" | "/dev/fb" | "/dev/graphics/fb0" => Some(FdKind::Framebuffer),
-        "/dev/input/event0" => Some(FdKind::InputKeyboard),
-        "/dev/input/event1" => Some(FdKind::InputMouse),
-        // Sortie audio. `/dev/dsp` est le nom OSS, `/dev/audio` son alias
-        // historique : les deux menent au meme pilote AC'97.
-        "/dev/dsp" | "/dev/dsp0" | "/dev/audio" | "/dev/sound/dsp" => Some(FdKind::Audio),
-        "/proc/self/maps" | "/proc/self/smaps" => {
-            Some(FdKind::Instantane(Arc::new(carte_memoire())))
+    // BOUCHAUD_VFS_MONTAGES_V1 : `/dev` et `/proc` sont des systemes montes,
+    // resolus par la table de montages ; `None` : le RAMFS sert le chemin.
+    let (ouverture, _vnode) = montages().ouvre(path)?;
+    Some(match ouverture {
+        crate::fs::vfs::Ouverture::Objet(kind) => kind,
+        crate::fs::vfs::Ouverture::Contenu(octets) => FdKind::Instantane(Arc::new(octets)),
+        crate::fs::vfs::Ouverture::Dossier(_) => {
+            // BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : un repertoire que le RAMFS
+            // possede aussi (`/proc`, `/dev`) reste SON noeud : `getdents`
+            // y ajoute les entrees du systeme monte (union).
+            if crate::fs::ramfs::fs().resolve(path, 0).is_some() {
+                return None;
+            }
+            let entrees = montages().liste(path)?;
+            FdKind::DossierMonte(Arc::new(
+                entrees.into_iter().map(|(inode, e)| (inode, e.nom, e.dossier)).collect(),
+            ))
         }
-        _ => None,
+    })
+}
+
+/// La table des montages, initialisee au premier usage : `devfs` sur `/dev`,
+/// `procfs` sur `/proc`.
+pub fn montages() -> &'static crate::fs::vfs::Table<FdKind> {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use crate::kernel::sync::SpinLockIrq;
+
+    static TABLE: crate::fs::vfs::Table<FdKind> = crate::fs::vfs::Table::vide();
+    static MONTEE: AtomicBool = AtomicBool::new(false);
+    static INITIALISATION: SpinLockIrq<()> = SpinLockIrq::new(());
+    if !MONTEE.load(Ordering::Acquire) {
+        let _initialisation = INITIALISATION.lock();
+        if !MONTEE.load(Ordering::Relaxed) {
+            TABLE.monte("/dev", &DEVFS);
+            TABLE.monte("/proc", &PROCFS);
+            // Les lecteurs concurrents ne doivent pas tomber sur le /proc
+            // statique du RAMFS avant la publication des deux montages.
+            MONTEE.store(true, Ordering::Release);
+        }
     }
+    &TABLE
+}
+
+struct DevFs;
+static DEVFS: DevFs = DevFs;
+
+impl crate::fs::vfs::SystemeFichiers<FdKind> for DevFs {
+    fn nom(&self) -> &'static str { "devfs" }
+    fn ouvre(&self, relatif: &str) -> Option<crate::fs::vfs::Ouverture<FdKind>> {
+        let kind = match relatif {
+            "null" => FdKind::Null,
+            "zero" => FdKind::Zero,
+            "dri/renderD128" => {
+                crate::drivers::virtio_gpu::capset_render_id()?;
+                FdKind::GpuRender(Arc::new(()))
+            }
+            "random" | "urandom" => FdKind::Random,
+            "tty" | "console" | "stdin" | "stdout" | "stderr" => FdKind::Console,
+            // Les consoles virtuelles sont ouvertes par le plugin linuxfb de Qt
+            // pour basculer le terminal en mode graphique.
+            "tty0" | "tty1" | "tty2" | "vc/0" => FdKind::VirtualTerminal,
+            "fb0" | "fb" | "graphics/fb0" => FdKind::Framebuffer,
+            "input/event0" => FdKind::InputKeyboard,
+            "input/event1" => FdKind::InputMouse,
+            // Sortie audio. `/dev/dsp` est le nom OSS, `/dev/audio` son alias
+            // historique : les deux menent au meme pilote AC'97.
+            "dsp" | "dsp0" | "audio" | "sound/dsp" => FdKind::Audio,
+            _ => return None,
+        };
+        Some(crate::fs::vfs::Ouverture::Objet(kind))
+    }
+
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : exactement ce que `ouvre` sert --
+    /// le noeud de rendu n'est liste que si la carte le fournit.
+    fn liste(&self, relatif: &str) -> Option<Vec<crate::fs::vfs::Entree>> {
+        use crate::fs::vfs::Entree;
+        let gpu = crate::drivers::virtio_gpu::capset_render_id().is_some();
+        Some(match relatif {
+            "" => {
+                let mut e: Vec<Entree> = [
+                    "null", "zero", "random", "urandom", "tty", "console", "stdin", "stdout",
+                    "stderr", "tty0", "tty1", "tty2", "fb0", "fb", "dsp", "dsp0", "audio",
+                ].iter().map(|n| Entree::fichier(n)).collect();
+                for d in ["input", "vc", "graphics", "sound"] {
+                    e.push(Entree::dossier(d));
+                }
+                if gpu { e.push(Entree::dossier("dri")); }
+                e
+            }
+            "input" => alloc::vec![Entree::fichier("event0"), Entree::fichier("event1")],
+            "vc" => alloc::vec![Entree::fichier("0")],
+            "graphics" => alloc::vec![Entree::fichier("fb0")],
+            "sound" => alloc::vec![Entree::fichier("dsp")],
+            "dri" if gpu => alloc::vec![Entree::fichier("renderD128")],
+            _ => return None,
+        })
+    }
+}
+
+struct ProcFs;
+static PROCFS: ProcFs = ProcFs;
+
+impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
+    fn nom(&self) -> &'static str { "proc" }
+    fn ouvre(&self, relatif: &str) -> Option<crate::fs::vfs::Ouverture<FdKind>> {
+        use crate::fs::vfs::Ouverture::Contenu;
+        // BOUCHAUD_V13_PROC_STATS_DYNAMIQUES_OPEN
+        // Ladybird epingle lit ces deux interfaces pour son ProcessManager.
+        // Un fichier RAMFS ecrit au boot mentirait des la milliseconde suivante :
+        // on fige donc un instantane AU MOMENT DE open(2), comme /proc/self/maps.
+        // Le chemin complet : les contrats (Ladybird, sonde d'ordonnanceur)
+        // designent ces fichiers par leur nom public.
+        let chemin = alloc::format!("/proc/{}", relatif);
+        let path = chemin.as_str();
+        if path == crate::kernel::system_metrics::PROC_PATH {
+            return Some(Contenu(crate::kernel::system_metrics::proc_snapshot()));
+        }
+        if path == "/proc/stat" {
+            return Some(Contenu(proc_stat_global()));
+        }
+        if path == "/proc/self/stat" {
+            let pid = crate::kernel::task::current_process().pid;
+            return proc_stat_processus(pid).map(Contenu);
+        }
+        // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
+        // appelant depuis la lecture precedente, decompose, et le pire ecart
+        // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
+        if path == "/proc/self/reveil" {
+            return Some(Contenu(proc_reveil()));
+        }
+        // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
+        // chaque reveil par la sonde (jamais remis a zero).
+        if path == "/proc/self/fil" {
+            return Some(Contenu(proc_fil()));
+        }
+        let octets = match relatif {
+            // BOUCHAUD_OTA_ANNEAU3_V1 : l'etat d'autorite des mises a jour, pour
+            // l'agent OTA en anneau 3 (lecture seule, regenere a chaque ouverture).
+            "bouchaud/ota" => crate::kernel::update::ota::instantane(),
+            "self/maps" | "self/smaps" => carte_memoire(),
+            // BOUCHAUD_VFS_MONTAGES_V1 : servis VIVANTS. L'instantane RAMFS
+            // ecrit au demarrage annoncait la memoire libre du boot.
+            "meminfo" => proc_meminfo(),
+            "uptime" => proc_uptime(),
+            "mounts" | "self/mounts" => proc_mounts(),
+            "bouchaud/memoire" => proc_memoire_bouchaud(),
+            // BOUCHAUD_JOURNAL_RING3_V1 : l'anneau de trace, tel qu'au moment
+            // de l'ouverture, pour l'application Journal (anneau 3) ; reserve
+            // a `DEBUG` (`security::filesystem::kernel_trace`). Et le total
+            // ecrit depuis le demarrage : au-dela de la capacite de l'anneau,
+            // sa premiere ligne est tronquee.
+            "bouchaud/journal" => crate::drivers::serial::trace_snapshot(),
+            "bouchaud/journal_octets" => alloc::format!(
+                "{} {}\n", crate::drivers::serial::trace_total_bytes(),
+                crate::drivers::serial::trace_capacite(),
+            ).into_bytes(),
+            "self/status" => proc_status(crate::kernel::task::current_process().pid)?,
+            _ => {
+                if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
+                    proc_stat_processus(pid)?
+                } else if let Some(pid) = relatif.strip_suffix("/status").and_then(|p| p.parse::<u32>().ok()) {
+                    proc_status(pid)?
+                } else {
+                    return None;
+                }
+            }
+        };
+        Some(Contenu(octets))
+    }
+
+    /// BOUCHAUD_VFS_DOSSIERS_MONTES_V1 : `ls /proc` montre les processus
+    /// VIVANTS (un repertoire par pid, releve a l'ouverture) ; chaque
+    /// repertoire liste ce que `ouvre` sait y servir.
+    fn liste(&self, relatif: &str) -> Option<Vec<crate::fs::vfs::Entree>> {
+        use crate::fs::vfs::Entree;
+        const PAR_PID: [&str; 2] = ["stat", "status"];
+        Some(match relatif {
+            "" => {
+                let mut e: Vec<Entree> = ["meminfo", "uptime", "mounts", "stat"]
+                    .iter().map(|n| Entree::fichier(n)).collect();
+                e.push(Entree::dossier("self"));
+                e.push(Entree::dossier("bouchaud"));
+                for process in crate::kernel::task::processes() {
+                    e.push(Entree { nom: alloc::format!("{}", process.pid), dossier: true });
+                }
+                e
+            }
+            "self" => ["stat", "status", "maps", "smaps", "mounts", "reveil", "fil"]
+                .iter().map(|n| Entree::fichier(n)).collect(),
+            "bouchaud" => alloc::vec![
+                Entree::fichier("memoire"), Entree::fichier("ota"),
+                Entree::fichier("journal"), Entree::fichier("journal_octets"),
+            ],
+            pid if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
+                let pid = pid.parse::<u32>().ok()?;
+                crate::kernel::task::process_by_pid(pid)?;
+                PAR_PID.iter().map(|n| Entree::fichier(n)).collect()
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// `/proc/meminfo`, au moment de l'ouverture (meme format que l'instantane).
+fn proc_meminfo() -> Vec<u8> {
+    let (_, libres, total) = crate::kernel::vmm::frame_stats();
+    let (total_kb, libre_kb) = (total * 4, libres * 4);
+    alloc::format!(
+        "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n",
+        total_kb, libre_kb, libre_kb
+    ).into_bytes()
+}
+
+fn proc_uptime() -> Vec<u8> {
+    let ms = crate::kernel::timer::monotonic_ms();
+    alloc::format!("{}.{:02} 0.00\n", ms / 1000, (ms % 1000) / 10).into_bytes()
+}
+
+/// `/proc/mounts` : la table de montages REELLE, au format de Linux.
+fn proc_mounts() -> Vec<u8> {
+    let mut texte = alloc::string::String::from("ramfs / ramfs rw 0 0\n");
+    for (point, nom) in montages().montages() {
+        texte.push_str(&alloc::format!("{} {} {} rw 0 0\n", nom, point, nom));
+    }
+    texte.into_bytes()
+}
+
+/// `/proc/bouchaud/memoire` : la Memory Fabric en chiffres.
+fn proc_memoire_bouchaud() -> Vec<u8> {
+    let (partagees, partages, exclusives, copies, promotions, echecs) = crate::kernel::vmm::cow_stats();
+    let (zero_proj, zero_mat) = crate::kernel::vmm::page_zero_stats();
+    let (rendus, pages_rendues, gardes) = crate::kernel::task::espaces_rendus_stats();
+    let (victimes, abandons, attentes) = crate::kernel::task::oom_stats();
+    alloc::format!(
+        "cow_frames_partagees {}\ncow_partages {}\ncow_redevenues_exclusives {}\ncow_copies {}\ncow_promotions {}\ncow_echecs_allocation {}\n\
+page_zero_projetees {}\npage_zero_materialisees {}\nespaces_rendus_a_la_mort {}\npages_rendues_a_la_mort {}\n\
+espaces_gardes {}\noom_victimes {}\noom_abandons {}\noom_attentes {}\nbarrieres_cr3 {}\n",
+        partagees, partages, exclusives, copies, promotions, echecs, zero_proj, zero_mat,
+        rendus, pages_rendues, gardes, victimes, abandons, attentes,
+        crate::kernel::vmm::barrieres_cr3(),
+    ).into_bytes()
+}
+
+/// `/proc/<pid>/status` (sous-ensemble) : nom, pid, pere, fils, RSS.
+fn proc_status(pid: u32) -> Option<Vec<u8>> {
+    let process = crate::kernel::task::process_by_pid(pid)?;
+    let nom = process.metadata.lock().name.clone();
+    let rss_kb = process.mm.lock().space.mapped_pages() * 4;
+    let (zombie, fils) = {
+        let l = process.lifecycle.lock();
+        (l.zombie, l.threads)
+    };
+    Some(alloc::format!(
+        "Name:\t{}\nState:\t{}\nPid:\t{}\nPPid:\t{}\nThreads:\t{}\nVmRSS:\t{} kB\n",
+        nom.rsplit('/').next().unwrap_or(&nom),
+        if zombie { "Z (zombie)" } else { "R (running)" },
+        pid, crate::kernel::task::ppid_visible(process.parent), fils, rss_kb,
+    ).into_bytes())
 }
 
 // BOUCHAUD_V13_PROC_STATS_DYNAMIQUES_FORMAT

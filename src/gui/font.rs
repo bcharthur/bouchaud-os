@@ -617,3 +617,19 @@ pub fn draw_text(x: i32, y_top: i32, s: &str, rgb: u32, px: i32, bold: bool) -> 
     }
     true
 }
+
+/// BOUCHAUD_ATLAS_POLICE_V1 -- un glyphe tel que le bureau le dessine, pour
+/// l'exporter aux applications ring 3 : (largeur, hauteur, gauche, haut,
+/// avance, couverture). `None` si `fontdue` n'est pas disponible (le repli
+/// maison n'est pas exporte : il ne rendrait pas le meme texte).
+pub fn glyphe_exporte(c: char, px: i32) -> Option<(usize, usize, i32, i32, i32, &'static [u8])> {
+    let f = fd_font()?;
+    let g = fd_glyph(f, c, px);
+    Some((g.w, g.h, g.left, g.top, g.advance, &g.cov))
+}
+
+/// Hauteur au-dessus de la ligne de base, en pixels, pour `px`.
+pub fn ascendante(px: i32) -> Option<i32> {
+    fd_font().map(|f| fd_ascent(f, px))
+}
+

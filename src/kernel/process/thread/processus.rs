@@ -1,5 +1,9 @@
 pub struct MmState {
     pub space: AddressSpace,
+    /// BOUCHAUD_SHM_PROJECTION_V1 : les `SharedRegion` natives projetees dans
+    /// cet espace. Chaque entree tient la region vivante. APRES `space` :
+    /// les champs sont detruits dans l'ordre, l'espace (donc ses PTE) d'abord.
+    pub regions_natives: Vec<RegionProjetee>,
     pub brk_start: u64,
     pub brk: u64,
     pub mmap_next: u64,
@@ -9,9 +13,35 @@ pub struct MmState {
     pub clean_pages: Vec<CleanPageMapping>,
 }
 
+/// Une `SharedRegion` projetee : la plage, et la reference qui la garde.
+#[derive(Clone)]
+pub struct RegionProjetee {
+    pub base: u64,
+    pub length: u64,
+    pub region: Arc<crate::kernel::native::object::Object>,
+}
+
+struct NotificationRendu(Arc<Process>);
+
+impl Drop for NotificationRendu {
+    fn drop(&mut self) {
+        self.0.espace_rendu.store(true, Ordering::Release);
+        #[cfg(feature = "banc-oom-quarantaine")]
+        if OOM_VICTIME.lock().as_ref().is_some_and(|v| v.pid == self.0.pid) {
+            crate::serial_println!("BANC_OOM_ESPACE_RENDU pid={}", self.0.pid);
+        }
+    }
+}
+
 pub struct Mm {
     inner: SpinLock<MmState>,
     activation: SpinLock<Arc<crate::kernel::vmm::AddressSpaceIdentity>>,
+    /// Fils `vfork` qui s'executent encore sur ce `Mm` (BOUCHAUD_VFORK_REEL_V1).
+    /// Non nul : un `execve` d'un de ses processus doit installer un `Mm`
+    /// neuf, jamais remplacer cet espace en place.
+    pub emprunts: AtomicUsize,
+    // Detruit apres inner, donc apres les tables et les frames du Mm.
+    notification_rendu: SpinLock<Option<NotificationRendu>>,
 }
 impl Mm {
     pub fn new(state: MmState) -> Self {
@@ -19,7 +49,20 @@ impl Mm {
         Self {
             inner: SpinLock::new(state),
             activation: SpinLock::new(activation),
+            emprunts: AtomicUsize::new(0),
+            notification_rendu: SpinLock::new(None),
         }
+    }
+
+    // Le processus doit deja avoir quitte ce Mm, pour eviter un cycle Arc.
+    fn publie_rendu_a_la_destruction(&self, processus: Arc<Process>) {
+        *self.notification_rendu.lock() = Some(NotificationRendu(processus));
+    }
+
+    /// Ce `Mm` est-il partage avec un fils `vfork` encore en cours ?
+    #[inline]
+    pub fn est_emprunte(&self) -> bool {
+        self.emprunts.load(Ordering::SeqCst) != 0
     }
     /// `track_caller` : une attente longue nomme l'APPELANT, pas cette ligne
     /// (BOUCHAUD_SOUFFRANCE_SITE_DETENTEUR_V1 ; gel de main@eb6f115 : `processus.rs:24`).
@@ -94,10 +137,17 @@ pub struct Process {
     /// fork hérite l'identité, sans influencer le placement scheduler.
     pub resource_group_id: u32,
     pub resource_group_name: String,
-    pub mm: Arc<Mm>,
+    /// Le `Mm` COURANT (BOUCHAUD_MM_REMPLACABLE_V1) : `execve` peut le
+    /// remplacer, un fils vfork le partage.
+    pub mm: MmCourant,
+    /// L'emprunt du `Mm` du pere, tant que ce fils vfork n'a ni fait `execve`
+    /// ni fini (BOUCHAUD_VFORK_REEL_V1).
+    pub vfork: SpinLock<Option<Arc<LienVfork>>>,
     pub files: Arc<FileTable>,
     pub metadata: SpinLock<ProcessMetadata>,
     pub lifecycle: SpinLock<ProcessLifecycle>,
+    /// Publie apres le rendu du Mm, y compris apres une quarantaine.
+    pub espace_rendu: AtomicBool,
     pub signals: SpinLock<crate::kernel::signal::SignalState>,
     /// Temps CPU des fils de ce processus dont l'emplacement a ete recycle.
     pub temps_recycle: TempsRecycle,
@@ -225,6 +275,25 @@ pub struct CleanPageMapping {
 }
 
 impl MmState {
+    /// BOUCHAUD_SHM_PROJECTION_V1 : retire les projections natives que
+    /// `[addr, addr+len)` couvre ENTIEREMENT. Une projection seulement
+    /// entamee reste tenue jusqu'a la fin de l'espace : garder une region un
+    /// peu plus longtemps est sans danger, la rendre trop tot ne l'est pas.
+    /// L'appelant les detruit APRES l'invalidation TLB du retrait.
+    pub fn retire_regions_natives(&mut self, addr: u64, len: u64) -> Vec<RegionProjetee> {
+        let fin = addr.saturating_add(len);
+        let mut rendues = Vec::new();
+        self.regions_natives.retain(|r| {
+            if r.base >= addr && r.base.saturating_add(r.length) <= fin {
+                rendues.push(r.clone());
+                false
+            } else {
+                true
+            }
+        });
+        rendues
+    }
+
     pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
         let fin = addr.saturating_add(len);
         let mut keys = Vec::new();
@@ -352,8 +421,26 @@ impl Drop for Process {
     fn drop(&mut self) {
         PROCESSUS_DETRUITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         crate::kernel::security::policy::forget(self.pid);
+        // Filet BOUCHAUD_VFORK_REEL_V1 : un fils vfork detruit sans etre passe
+        // par la sortie de son dernier fil ne doit pas laisser son pere dormir.
+        self.libere_vfork(FinEmprunt::Sortie);
+        // Les references du cache partage appartiennent au `Mm`, qui les rend
+        // lui-meme a SA mort (BOUCHAUD_MM_REMPLACABLE_V1) : un `Mm` partage
+        // avec un fils vfork survit a celui des deux qui meurt le premier.
+    }
+}
+
+impl Drop for Mm {
+    /// Un espace qui disparait rend ses references sur le cache partage.
+    ///
+    /// C'est le filet : `munmap` couvre le cas ordinaire, celui-ci couvre la
+    /// mort brutale — un `SIGKILL`, une faute de page fatale, un `exit` sans
+    /// menage. Sans lui, tuer un renderer suffirait a faire fuir ses surfaces.
+    /// Il vivait dans `Drop for Process` ; il suit desormais l'espace, qui
+    /// peut survivre au processus (fils vfork) ou le preceder (`execve`).
+    fn drop(&mut self) {
         let (pml4, clean, shared) = {
-            let mut mm = self.mm.lock();
+            let mut mm = self.inner.lock();
             let pml4 = mm.space.pml4();
             let clean = core::mem::take(&mut mm.clean_pages);
             let shared = core::mem::take(&mut mm.partages);

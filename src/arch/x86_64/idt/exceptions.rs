@@ -566,13 +566,37 @@ extern "x86-interrupt" fn page_fault_handler(
     }
 
     crate::kernel::task::stall_site_set(21, addr);
+    // BOUCHAUD_COW_V1 : une ECRITURE sur une page presente en lecture seule
+    // est d'abord une copie-a-l'ecriture possible. Resolue, la faute est
+    // finie ; sinon elle suit son chemin habituel (et finit en SIGSEGV).
+    if from_user(&stack)
+        && crate::kernel::task::in_user_task()
+        && code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && crate::kernel::task::casse_cow_courant(addr) == crate::kernel::task::IssueCow::Resolue
+    {
+        crate::kernel::task::stall_pf_done(addr);
+        crate::kernel::task::retire_current_if_zombie();
+        crate::platform::pc::ecran_faute::sort_exception_resolue();
+        crate::kernel::task::account_fault_exit(mur_avant_faute);
+        return;
+    }
     if from_user(&stack) && crate::kernel::task::in_user_task() {
         let mut retries = 0u32;
         let outcome = loop {
-            let outcome = crate::kernel::task::peuple_a_la_demande(
-                addr,
-                code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
-            );
+            // BOUCHAUD_PAGE_ZERO_V1 : une faute de LECTURE (ni ecriture ni
+            // instruction) sur une page absente peut etre servie par la page
+            // zero partagee.
+            let lecture = !code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+                && !code.contains(PageFaultErrorCode::INSTRUCTION_FETCH);
+            let outcome = if lecture && !code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+                crate::kernel::task::peuple_en_lecture(addr)
+            } else {
+                crate::kernel::task::peuple_a_la_demande(
+                    addr,
+                    code.contains(PageFaultErrorCode::PROTECTION_VIOLATION),
+                )
+            };
             if outcome != crate::kernel::task::FaultOutcome::Retry {
                 break outcome;
             }

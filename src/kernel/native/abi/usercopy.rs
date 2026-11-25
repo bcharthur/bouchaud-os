@@ -22,16 +22,24 @@ fn resident_range(addr: u64, len: usize, write: bool) -> bool {
         let present = process.mm.lock().space.translate(page).is_some();
         drop(process);
 
-        if !present
-            && crate::kernel::task::peuple_a_la_demande(page, false)
-                != crate::kernel::task::FaultOutcome::Resolved
-        {
+        let peuplee = || if write {
+            crate::kernel::task::peuple_a_la_demande(page, false)
+        } else {
+            crate::kernel::task::peuple_en_lecture(page)
+        };
+        if !present && peuplee() != crate::kernel::task::FaultOutcome::Resolved {
             return false;
         }
 
         if write {
             let process = crate::kernel::task::current_process();
-            if !process.mm.lock().space.writable(page) {
+            let inscriptible = process.mm.lock().space.writable(page);
+            drop(process);
+            // BOUCHAUD_COW_V1 : casser la copie-a-l'ecriture avant d'ecrire.
+            if !inscriptible
+                && crate::kernel::task::casse_cow_courant(page)
+                    != crate::kernel::task::IssueCow::Resolue
+            {
                 return false;
             }
         }

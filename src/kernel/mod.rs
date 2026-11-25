@@ -22,6 +22,10 @@ pub mod prechauffage;
 pub mod frame_cache;
 #[path = "memory/pressure.rs"]
 pub mod memory_pressure;
+#[path = "memory/oom.rs"]
+pub mod oom;
+#[path = "memory/cow.rs"]
+pub mod cow;
 #[path = "debug/dmesg.rs"]
 pub mod dmesg;
 /// L'observatoire : UNE source de verite pour le demarrage, l'interface et la
@@ -137,6 +141,8 @@ pub mod reveil_precis;
 pub mod vma;
 #[path = "memory/frames_libres.rs"]
 pub mod frames_libres;
+#[path = "memory/projection.rs"]
+pub mod projection;
 #[path = "memory/virtual.rs"]
 pub mod vmm;
 

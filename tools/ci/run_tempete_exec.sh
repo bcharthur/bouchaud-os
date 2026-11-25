@@ -57,10 +57,15 @@ if [ "${#MONITEUR}" -ge 100 ]; then MONITEUR=$(mktemp -u /tmp/bo-tempete-XXXXXX.
 SILENCE_S=${SILENCE_S:-90}
 (cd tools/userland && OUT=out-tempete-exec ./build.sh musl >/dev/null)
 cp tools/userland/out-tempete-exec/tempete-exec-probe "$SCENARIO/bin/"
+masquage=""
+if [ "${BO_TEMPETE_MASQUE_IRQ:-0}" = 1 ]; then
+  masquage="serie-dormeur-masque 1000"
+fi
 cat > "$SCENARIO/autorun" <<EOF
 echo TEMPETE_RAM_DEBUT
 meminfo
 echo TEMPETE_BANC_DEBUT
+$masquage
 /bin/tempete-exec-probe 15 3 fork
 /bin/tempete-exec-probe 15 3 vide
 /bin/tempete-exec-probe ${COMPLET} 3 complet
@@ -139,6 +144,14 @@ echo "TEMPETE_EXEC_ETAT etat=${etat}"
 echecs=0
 echec() { echo "  ECHEC   $1"; echecs=$((echecs + 1)); }
 ok() { echo "  ok      $1"; }
+
+if [ "${BO_TEMPETE_MASQUE_IRQ:-0}" = 1 ]; then
+  if grep -aE 'SERIE_DORMEUR_ACK_CR3 coeur=[0-9]+ acquittements=[1-9][0-9]*' <<<"$texte"; then
+    ok "barriere CR3 acquittee par un coeur sous IF=0"
+  else
+    echec "aucun acquittement CR3 observe pendant le masquage"
+  fi
+fi
 
 case "$etat" in
   fini) ok "le banc est alle au bout" ;;

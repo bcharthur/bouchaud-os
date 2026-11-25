@@ -12,6 +12,10 @@
 | Les limites | [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) |
 | La dernière passation | [PASSATION_2026-11-17.md](PASSATION_2026-11-17.md), puis sa suite [PASSATION_2026-11-17_SUITE.md](PASSATION_2026-11-17_SUITE.md) |
 
+## Audit architectural du 25/11/2026
+
+Suivi des chantiers noyau appliqués (vfork réel et `Mm` remplaçable, mémoire rendue à la mort, OOM contrôlé, récolte des orphelins, `getppid`) et de ceux laissés, avec leur raison : [AUDIT_2026-11-25_SUIVI.md](AUDIT_2026-11-25_SUIVI.md). Preuves TCG locales uniquement.
+
 ## Chantiers ouverts, 17/11/2026, par priorité
 
 1. **Réactivité de l'Atelier sous WHPX.**
@@ -22,7 +26,7 @@
 2. **#283 — Ladybird figé au démarrage à froid.**
    - Les correctifs sont fusionnés (#330, #331, #328).
    - **Le ticket n'est pas clos.** Il faut d'abord une campagne Ladybird sur `main`, puis WHPX ou le matériel.
-3. **Performances de Ladybird, puis `CLONE_VFORK`.**
+3. **Performances de Ladybird, puis `CLONE_VFORK`** (le `CLONE_VFORK` réel et le `Mm` remplaçable sont faits le 25/11, voir le suivi de l'audit).
    - Chaque processus du navigateur coûte 11 à 18 ms de copie d'espace, plus 7 à 10 ms de libération ([PERF_LADYBIRD.md](PERF_LADYBIRD.md)).
    - Prérequis : un `Mm` remplaçable par processus (voir la passation).
 4. **P13 strict** : SMP8 et verdict final. Bloqué par les runners auto-hébergés non enregistrés (`p13-final-candidate.yml`).

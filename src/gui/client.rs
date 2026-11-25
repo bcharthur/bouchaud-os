@@ -61,6 +61,10 @@ pub struct Client {
     pub pid: u32,
     pub etat: Etat,
     pub titre: String,
+    /// Le programme lance, tel que le bureau l'a demande : c'est lui, pas le
+    /// titre (que le client choisit), qui designe l'icone d'une application
+    /// d'Atelier (BOUCHAUD_ICONE_PAR_IMAGE_V1).
+    pub image: String,
     pub surface: Surface,
     /// Les trois tailles de la surface : allouee, logique, peinte.
     ///
@@ -350,6 +354,7 @@ impl Client {
             // l'application lancee. Un client n'est pas « Ladybird » par
             // defaut : DOOM affichait l'ecran d'attente du navigateur.
             titre: titre.to_string(),
+            image: chemin.to_string(),
             surface,
             geometrie,
             vers_client,

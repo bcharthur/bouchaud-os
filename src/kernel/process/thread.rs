@@ -79,6 +79,9 @@ pub fn demande_dump_ordonnancement_latence() {
 include!("thread/modeles.rs");
 include!("thread/faute_memoire.rs");
 include!("thread/processus.rs");
+include!("thread/mm_courant.rs");
+include!("thread/oom_noyau.rs");
+include!("thread/cow_faute.rs");
 include!("thread/registre.rs");
 include!("thread/tache.rs");
 include!("thread/etat_global.rs");

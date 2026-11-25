@@ -94,6 +94,7 @@ pub mod framebuffer;
 
 pub mod mouse;
 pub mod polices;
+pub mod atlas_police;
 pub mod politique;
 
 #[path = "reveil_v9.rs"]

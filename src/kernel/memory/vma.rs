@@ -44,6 +44,13 @@ pub enum Backing {
         mapping_start: u64,
         phys_offset: u64,
     },
+    /// BOUCHAUD_SHM_PROJECTION_V1 : une `SharedRegion` de l'ABI native,
+    /// physiquement contigue, projetee sans copie. La region est tenue vivante
+    /// par `MmState::regions_natives` tant qu'une projection existe.
+    RegionNative {
+        phys_base: u64,
+        mapping_start: u64,
+    },
 }
 
 impl Backing {
@@ -55,6 +62,7 @@ impl Backing {
             #[cfg(feature = "banc-gpu-venus")]
             Backing::GemGpu { .. } => "gem-gpu",
             Backing::Framebuffer { .. } => "framebuffer",
+            Backing::RegionNative { .. } => "region-native",
         }
     }
 }

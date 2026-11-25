@@ -46,6 +46,10 @@ pub fn new_process(name: &str, cwd: usize) -> Option<Arc<Process>> {
 pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
     -> Option<Arc<Process>>
 {
+    // Reserver le Mm vide avant toute pression memoire : le premier mort
+    // peut deja etre une victime OOM alors qu'il ne reste aucune frame.
+    #[cfg(not(feature = "banc-sans-espace-rendu"))]
+    drop(mm_des_morts()?);
     let space = AddressSpace::new()?;
     let pid = crate::kernel::process::spawn(name, uid.min(u16::MAX as u32) as u16);
     let process = Arc::new(Process {
@@ -53,13 +57,15 @@ pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
         parent,
         resource_group_id: pid,
         resource_group_name: name.to_string(),
-        mm: Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
+        mm: MmCourant::new(Arc::new(Mm::new(MmState { space, regions_natives: Vec::new(), brk_start: 0, brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
-            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() })),
+            limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() }))),
+        vfork: SpinLock::new(None),
         files: Arc::new(FileTable::new(FdTable::new())),
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid,
             gid, ecran: None }),
+        espace_rendu: core::sync::atomic::AtomicBool::new(false),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
         temps_recycle: TempsRecycle::neuf(),
