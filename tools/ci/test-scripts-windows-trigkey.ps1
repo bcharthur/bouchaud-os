@@ -92,7 +92,7 @@ function Verifie([string]$Nom, [bool]$Condition, [string]$Detail = '') {
 }
 # L'analyseur PowerShell sur les scripts touches : une erreur de syntaxe dans
 # run.ps1 ne se verrait sinon que sur Windows.
-foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1', 'tools/windows/Verifier-Ladybird.ps1', 'tools/windows/Banc-Bureau-Entrees.ps1', 'tools/windows/Banc-Candidat.ps1')) {
+foreach ($f in @('run.ps1', 'tools/windows/BouchaudQemu.psm1', 'tools/windows/Mesure-Acceleration.ps1', 'tools/windows/Verifier-Ladybird.ps1', 'tools/windows/Banc-Bureau-Entrees.ps1', 'tools/windows/Banc-Candidat.ps1', 'tools/windows/Banc-AvantApres.ps1')) {
     $jetons = $null; $erreursAnalyse = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $racine $f), [ref]$jetons, [ref]$erreursAnalyse)
     Verifie "analyse $f" ($erreursAnalyse.Count -eq 0) (($erreursAnalyse | ForEach-Object { $_.Message }) -join ' ; ')
@@ -234,6 +234,46 @@ $jl = Join-Path $t 'banc-serie.log'
     'CPU=1% RAM=2 DISK=x GPU=bga:f1,p2us,uN/A') -join "`n"))
 $m = & $banc -AnalyserJournal $jl | ConvertFrom-Json
 Verifie 'banc candidat : mesures du dernier releve' ($m.invite_noyau_bureau_ms -eq 4473 -and $m.dessin_us_p99 -eq 300 -and $m.presentation_us_p95 -eq 20 -and $m.fps_bureau -eq 60 -and $m.px_client_copies_cpu -eq 777 -and $m.cpu_invite_pct -eq 42 -and $m.lb_copie_px -eq 55 -and $m.backend_gpu -eq 'bga') ($m | ConvertTo-Json -Compress)
+
+# BOUCHAUD_BANC_AVANT_APRES_V1 -- Banc-AvantApres.ps1 : les disques alternent
+# (meme noyau aux deux bras de chaque Banc-Candidat), et le rapport est juge
+# sur des passages synthetiques (intervalles disjoints seulement, passage
+# invalide ecarte, nombres ecrits sous une culture a virgule decimale).
+$ba = Join-Path $racine 'tools/windows/Banc-AvantApres.ps1'
+$sortie = & $ba -Mode disques -Noyau "$t/m.bin" -DisqueAvant "$t/sep.img" -DisqueApres "$t/uni.img" -Paires 2 -Accel whpx -Smp 1 -DryRun -Sortie "$t/ba-plan" *>&1 | Out-String -Width 4096
+$ordreBa = @([regex]::Matches($sortie, 'PLAN_AVANT_APRES mode=disques n=\d+ bras=(\w+)') | ForEach-Object { $_.Groups[1].Value }) -join ','
+Verifie 'avant/apres : alternance des disques A B / B A' ($ordreBa -eq 'avant,apres,apres,avant') $ordreBa
+Verifie 'avant/apres : chaque passage passe par Banc-Candidat' (([regex]::Matches($sortie, 'PLAN paire 1 main')).Count -eq 4) $sortie
+$sortie = & $ba -Mode noyaux -Avant "$t/m.bin" -Apres "$t/c.bin" -Disque "$t/sep.img" -Paires 2 -DryRun -Sortie "$t/ba-plan2" *>&1 | Out-String -Width 4096
+Verifie 'avant/apres : mode noyaux, alternance M C / C M' ($sortie -match 'PLAN paire 1 main' -and $sortie -match 'PLAN paire 2 candidat') $sortie
+
+$ana = Join-Path $t 'ba-ana'
+function Nouveau-PassageBanc([string]$Bras, [int]$Paire, [string]$Journal) {
+    $d = Join-Path (Join-Path $ana 'noyaux') ('{0}-{1}' -f $Bras, $Paire)
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $d 'serie.log'), $Journal)
+}
+$jAvant = "HID_LATENCY_SPIKE delta_us=90000 cpu=0 runqueue=1 tache_noyau=0 phase=x`nHID_LATENCY_SPIKE delta_us=120000 cpu=0 runqueue=1 tache_noyau=0 phase=x`nSYSTEM_METRICS version=1 ram_used_bytes=314572800`n[BACKING-CACHE] reads=10 bytes=320864256 clean_hit=1`n"
+$jApres = "HID_LATENCY_SPIKE delta_us=15000 cpu=0 runqueue=1 tache_noyau=0 phase=x`nSYSTEM_METRICS version=1 ram_used_bytes=209715200`n[BACKING-CACHE] reads=5 bytes=160432128 clean_hit=1`n"
+foreach ($p in 1, 2) { Nouveau-PassageBanc 'main' $p $jAvant; Nouveau-PassageBanc 'candidat' $p $jApres }
+@(
+    [pscustomobject]@{ bras = 'main'; paire = 1; valide = 'True'; causes = ''; accel_reel = 'WHPX'; hote_premiere_page_ms = '9000'; hote_ouverture_ladybird_ms = '5000'; hote_qemu_bureau_ms = '3000'; fps_bureau = '30'; presentation_us_p99 = '800'; cpu_invite_pct = '90'; hote_ram_qemu_pic_mio = '700,5' },
+    [pscustomobject]@{ bras = 'candidat'; paire = 1; valide = 'True'; causes = ''; accel_reel = 'WHPX'; hote_premiere_page_ms = '7000'; hote_ouverture_ladybird_ms = '4000'; hote_qemu_bureau_ms = '3000'; fps_bureau = '30'; presentation_us_p99 = '700'; cpu_invite_pct = '80'; hote_ram_qemu_pic_mio = '650.25' },
+    [pscustomobject]@{ bras = 'candidat'; paire = 2; valide = 'True'; causes = ''; accel_reel = 'WHPX'; hote_premiere_page_ms = '7400'; hote_ouverture_ladybird_ms = '4100'; hote_qemu_bureau_ms = '3100'; fps_bureau = '30'; presentation_us_p99 = '750'; cpu_invite_pct = '81'; hote_ram_qemu_pic_mio = '640' },
+    [pscustomobject]@{ bras = 'main'; paire = 2; valide = 'True'; causes = ''; accel_reel = 'WHPX'; hote_premiere_page_ms = '9500'; hote_ouverture_ladybird_ms = '5100'; hote_qemu_bureau_ms = '3050'; fps_bureau = '30'; presentation_us_p99 = '900'; cpu_invite_pct = '91'; hote_ram_qemu_pic_mio = '710' },
+    [pscustomobject]@{ bras = 'candidat'; paire = 3; valide = 'False'; causes = 'page-non-chargee'; accel_reel = 'TCG'; hote_premiere_page_ms = '100'; hote_ouverture_ladybird_ms = ''; hote_qemu_bureau_ms = ''; fps_bureau = ''; presentation_us_p99 = ''; cpu_invite_pct = ''; hote_ram_qemu_pic_mio = '' }
+) | Export-Csv -LiteralPath (Join-Path (Join-Path $ana 'noyaux') 'banc.csv') -NoTypeInformation -Encoding UTF8
+$null = & $ba -AnalyserSortie $ana *>&1
+$rapportBa = Get-Content -LiteralPath (Join-Path $ana 'rapport.json') -Raw | ConvertFrom-Json
+function Get-VerdictBa([string]$Mesure) { return @($rapportBa.verdicts | Where-Object { $_.mesure -eq $Mesure })[0] }
+Verifie 'avant/apres : page plus rapide APRES (intervalles disjoints)' ((Get-VerdictBa 'page_ms').verdict -eq 'APRES_MEILLEUR') ((Get-VerdictBa 'page_ms') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : passage invalide ecarte (n = 2 par bras)' ((Get-VerdictBa 'page_ms').n_apres -eq 2 -and (Get-VerdictBa 'page_ms').n_avant -eq 2) ((Get-VerdictBa 'page_ms') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : FPS egaux = NON_CONCLUANT' ((Get-VerdictBa 'fps_bureau').verdict -eq 'NON_CONCLUANT') ((Get-VerdictBa 'fps_bureau') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : pics HID lus dans serie.log (pire 120 -> 15 ms, 2 -> 1)' ((Get-VerdictBa 'hid_pire_ms').avant_max -eq 120 -and (Get-VerdictBa 'hid_pire_ms').apres_max -eq 15 -and (Get-VerdictBa 'hid_pics').verdict -eq 'APRES_MEILLEUR') ((Get-VerdictBa 'hid_pire_ms') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : RAM invite et octets lus (306 -> 153 Mio)' ((Get-VerdictBa 'ram_invite_pic_mio').verdict -eq 'APRES_MEILLEUR' -and (Get-VerdictBa 'disque_lu_mio').avant_min -eq 306 -and (Get-VerdictBa 'disque_lu_mio').apres_min -eq 153) ((Get-VerdictBa 'disque_lu_mio') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : virgule decimale lue (700,5)' ((Get-VerdictBa 'ram_qemu_pic_mio').avant_min -eq 700.5 -and (Get-VerdictBa 'ram_qemu_pic_mio').verdict -eq 'APRES_MEILLEUR') ((Get-VerdictBa 'ram_qemu_pic_mio') | ConvertTo-Json -Compress)
+Verifie 'avant/apres : accelerateur des seuls passages valides' ($rapportBa.accel_reel_valides -eq 'WHPX') ([string]$rapportBa.accel_reel_valides)
+Verifie 'avant/apres : rapport.md ecrit' (Test-Path -LiteralPath (Join-Path $ana 'rapport.md')) ''
 
 Remove-Item -LiteralPath $t -Recurse -Force
 if ($echecs) { Write-Host "SCRIPTS_WINDOWS_TRIGKEY_ECHEC echecs=$echecs"; exit 1 }
