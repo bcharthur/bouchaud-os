@@ -72,6 +72,8 @@ on:
       - 'userland/libs/police/**'
       - 'tools/ci/banc_bureau_utilisable.py'
       - 'tools/ci/banc_calculatrice_bureau_noyau.py'
+      - 'tools/ci/banc_notes_bureau.py'
+      - 'userland/apps/notes/**'
       - 'src/gui/**'
       - '.github/workflows/native-ipc-runtime.yml'
   # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
@@ -147,6 +149,8 @@ on:
       - 'userland/libs/police/**'
       - 'tools/ci/banc_bureau_utilisable.py'
       - 'tools/ci/banc_calculatrice_bureau_noyau.py'
+      - 'tools/ci/banc_notes_bureau.py'
+      - 'userland/apps/notes/**'
       - 'src/gui/**'
       - '.github/workflows/native-ipc-runtime.yml'
   workflow_dispatch:
@@ -281,6 +285,15 @@ jobs:
           python3 tools/ci/banc_calculatrice_bureau_noyau.py \
             --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
             --sortie target/calculatrice-bureau-noyau
+
+      # BOUCHAUD_NOTES_RING3_V1 : Notes est l'application ring 3
+      # /bin/notes-gui, dessinee avec la police d'Atelier publiee par le noyau ;
+      # saisie, F2 (fsync), F3 (relecture) dans le vrai bureau.
+      - name: Bureau noyau -- Notes est l'application ring 3 (TCG)
+        run: |
+          python3 tools/ci/banc_notes_bureau.py \
+            --boot target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            --sortie target/notes-bureau
 
       # BOUCHAUD_NATIVE_SERVICES_V1 : service ring 3 supervise (spawn natif,
       # crash injecte, hang, budget, arret, fuite de handles) et refus des

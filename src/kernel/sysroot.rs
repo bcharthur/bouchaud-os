@@ -83,6 +83,16 @@ fn write_binary(parent: usize, name: &str, content: &[u8], mode: u16) {
     fs.nodes[node].mode = mode;
 }
 
+/// BOUCHAUD_ATLAS_POLICE_V1 : `mkdir_path` pour les autres sous-systemes.
+pub fn mkdir_public(path: &str) -> usize {
+    mkdir_path(path)
+}
+
+/// BOUCHAUD_ATLAS_POLICE_V1 : `write_binary` pour les autres sous-systemes.
+pub fn ecrit_binaire_public(parent: usize, name: &str, content: &[u8], mode: u16) {
+    write_binary(parent, name, content, mode)
+}
+
 /// Vue PCI du noeud de rendu utilisé par l'énumération de libdrm.
 #[cfg(feature = "banc-gpu-venus")]
 pub fn installe_drm_pci(dev: &crate::arch::x86_64::pci::PciDevice) {

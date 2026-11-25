@@ -1458,8 +1458,15 @@ fn boucle() {
         // BOUCHAUD_NOTES_OUVRIR_V1 : une application a demande d'ouvrir un
         // fichier dans Notes.
         if let Some(chemin) = apps::prends_demande_notes() {
-            let fenetre = window::fenetre_notes(home, &chemin, &mut spawn_n);
-            ouvre_fenetre(&mut wins, fenetre, &mut degats);
+            // BOUCHAUD_NOTES_RING3_V1 : Notes est une application ring 3 ; le
+            // fichier lui est confie par l'environnement. L'editeur noyau ne
+            // sert plus que de repli si le binaire manque a l'image.
+            let titre = alloc::format!("Notes \u{2014} {}", chemin.rsplit('/').next().unwrap_or(&chemin));
+            let env = [alloc::format!("BO_NOTES_FICHIER={}", chemin)];
+            if !lance_application_zone_env(&mut wins, home, &mut degats, CHEMIN_NOTES, &titre, ZONE_NOTES, &env) {
+                let fenetre = window::fenetre_notes(home, &chemin, &mut spawn_n);
+                ouvre_fenetre(&mut wins, fenetre, &mut degats);
+            }
             sale = true;
         }
 
@@ -2577,7 +2584,21 @@ fn lance_calculatrice(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
     lance_application_zone(wins, cwd, degats, CHEMIN_CALCULATRICE, "Calculatrice", (320, 420));
 }
 
+/// BOUCHAUD_NOTES_RING3_V1 : Bouchaud Notes n'edite, ne dessine ni n'ecrit
+/// plus le disque dans le noyau ; c'est l'application ring 3
+/// `/bin/notes-gui`, client du protocole GUI comme la Calculatrice. Son
+/// texte utilise la police d'Atelier publiee par le noyau
+/// (`gui::atlas_police`). `gui/apps/notes.rs` ne reste qu'en repli si le
+/// binaire est absent de l'image.
+pub(crate) const CHEMIN_NOTES: &str = "/bin/notes-gui";
+const ZONE_NOTES: (i32, i32) = (660, 470);
+
 fn ouvre_app_integree(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, kind: usize, spawn_n: &mut i32) {
+    if kind == window::KIND_NOTES
+        && lance_application_zone(wins, cwd, degats, CHEMIN_NOTES, "Bouchaud Notes", ZONE_NOTES)
+    {
+        return;
+    }
     if kind == window::KIND_MONITEUR
         && crate::shell::exported().iter().any(|e| e == "BO_MONITEUR_RING3=1")
         && lance_application_zone(wins, cwd, degats, "/bin/moniteur-gui", "Moniteur", (420, 180))
@@ -2597,10 +2618,18 @@ fn lance_application(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemi
 
 fn lance_application_zone(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str,
                           titre: &str, zone: (i32, i32)) -> bool {
+    lance_application_zone_env(wins, cwd, degats, chemin, titre, zone, &[])
+}
+
+fn lance_application_zone_env(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, chemin: &str,
+                              titre: &str, zone: (i32, i32), env: &[String]) -> bool {
+    // BOUCHAUD_ATLAS_POLICE_V1 : la police d'Atelier, publiee une fois, avant
+    // la premiere application ring 3 qui pourrait la projeter.
+    crate::gui::atlas_police::installe();
     let (largeur, hauteur) = zone;
     let (w, h) = window::fenetre_pour_zone(largeur, hauteur);
-    let client = match Client::lance(chemin, titre, cwd,
-        (largeur as usize, hauteur as usize), window::zone_maximale()) {
+    let client = match Client::lance_avec(chemin, titre, cwd,
+        (largeur as usize, hauteur as usize), window::zone_maximale(), env) {
         Ok(client) => client,
         Err(error) => {
             crate::serial_println!("BOUCHAUD_APP_LAUNCH_ERROR chemin={} {}", chemin, error);
