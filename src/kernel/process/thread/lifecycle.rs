@@ -96,6 +96,11 @@ threads_before={} threads_after=0 reason=dernier_thread",
     // mesuree, et sur le banc l'echantillonneur ne tourne qu'une fois, avant
     // les lancements. Les deux cas ne se recouvrent pas.
     if dernier_thread {
+        // BOUCHAUD_VFORK_REEL_V1 : un fils vfork mort sans `execve` rend la
+        // memoire a son pere, qui reprend. Le pere ne peut pas le recolter
+        // tant qu'il attend : sans cette liberation, ils s'attendraient l'un
+        // l'autre (le filet de `Drop for Process` ne tire qu'apres `wait4`).
+        current().process.libere_vfork(FinEmprunt::Sortie);
         // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : les descripteurs se ferment
         // A LA MORT, avant que le parent ne l'apprenne -- comme `exit_files`
         // precede `exit_notify` sous Linux. Ils ne se fermaient qu'au
@@ -1158,6 +1163,8 @@ pub fn tue_processus(pid: u32, code: i32) {
                 "PROCESS_EXIT t={} pid={} ppid={} code={} reason=force",
                 crate::kernel::timer::monotonic_ms(), pid, process.parent, code,
             ));
+            // BOUCHAUD_VFORK_REEL_V1 : meme regle qu'une sortie volontaire.
+            process.libere_vfork(FinEmprunt::Sortie);
             // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : meme regle qu'une sortie
             // volontaire -- fermer avant de prevenir le parent.
             ferme_descripteurs(&process);

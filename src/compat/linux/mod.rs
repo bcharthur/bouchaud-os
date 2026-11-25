@@ -654,7 +654,10 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             Some(identite) => identite.process.pid as i64,
             None => task::current_process().pid as i64,
         },
-        GETPPID => 1,
+        // BOUCHAUD_GETPPID_V1 : rendait 1 pour TOUS les processus. Un pere
+        // vivant est rendu ; un pere mort ou deja recolte rend 1, comme apres
+        // le rattachement d'un orphelin a init sous Linux.
+        GETPPID => task::ppid_visible(task::current_process().parent) as i64,
         GETTID => match task::identite_courante() {
             Some(identite) => identite.tid as i64,
             None => task::current().tid as i64,
@@ -680,9 +683,13 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
         RSEQ => -errno::ENOSYS,
         CLONE => proc_clone(args, frame),
         CLONE3 => proc_clone3(args, frame),
-        // `vfork` partage l'espace d'adressage du parent jusqu'a l'`execve` ;
-        // le dupliquer est plus couteux mais toujours correct.
-        FORK | VFORK => proc::sys_fork(frame),
+        FORK => proc::sys_fork(frame),
+        // BOUCHAUD_VFORK_REEL_V1 : le fils partage la memoire ET la pile du
+        // pere, suspendu jusqu'a l'`execve` ou la sortie du fils.
+        VFORK => proc::sys_vfork(frame, proc::DemandeClone {
+            flags: proc::CLONE_VM | proc::CLONE_VFORK,
+            ..Default::default()
+        }),
         EXECVE => proc::sys_execve(args[0], args[1], args[2]),
         EXIT => task::exit_current(args[0] as i32),
         EXIT_GROUP => task::exit_group(args[0] as i32),
@@ -1324,9 +1331,9 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
     let child_tid = args[3];
     let tls = args[4];
 
-    if flags & (CLONE_VM | CLONE_THREAD) != (CLONE_VM | CLONE_THREAD) {
-        // Sans `CLONE_VM` ni `CLONE_THREAD`, ce n'est pas un fil : c'est un
-        // **fork**, et `proc::sys_fork` sait le faire depuis longtemps.
+    if flags & CLONE_THREAD == 0 {
+        // Sans `CLONE_THREAD`, ce n'est pas un fil : c'est un nouveau
+        // processus.
         //
         // Cette branche rendait `ENOSYS`, et c'est ce qui a empeche le
         // navigateur de creer son processus de rendu sous Bouchaud OS.
@@ -1337,27 +1344,31 @@ fn proc_clone(args: [u64; 6], frame: &TrapFrame) -> i64 {
         // un programme reel — tandis que celui que les programmes emettent
         // vraiment repondait « non implemente ».
         //
-        // C'est le genre de trou qu'aucune epreuve sur Linux ne peut voir : la
-        // separation navigateur/renderer passe ses 1630 verifications sur une
-        // machine ou `fork` existe, et n'avait jamais tourne ici.
-        let resultat = proc::sys_fork(frame);
+        // BOUCHAUD_VFORK_REEL_V1 : `CLONE_VM|CLONE_VFORK` -- ce qu'emet
+        // `posix_spawn` de la glibc et de musl -- partage le `Mm` du pere au
+        // lieu de le recopier. `CLONE_VM` SANS `CLONE_VFORK` (deux processus
+        // qui partagent durablement leur memoire) reste un `fork` : rien ne
+        // l'emet dans le systeme, et le partager sans suspension exigerait
+        // que chaque appel `mm` sache qu'un autre processus y ecrit.
+        let demande = proc::DemandeClone {
+            flags,
+            pile: child_stack,
+            child_tid,
+            tls,
+        };
+        let resultat = if flags & (proc::CLONE_VM | proc::CLONE_VFORK) == (proc::CLONE_VM | proc::CLONE_VFORK) {
+            proc::sys_vfork(frame, demande)
+        } else {
+            proc::sys_fork_demande(frame, demande)
+        };
         if resultat > 0 {
             // `CLONE_PARENT_SETTID` : le pere veut connaitre l'identifiant de
             // son fils a cet emplacement, en plus de la valeur de retour.
             if flags & CLONE_PARENT_SETTID != 0 && parent_tid != 0 {
                 user_write_u32(parent_tid, resultat as u32);
             }
-            // `CLONE_CHILD_SETTID` n'est pas honore : il demande d'ecrire dans
-            // l'espace d'adressage **du fils**, auquel le pere n'a pas acces
-            // depuis ici. La consequence est bornee et connue : le fils garde
-            // dans son bloc de fil l'identifiant copie du pere, si bien qu'une
-            // libc qui le lit sans repasser par un appel systeme se croit son
-            // pere. `getpid`, `gettid` et l'envoi de signaux par le noyau ne
-            // s'en servent pas — ils passent par le noyau, qui a la bonne
-            // valeur. Ce qui s'en sert est `raise()` de la glibc, qui viserait
-            // alors le pere. A corriger le jour ou l'on saura ecrire dans
-            // l'espace d'un processus qu'on vient de creer.
-            let _ = child_tid;
+            // `CLONE_CHILD_SETTID` est honore dans l'espace DU FILS par
+            // `proc::construit_fils` (BOUCHAUD_CLONE_CHILD_SETTID_V1).
         }
         return resultat;
     }

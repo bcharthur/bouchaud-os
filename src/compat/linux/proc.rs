@@ -32,6 +32,25 @@ pub fn exec_quiesce_stats() -> (u64, u64) {
     )
 }
 
+/// Ce que `clone` demande au-dela de la creation du fils.
+///
+/// `fork` (57) et `vfork` (58) n'en portent aucune ; `clone` et `clone3` les
+/// transmettent telles quelles.
+#[derive(Clone, Copy, Default)]
+pub struct DemandeClone {
+    pub flags: u64,
+    /// Sommet de la pile du fils (0 : celle du pere, ce que fait `vfork`).
+    pub pile: u64,
+    pub child_tid: u64,
+    pub tls: u64,
+}
+
+pub const CLONE_VM: u64 = 0x100;
+pub const CLONE_VFORK: u64 = 0x4000;
+pub const CLONE_SETTLS: u64 = 0x80000;
+pub const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+pub const CLONE_CHILD_SETTID: u64 = 0x1000000;
+
 /// `fork` : duplique le processus courant.
 ///
 /// La copie de l'espace d'adressage est immediate (voir
@@ -40,6 +59,11 @@ pub fn exec_quiesce_stats() -> (u64, u64) {
 /// exactement ce que POSIX demande, et ce sur quoi repose le chainage
 /// `cmd1 | cmd2`.
 pub fn sys_fork(frame: &TrapFrame) -> i64 {
+    sys_fork_demande(frame, DemandeClone::default())
+}
+
+/// `fork` avec les options de `clone` (pile, TLS, `CHILD_SETTID`...).
+pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     let parent = task::current_process();
     // BOUCHAUD_P23_COUT_DU_FORK
     //
@@ -64,15 +88,6 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
             mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone())
     };
     let apres_espace_ns = crate::kernel::timer::monotonic_ns();
-    let files = parent.files.lock().clone();
-    let (cwd, uid, gid, name, ecran) = {
-        let metadata = parent.metadata.lock();
-        (metadata.cwd, metadata.uid, metadata.gid, metadata.name.clone(), metadata.ecran)
-    };
-    let signals = parent.signals.lock().clone();
-    let parent_pid = parent.pid;
-    let resource_group_id = parent.resource_group_id;
-    let resource_group_name = parent.resource_group_name.clone();
 
     // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
     // la semantique de `MAP_SHARED` a travers `fork`. Le fils tient donc
@@ -98,6 +113,88 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     // pas au meme endroit : il est donc borne a part.
     let apres_references_ns = crate::kernel::timer::monotonic_ns();
 
+    let mm = Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
+        partages, limite_as, promesses, clean_pages }));
+    let (pid, nom_journal) = construit_fils(&parent, mm, None, frame, &demande);
+
+    let fin_ns = crate::kernel::timer::monotonic_ns();
+    let kio_copies = compte.pages_copiees.saturating_mul(crate::kernel::vmm::PAGE_SIZE) / 1024;
+    FORK_TOTAL_NS.fetch_add(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    FORK_COPIE_NS.fetch_add(apres_espace_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    FORK_PAGES_COPIEES.fetch_add(compte.pages_copiees, Ordering::Relaxed);
+    FORK_APPELS.fetch_add(1, Ordering::Relaxed);
+    FORK_PIRE_NS.fetch_max(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_FORK t={} pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
+        fin_ns / 1_000_000,
+        parent.pid,
+        pid,
+        nom_journal,
+        fin_ns.saturating_sub(debut_ns) / 1_000,
+        apres_espace_ns.saturating_sub(debut_ns) / 1_000,
+        apres_references_ns.saturating_sub(apres_espace_ns) / 1_000,
+        fin_ns.saturating_sub(apres_references_ns) / 1_000,
+        compte.pages_copiees,
+        compte.pages_empruntees,
+        kio_copies,
+    ));
+
+    pid as i64
+}
+
+/// `vfork`, et `clone(CLONE_VM|CLONE_VFORK)` -- donc `posix_spawn`.
+///
+/// BOUCHAUD_VFORK_REEL_V1. Le fils partage le `Mm` du pere : AUCUNE page
+/// n'est recopiee, et l'`execve` qui suit n'a rien a rendre. Le fil appelant
+/// du pere est suspendu jusqu'a ce que le fils ait fait `execve` ou soit mort
+/// (`LienVfork`). Les autres fils du pere continuent, comme sous Linux.
+///
+/// Ce chemin remplace un `fork` a copie complete : 11 a 18 ms de recopie,
+/// puis 7 a 10 ms de liberation, par processus du navigateur.
+pub fn sys_vfork(frame: &TrapFrame, demande: DemandeClone) -> i64 {
+    let parent = task::current_process();
+    let debut_ns = crate::kernel::timer::monotonic_ns();
+    let mm = parent.mm.get();
+    let lien = task::LienVfork::nouveau(Arc::clone(&mm));
+    let (pid, nom_journal) = construit_fils(&parent, mm, Some(Arc::clone(&lien)), frame, &demande);
+    let cree_ns = crate::kernel::timer::monotonic_ns();
+    // Le pere ne repart qu'une fois l'emprunt fini : sa pile (vfork) ou celle
+    // qu'il a donnee au fils (posix_spawn) est encore en service.
+    lien.attend();
+    let fin_ns = crate::kernel::timer::monotonic_ns();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "PERF_VFORK t={} pere={} enfant={} image={} creation_us={} attente_fils_us={} pages_copiees=0",
+        fin_ns / 1_000_000,
+        parent.pid,
+        pid,
+        nom_journal,
+        cree_ns.saturating_sub(debut_ns) / 1_000,
+        fin_ns.saturating_sub(cree_ns) / 1_000,
+    ));
+    pid as i64
+}
+
+/// Construit et enregistre le processus fils sur `mm`. Rend (pid, nom).
+///
+/// Commun a `fork` (un `Mm` neuf, copie) et a `vfork` (le `Mm` du pere,
+/// partage, avec le lien qui suspend le pere).
+fn construit_fils(
+    parent: &Arc<Process>,
+    mm: Arc<Mm>,
+    vfork: Option<Arc<task::LienVfork>>,
+    frame: &TrapFrame,
+    demande: &DemandeClone,
+) -> (u32, String) {
+    let files = parent.files.lock().clone();
+    let (cwd, uid, gid, name, ecran) = {
+        let metadata = parent.metadata.lock();
+        (metadata.cwd, metadata.uid, metadata.gid, metadata.name.clone(), metadata.ecran)
+    };
+    let signals = parent.signals.lock().clone();
+    let parent_pid = parent.pid;
+    let resource_group_id = parent.resource_group_id;
+    let resource_group_name = parent.resource_group_name.clone();
+
     let pid = crate::kernel::process::spawn(&name, uid as u16);
     let nom_journal = name.clone();
     let mut child_signals = signals;
@@ -110,8 +207,8 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
         parent: parent_pid,
         resource_group_id,
         resource_group_name,
-        mm: Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
-            partages, limite_as, promesses, clean_pages })),
+        mm: task::MmCourant::new(mm),
+        vfork: SpinLock::new(vfork),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
@@ -125,7 +222,26 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     // c'est la seule chose qui distingue les deux retours de `fork`.
     let mut child_frame = *frame;
     child_frame.rax = 0;
-    let mut child_task = Task::new(child, child_frame);
+    // `clone` avec une pile : le fils y demarre (posix_spawn lui en donne une,
+    // puisqu'il partage la memoire du pere ; `vfork` garde celle du pere).
+    if demande.pile != 0 {
+        child_frame.rsp = demande.pile;
+    }
+    let mut child_task = Task::new(child.clone(), child_frame);
+    // BOUCHAUD_CLONE_CHILD_SETTID_V1 : l'identifiant du FIL fils s'ecrit DANS
+    // SON espace, avant qu'il ne tourne. `fork()` de la glibc demande
+    // `CLONE_CHILD_SETTID` sur `THREAD_SELF->tid` : sans cette ecriture, le
+    // fils gardait le tid copie du pere, et tout ce qui lit ce champ sans
+    // appel systeme -- `pthread_kill` depuis un autre fil, proprietaire d'un
+    // mutex robuste ou a controle d'erreur -- designait un fil du PERE. C'est
+    // le tid (`gettid`), pas le pid : ici les deux espaces sont distincts.
+    // Pour un fils vfork, son espace EST celui du pere : c'est aussi ce
+    // qu'ecrit Linux. Page absente : rien d'ecrit (le champ de la glibc vit
+    // dans une page que le pere a deja touchee, donc copiee).
+    if demande.flags & CLONE_CHILD_SETTID != 0 && demande.child_tid != 0 {
+        let tid = child_task.tid as u32;
+        child.mm.lock().space.write(demande.child_tid, &tid.to_le_bytes());
+    }
     // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le fils herite du masque du fil qui
     // appelle `fork` (posix_spawn de la glibc : tout bloque, le fils le
     // restaure avant `execve`).
@@ -133,32 +249,18 @@ pub fn sys_fork(frame: &TrapFrame) -> i64 {
     // La base FS doit suivre : c'est le TLS, et la premiere chose que fait la
     // libc dans l'enfant est de lire `%fs:0` pour retrouver sa structure de
     // thread. Une base nulle la ferait dereferencer l'adresse 0.
-    child_task.fs_base = usermode::fs_base();
+    child_task.fs_base = if demande.flags & CLONE_SETTLS != 0 {
+        demande.tls
+    } else {
+        usermode::fs_base()
+    };
+    // `pthread_join` et `fork` de la glibc : a la mort du fils, le noyau
+    // remet ce mot a zero et reveille ses attendants.
+    if demande.flags & CLONE_CHILD_CLEARTID != 0 {
+        child_task.clear_child_tid = demande.child_tid;
+    }
     task::register(child_task);
-
-    let fin_ns = crate::kernel::timer::monotonic_ns();
-    let kio_copies = compte.pages_copiees.saturating_mul(crate::kernel::vmm::PAGE_SIZE) / 1024;
-    FORK_TOTAL_NS.fetch_add(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
-    FORK_COPIE_NS.fetch_add(apres_espace_ns.saturating_sub(debut_ns), Ordering::Relaxed);
-    FORK_PAGES_COPIEES.fetch_add(compte.pages_copiees, Ordering::Relaxed);
-    FORK_APPELS.fetch_add(1, Ordering::Relaxed);
-    FORK_PIRE_NS.fetch_max(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
-    crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_FORK t={} pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
-        fin_ns / 1_000_000,
-        parent_pid,
-        pid,
-        nom_journal,
-        fin_ns.saturating_sub(debut_ns) / 1_000,
-        apres_espace_ns.saturating_sub(debut_ns) / 1_000,
-        apres_references_ns.saturating_sub(apres_espace_ns) / 1_000,
-        fin_ns.saturating_sub(apres_references_ns) / 1_000,
-        compte.pages_copiees,
-        compte.pages_empruntees,
-        kio_copies,
-    ));
-
-    pid as i64
+    (pid, nom_journal)
 }
 
 /// Ce que tous les `fork` de la machine ont coute, pour le releve periodique.
@@ -324,21 +426,29 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
     // BOUCHAUD_CYCLE_DE_VIE_V1 : les freres condamnes meurent d'eux-memes ;
     // l'image n'est remplacee qu'une fois le dernier mort.
     task::attend_extinction_freres();
-    // Stop every sibling on the old CR3 before replacement.
-    let old_identity = process.mm.lock().space.identity();
-    old_identity.begin_retire();
+    // BOUCHAUD_MM_REMPLACABLE_V1 : un `Mm` PARTAGE -- ce processus est un
+    // fils vfork, ou un fils vfork s'execute encore sur le `Mm` de ce pere --
+    // n'est ni retire ni remplace en place : l'autre processus s'en sert. On
+    // installe un `Mm` neuf, et l'ancien vit tant que l'autre le tient.
+    let mm_ancien = process.mm.get();
+    let partage = process.emprunte_mm() || mm_ancien.est_emprunte();
+    let old_identity = mm_ancien.lock().space.identity();
     let self_cpu = smp::cpu_index();
-    let active = old_identity.active_cpus() & !(1u64 << self_cpu);
-    for cpu in 0..smp::MAX_CPUS.min(64) {
-        if active & (1u64 << cpu) != 0 {
-            smp::reschedule_cpu(cpu);
+    if !partage {
+        // Stop every sibling on the old CR3 before replacement.
+        old_identity.begin_retire();
+        let active = old_identity.active_cpus() & !(1u64 << self_cpu);
+        for cpu in 0..smp::MAX_CPUS.min(64) {
+            if active & (1u64 << cpu) != 0 {
+                smp::reschedule_cpu(cpu);
+            }
         }
+        let wait_start = crate::kernel::timer::monotonic_ns();
+        old_identity.wait_remote_quiescent(self_cpu);
+        let waited = crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
+        EXEC_QUIESCE_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
+        EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
     }
-    let wait_start = crate::kernel::timer::monotonic_ns();
-    old_identity.wait_remote_quiescent(self_cpu);
-    let waited = crate::kernel::timer::monotonic_ns().saturating_sub(wait_start);
-    EXEC_QUIESCE_WAIT_NS.fetch_add(waited, Ordering::Relaxed);
-    EXEC_QUIESCE_MAX_NS.fetch_max(waited, Ordering::Relaxed);
     let apres_quiescence_ns = crate::kernel::timer::monotonic_ns();
 
     // BOUCHAUD_C8_SUPERVISION_SUR_EXECVE_V1
@@ -374,43 +484,74 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
         lifecycle.threads = 1;
         lifecycle.groupe_en_sortie = false;
     }
-    let (old, old_clean, old_shared) = {
-        let mut mm = process.mm.lock();
-        mm.brk_start = (image.end + 0x10_0000) & !0xFFF;
-        mm.brk = mm.brk_start;
-        mm.mmap_next = vmm::user_mmap_base();
-        // L'ancien espace disparait avec ses mappages : les references qu'il
-        // tenait sur le cache partage doivent partir avec lui.
-        let old_shared = core::mem::take(&mut mm.partages);
-        let old_clean = core::mem::take(&mut mm.clean_pages);
-        mm.promesses = new_promises;
-        // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
-        // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
-        // juste apres, avant de retourner en ring 3.
-        let old = core::mem::replace(&mut mm.space, space);
-        let new_identity = mm.space.identity();
-        drop(mm);
-        process.mm.replace_activation(new_identity);
-        process.mm.activate();
-        old_identity.mark_inactive(smp::cpu_index());
-        (old, old_clean, old_shared)
+    let brk_start = (image.end + 0x10_0000) & !0xFFF;
+    let (pages_rendues, apres_bascule_ns) = if partage {
+        // BOUCHAUD_VFORK_REEL_V1 : rien a rendre, rien a attendre. Le nouvel
+        // espace va dans un `Mm` neuf ; l'ancien reste celui du pere.
+        let limite_as = mm_ancien.lock().limite_as;
+        let neuf = Arc::new(Mm::new(MmState {
+            space,
+            brk_start,
+            brk: brk_start,
+            mmap_next: vmm::user_mmap_base(),
+            partages: Vec::new(),
+            limite_as,
+            promesses: new_promises,
+            clean_pages: Vec::new(),
+        }));
+        // Case, CR3 et marque d'activite basculent sans qu'une commutation
+        // puisse s'intercaler : une preemption entre `remplace` et `activate`
+        // marquerait inactif le NOUVEL espace et laisserait l'ancien marque
+        // actif sur ce coeur.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            drop(process.mm.remplace(Arc::clone(&neuf)));
+            neuf.activate();
+            old_identity.mark_inactive(self_cpu);
+        });
+        // Le pere peut repartir : le fils ne touche plus a sa memoire.
+        process.libere_vfork(task::FinEmprunt::Execve);
+        (0, crate::kernel::timer::monotonic_ns())
+    } else {
+        let (old, old_clean, old_shared) = {
+            let mut mm = process.mm.lock();
+            mm.brk_start = brk_start;
+            mm.brk = mm.brk_start;
+            mm.mmap_next = vmm::user_mmap_base();
+            // L'ancien espace disparait avec ses mappages : les references qu'il
+            // tenait sur le cache partage doivent partir avec lui.
+            let old_shared = core::mem::take(&mut mm.partages);
+            let old_clean = core::mem::take(&mut mm.clean_pages);
+            mm.promesses = new_promises;
+            // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
+            // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
+            // juste apres, avant de retourner en ring 3.
+            let old = core::mem::replace(&mut mm.space, space);
+            let new_identity = mm.space.identity();
+            drop(mm);
+            process.mm.replace_activation(new_identity);
+            process.mm.activate();
+            old_identity.mark_inactive(smp::cpu_index());
+            (old, old_clean, old_shared)
+        };
+        let apres_bascule_ns = crate::kernel::timer::monotonic_ns();
+        task::forget_fault_space(old.pml4());
+        for mapping in old_clean {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+        for mapping in old_shared {
+            crate::kernel::partage::demappe(mapping.node);
+        }
+        // LIBERER COUTE AUSSI CHER QUE COPIER, ET C'EST LE MEME `fork` QUI PAIE.
+        //
+        // `Drop` rend une a une toutes les frames que la duplication venait
+        // d'allouer. Un `fork` suivi d'un `execve` parcourt donc DEUX FOIS la
+        // taille residente du pere : une fois pour la recopier, une fois pour la
+        // rendre. Le second passage etait invisible.
+        let pages_rendues = old.mapped_pages() as u64;
+        drop(old);
+        (pages_rendues, apres_bascule_ns)
     };
-    let apres_bascule_ns = crate::kernel::timer::monotonic_ns();
-    task::forget_fault_space(old.pml4());
-    for mapping in old_clean {
-        crate::kernel::clean_page_cache::release(mapping.key);
-    }
-    for mapping in old_shared {
-        crate::kernel::partage::demappe(mapping.node);
-    }
-    // LIBERER COUTE AUSSI CHER QUE COPIER, ET C'EST LE MEME `fork` QUI PAIE.
-    //
-    // `Drop` rend une a une toutes les frames que la duplication venait
-    // d'allouer. Un `fork` suivi d'un `execve` parcourt donc DEUX FOIS la
-    // taille residente du pere : une fois pour la recopier, une fois pour la
-    // rendre. Le second passage etait invisible.
-    let pages_rendues = old.mapped_pages() as u64;
-    drop(old);
+    drop(mm_ancien);
     let fin_ns = crate::kernel::timer::monotonic_ns();
     crate::kernel::dmesg::log_fmt(format_args!(
         "PERF_EXECVE t={} image={} pid={} duree_us={} ouverture_us={} entetes_us={} projections_us={} pile_us={} quiescence_us={} bascule_us={} liberation_us={} pages_rendues={}",
