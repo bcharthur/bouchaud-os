@@ -851,6 +851,9 @@ pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
 }
 
 /// Envoie un signal a un processus (`kill`) ou a un thread (`tkill`).
+/// SIGKILL poses par condamnation immediate (BOUCHAUD_SIGKILL_CALCUL_PUR_V1).
+pub static SIGKILL_IMMEDIATS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn send_signal(pid: u32, signal: u32) -> i64 {
     if signal == 0 {
         // Signal 0 : simple test d'existence du processus.
@@ -864,6 +867,24 @@ pub fn send_signal(pid: u32, signal: u32) -> i64 {
         return -errno::EINVAL;
     }
     match task::process_by_pid(pid) {
+        // BOUCHAUD_SIGKILL_CALCUL_PUR_V1 -- SIGKILL n'attend pas un appel
+        // systeme. Un signal pose n'etait LIVRE qu'en fin d'appel systeme
+        // (`deliver_pending`) : un processus en calcul pur n'en fait aucun, et
+        // `kill -9` ne le tuait JAMAIS -- son pere restait bloque dans
+        // `waitpid` pour toujours (TCG SMP1 : deux boucles tuees, 0 mort en
+        // 150 s). SIGKILL n'est ni interceptable ni masquable : la mort est
+        // certaine, on la pose tout de suite par la CONDAMNATION de tous ses
+        // fils (`tue_processus`, le chemin de fermeture des clients du
+        // bureau) -- un fil parque meurt sur place, un fil qui calcule a sa
+        // prochaine frontiere d'IRQ en espace utilisateur (un tic). Vers
+        // soi-meme : la livraison en fin de CET appel suffit.
+        Some(process) if signal == signal::SIGKILL && pid != task::current_process().pid => {
+            if !process.lifecycle.lock().zombie {
+                SIGKILL_IMMEDIATS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                task::tue_processus(pid, 128 + signal::SIGKILL as i32);
+            }
+            0
+        }
         Some(process) => {
             process.signals.lock().raise(signal);
             // Un signal doit reveiller une tache endormie, sinon un `SIGTERM`
