@@ -1634,9 +1634,6 @@ impl AddressSpace {
         }));
     }
 
-    /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
-    /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
-    /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
     /// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 -- la frontiere a laquelle reprendre
     /// quand la table qui couvrirait `virt` est absente.
     ///
@@ -1658,6 +1655,9 @@ impl AddressSpace {
         None
     }
 
+    /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
+    /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
+    /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
     pub fn prepare_unmap(&mut self, virt: u64, len: u64) -> UnmapRetirement {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -2140,11 +2140,11 @@ impl Drop for AddressSpace {
     }
 }
 
-/// Invalide l'entree TLB d'une page.
 /// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 : etendue couverte par une table des pages
 /// (dernier niveau, 512 entrees de 4 Kio).
 const BLOC_TABLE: u64 = 512 * PAGE_SIZE;
 
+/// Invalide l'entree TLB d'une page.
 pub fn flush(virt: u64) {
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
