@@ -1476,12 +1476,48 @@ impl AddressSpace {
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
     /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
     /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
+    /// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 -- la frontiere a laquelle reprendre
+    /// quand la table qui couvrirait `virt` est absente.
+    ///
+    /// Meme condition que `entry_mut(virt, false)` rendant `None` (un niveau
+    /// non PRESENT) : l'entree de niveau `level` couvre 4 Kio << 9*level ;
+    /// aucune page de cette etendue ne peut etre projetee. `None` : la table
+    /// des pages (dernier niveau) existe, il faut lire l'entree.
+    fn saut_table_absente(&self, virt: u64) -> Option<u64> {
+        let mut table = table_at(self.pml4);
+        for level in (1..4).rev() {
+            let index = ((virt >> (12 + 9 * level)) & 0x1FF) as usize;
+            let entry = table[index];
+            if entry & PTE_PRESENT == 0 {
+                let etendue = 1u64 << (12 + 9 * level);
+                return Some((virt & !(etendue - 1)).saturating_add(etendue));
+            }
+            table = table_at(entry & ADDR_MASK);
+        }
+        None
+    }
+
     pub fn prepare_unmap(&mut self, virt: u64, len: u64) -> UnmapRetirement {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let mut page = start;
         let mut retired: Vec<u64> = Vec::new();
+        // Fin du bloc de 2 Mio dont la table des pages est connue presente :
+        // la verification n'est faite qu'une fois par bloc, pas par page.
+        let mut table_vue_jusqu_a = 0u64;
         while page < end {
+            // Une table absente ne porte aucune page : on saute toute son
+            // etendue au lieu de la parcourir page a page (une reduction de
+            // brk ou un munmap de reservation de plusieurs Gio sous le verrou
+            // mm, sans point de preemption : jusqu'a 175 ms de tenue du coeur
+            // devant le fil HID sur le banc SMP1).
+            if page >= table_vue_jusqu_a {
+                if let Some(suivante) = self.saut_table_absente(page) {
+                    page = suivante.max(page + PAGE_SIZE);
+                    continue;
+                }
+                table_vue_jusqu_a = (page & !(BLOC_TABLE - 1)).saturating_add(BLOC_TABLE);
+            }
             let removed = if let Some(entry) = self.entry_mut(page, false) {
                 let old = *entry;
                 if old & PTE_PRESENT != 0 {
@@ -1773,6 +1809,10 @@ impl Drop for AddressSpace {
 }
 
 /// Invalide l'entree TLB d'une page.
+/// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 : etendue couverte par une table des pages
+/// (dernier niveau, 512 entrees de 4 Kio).
+const BLOC_TABLE: u64 = 512 * PAGE_SIZE;
+
 pub fn flush(virt: u64) {
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
