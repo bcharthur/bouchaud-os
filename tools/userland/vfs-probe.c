@@ -19,6 +19,11 @@
  *               absent de readdir)
  *   liste_dev   readdir(/dev) contient null, readdir(/dev/input) event0
  *
+ * BOUCHAUD_JOURNAL_RING3_V1 (la trace du noyau exige DEBUG) :
+ *   trace_noyau root lit /proc/bouchaud/journal ; un fils devenu uid 1000
+ *               (profil User, sans DEBUG) recoit EACCES, mais lit toujours
+ *               /proc/bouchaud/memoire (le refus est cible)
+ *
  *     VFS_PROBE_OK              VFS_PROBE_FAIL raison=...
  */
 #define _GNU_SOURCE
@@ -118,6 +123,27 @@ static int dossiers_montes(void)
     return 0;
 }
 
+static int trace_noyau(void)
+{
+    if (lit("/proc/bouchaud/journal") <= 0) return echec("trace_root", errno);
+    pid_t fils = fork();
+    if (fils < 0) return echec("fork_trace", errno);
+    if (fils == 0) {
+        if (setuid(1000) != 0) _exit(10);
+        int fd = open("/proc/bouchaud/journal", O_RDONLY);
+        if (fd >= 0) _exit(11);
+        if (errno != EACCES) _exit(12);
+        if (lit("/proc/bouchaud/memoire") <= 0) _exit(13);
+        _exit(0);
+    }
+    int etat = 0;
+    if (waitpid(fils, &etat, 0) != fils) return echec("waitpid_trace", errno);
+    if (!WIFEXITED(etat) || WEXITSTATUS(etat) != 0)
+        return echec("trace_utilisateur", WIFEXITED(etat) ? WEXITSTATUS(etat) : -1);
+    printf("VFS_PROBE_ETAPE trace_noyau=ok\n");
+    return 0;
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -164,6 +190,7 @@ int main(void)
     if (open("/proc/nexiste-pas", O_RDONLY) >= 0 || errno != ENOENT) return echec("inconnu", errno);
     printf("VFS_PROBE_ETAPE inconnu=ok\n");
     if (dossiers_montes()) return 1;
+    if (trace_noyau()) return 1;
     printf("VFS_PROBE_OK\n");
     return 0;
 }
