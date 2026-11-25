@@ -25,4 +25,5 @@ pub mod persistance;
 pub mod ramfs;
 pub mod renommage;
 pub mod vfs_chemins;
+pub mod vfs;
 pub mod tar;
