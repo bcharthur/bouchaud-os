@@ -915,24 +915,6 @@ fn proc_meminfo() -> Vec<u8> {
     alloc::format!(
         "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n",
         total_kb, libre_kb, libre_kb
-        if path == "/proc/stat" {
-            return Some(Contenu(proc_stat_global()));
-        }
-        if path == "/proc/self/stat" {
-            let pid = crate::kernel::task::current_process().pid;
-            return proc_stat_processus(pid).map(Contenu);
-        }
-        // BOUCHAUD_ATTRIBUTION_REVEIL_V1 : le pire reveil de sommeil du FIL
-        // appelant depuis la lecture precedente, decompose, et le pire ecart
-        // entre deux tics du PIT. L'ouverture RELEVE et REMET A ZERO.
-        if path == "/proc/self/reveil" {
-            return Some(Contenu(proc_reveil()));
-        }
-        // BOUCHAUD_PREUVE_HOTE_V1 : les comptes CUMULES du fil, relus apres
-        // chaque reveil par la sonde (jamais remis a zero).
-        if path == "/proc/self/fil" {
-            return Some(Contenu(proc_fil()));
-        }
     ).into_bytes()
 }
 
