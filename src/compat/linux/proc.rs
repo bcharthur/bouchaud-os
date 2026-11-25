@@ -78,15 +78,22 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     // coute, et sur quelles pages.
     let debut_ns = crate::kernel::timer::monotonic_ns();
 
-    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages) = {
-        let mm = parent.mm.lock();
-        let (space, compte) = match mm.space.duplicate() {
+    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, invalidation) = {
+        let mut mm = parent.mm.lock();
+        let (space, compte, invalidation) = match mm.space.duplicate() {
             Some(resultat) => resultat,
             None => return -errno::ENOMEM,
         };
         (space, compte, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
-            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone())
+            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), invalidation)
     };
+    // BOUCHAUD_COW_V1 : les pages du pere viennent de passer en lecture seule.
+    // Un autre fil du pere peut encore en tenir une traduction inscriptible
+    // sur un autre coeur : elle doit disparaitre AVANT que le fils ne coure,
+    // sinon ses ecritures atterriraient dans une frame desormais partagee.
+    if let Some(invalidation) = invalidation {
+        invalidation.execute();
+    }
     let apres_espace_ns = crate::kernel::timer::monotonic_ns();
 
     // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
@@ -125,7 +132,7 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     FORK_APPELS.fetch_add(1, Ordering::Relaxed);
     FORK_PIRE_NS.fetch_max(fin_ns.saturating_sub(debut_ns), Ordering::Relaxed);
     crate::kernel::dmesg::log_fmt(format_args!(
-        "PERF_FORK t={} pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={}",
+        "PERF_FORK t={} pere={} enfant={} image={} duree_us={} copie_us={} references_us={} reste_us={} pages_copiees={} pages_empruntees={} kio_copies={} pages_partagees_cow={}",
         fin_ns / 1_000_000,
         parent.pid,
         pid,
@@ -137,6 +144,7 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
         compte.pages_copiees,
         compte.pages_empruntees,
         kio_copies,
+        compte.pages_partagees,
     ));
 
     pid as i64

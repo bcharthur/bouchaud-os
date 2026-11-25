@@ -30,6 +30,11 @@ fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
         // pthread_join s'appuie sur cette ecriture suivie d'un futex_wake.
         let clear = task.clear_child_tid;
         if clear != 0 {
+            // BOUCHAUD_COW_V1 : apres un `fork`, le mot du tid vit souvent
+            // dans une page partagee. La casser ICI, sans verrou, plutot que
+            // sous le verrou `Mm` dans `write` : des freres peuvent encore
+            // tourner, et l'invalidation les vise.
+            let _ = casse_cow_courant(clear);
             let process = task.process.clone();
             process.mm.lock().space.write(clear, &0u32.to_le_bytes());
             futex_wake(clear, 1);

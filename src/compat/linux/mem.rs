@@ -405,14 +405,43 @@ pub fn sys_mmap(
         _ => None,
     };
     let ecran = process_rc.metadata.lock().ecran;
+    // BOUCHAUD_MAP_SHARED_ANONYME_V1 : `MAP_SHARED|MAP_ANONYMOUS` retombait
+    // sur `Backing::Zero`, c'est-a-dire une memoire PRIVEE : apres `fork`, le
+    // fils et le pere ne se voyaient plus (cow-probe, epreuve `partage`, sur
+    // l'image d'avant : le fils ecrit 42, le pere lit 1). C'est un nœud
+    // anonyme -- un `memfd` sans descripteur -- projete en `SharedFile` : les
+    // deux processus designent les memes frames du cache partage, et le nœud
+    // disparait avec sa derniere projection (`partage::demappe`). Cree AVANT
+    // le verrou `Mm` : l'arborescence ne se prend pas sous lui.
+    let anonyme_partage = if flags & MAP_ANONYMOUS != 0 && map_type == MAP_SHARED {
+        let node = match crate::fs::ramfs::fs().cree_anonyme("anon-partage") {
+            Ok(node) => node,
+            Err(_) => return -errno::ENOMEM,
+        };
+        partage::mappe(node);
+        Some(node)
+    } else {
+        None
+    };
+    let rend_anonyme = |node: Option<usize>| {
+        if let Some(node) = node {
+            partage::demappe(node);
+        }
+    };
     let mut process = process_rc.mm.lock();
     let base = match choisit_base_mmap(&mut process, addr, length, flags) {
         Ok(base) => base,
-        Err(error) => return error,
+        Err(error) => {
+            drop(process);
+            rend_anonyme(anonyme_partage);
+            return error;
+        }
     };
     let fixed = flags & MAP_FIXED != 0;
 
     let Some(drapeaux) = prot_to_flags_verifie(prot) else {
+        drop(process);
+        rend_anonyme(anonyme_partage);
         return -errno::EACCES;
     };
 
@@ -497,7 +526,15 @@ pub fn sys_mmap(
     }
 
     let mut new_shared_node = None;
-    let backing = if flags & MAP_ANONYMOUS != 0 {
+    let backing = if let Some(node) = anonyme_partage {
+        new_shared_node = Some(node);
+        Backing::SharedFile {
+            node,
+            mapping_start: base,
+            file_offset: 0,
+            file_size: length,
+        }
+    } else if flags & MAP_ANONYMOUS != 0 {
         Backing::Zero
     } else {
         let node = match fd_kind {
@@ -531,6 +568,7 @@ pub fn sys_mmap(
     };
 
     if !fixed && !process.tient_sous_limite(length) {
+        drop(process);
         if let Backing::SharedFile { node, .. } = backing {
             partage::demappe(node);
         }

@@ -1,6 +1,6 @@
 // Bucket-local registry. No global task-table scan on lookup.
 
-fn wait_word_entry(key: u64) -> Arc<WaitWordEntry> {
+fn wait_word_entry(key: CleMot) -> Arc<WaitWordEntry> {
     let index = wait_word_bucket(key);
     let mut bucket = WAIT_WORD_TABLE[index].lock();
     if let Some(entry) = bucket.iter().find(|entry| entry.key == key) {
@@ -13,7 +13,7 @@ fn wait_word_entry(key: u64) -> Arc<WaitWordEntry> {
     entry
 }
 
-fn wait_word_existing(key: u64) -> Option<Arc<WaitWordEntry>> {
+fn wait_word_existing(key: CleMot) -> Option<Arc<WaitWordEntry>> {
     let index = wait_word_bucket(key);
     WAIT_WORD_TABLE[index]
         .lock()

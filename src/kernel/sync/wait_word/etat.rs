@@ -2,14 +2,27 @@
 
 const WAIT_WORD_BUCKETS: usize = 64;
 
+/// BOUCHAUD_COW_V1 -- l'identite d'un mot d'attente : `(espace, adresse)`.
+///
+/// * mot dans une frame PRIVEE (possedee par l'espace, partagee ou non en
+///   copie-a-l'ecriture) ou pas encore residente : `(PML4, adresse
+///   virtuelle)`. Deux processus issus d'un `fork` ont des PML4 distinctes :
+///   leurs futex prives ne se melangent plus, et une copie-a-l'ecriture qui
+///   change la frame du mot entre l'attente et le reveil ne change PAS la
+///   cle. Un fils vfork partage la PML4 du pere : meme cle, comme sous Linux.
+/// * mot dans une frame EMPRUNTEE (`MAP_SHARED`, cache de pages) :
+///   `(0, adresse physique)`, pour que deux processus qui partagent la page
+///   se reveillent mutuellement.
+type CleMot = (u64, u64);
+
 struct WaitWordEntry {
-    key: u64,
+    key: CleMot,
     wait: WaitSource,
     waiters: AtomicU64,
 }
 
 impl WaitWordEntry {
-    fn new(key: u64) -> Self {
+    fn new(key: CleMot) -> Self {
         Self { key, wait: WaitSource::new(), waiters: AtomicU64::new(0) }
     }
 }

@@ -376,11 +376,19 @@ fn fault_in_user_range(addr: u64, len: usize, write: bool) -> bool {
             }
             // La page vient d'etre peuplee : son droit d'ecriture se lit
             // maintenant, pas avant.
-            if write && !avec_processus(|process| process.mm.lock().space.writable(page)) {
+            if write && !avec_processus(|process| process.mm.lock().space.writable(page))
+                && task::casse_cow_courant(page) != task::IssueCow::Resolue
+            {
                 return false;
             }
         } else if write && !writable {
-            return false;
+            // BOUCHAUD_COW_V1 : une page partagee par `fork` est en lecture
+            // seule tant qu'on n'y ecrit pas. Le noyau qui ecrit pour le
+            // compte du processus casse la copie comme le ferait sa propre
+            // ecriture -- jamais dans la frame de l'autre proprietaire.
+            if task::casse_cow_courant(page) != task::IssueCow::Resolue {
+                return false;
+            }
         }
 
         if page == last_page {

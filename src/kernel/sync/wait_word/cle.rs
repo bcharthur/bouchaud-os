@@ -1,19 +1,19 @@
 // Stable word identity and copyin.
 
 #[inline]
-fn wait_word_key(uaddr: u64) -> Option<u64> {
+fn wait_word_key(uaddr: u64) -> Option<CleMot> {
     // BOUCHAUD_PROCESSUS_COURANT_SANS_ARC_V1 : un `futex` par appel, sans part
     // d'`Arc<Process>` ni verrou du bloc par-CPU.
-    let translated = crate::kernel::task::avec_processus_courant(|process| {
+    crate::kernel::task::avec_processus_courant(|process| {
         // Garder explicitement le SpinLockGuard dans un scope local (V13.1).
-        let translated = {
-            let mut mm = process.mm.lock();
-            mm.space.translate(uaddr)
-        };
-        translated
-    })?;
-
-    translated.or(Some(uaddr))
+        let mut mm = process.mm.lock();
+        match mm.space.translate(uaddr) {
+            // Frame empruntee : identite physique, partagee entre processus.
+            Some(phys) if !mm.space.owns_frame(phys) => (0, phys),
+            // Frame privee, ou pas encore residente : identite virtuelle.
+            _ => (mm.space.pml4(), uaddr),
+        }
+    })
 }
 
 #[inline]
@@ -27,7 +27,9 @@ fn wait_word_read(uaddr: u64) -> Option<u32> {
 }
 
 #[inline]
-fn wait_word_bucket(key: u64) -> usize {
-    let mixed = key ^ (key >> 17) ^ (key >> 33);
+fn wait_word_bucket(key: CleMot) -> usize {
+    let (espace, adresse) = key;
+    let melange = adresse ^ espace.rotate_left(29);
+    let mixed = melange ^ (melange >> 17) ^ (melange >> 33);
     (mixed as usize) & (WAIT_WORD_BUCKETS - 1)
 }

@@ -151,6 +151,86 @@ const PTE_RSS_KIND_MASK: u64 = 0b111 << PTE_RSS_KIND_SHIFT;
 
 /// Masque de l'adresse physique dans une entree (bits 12..51).
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+// BOUCHAUD_COW_V1 -- copie a l'ecriture.
+//
+// Bit 52, ignore par le MMU (bits 52..58 libres au logiciel tant que les cles
+// de protection ne sont pas activees). Pose sur une PTE dont la frame est
+// POSSEDEE et a ete partagee par `fork` : la PTE est alors en lecture seule,
+// et toute ecriture -- du ring 3 par faute, du noyau par `write` ou par la
+// verification de `fault_in_user_range` -- doit passer par
+// `AddressSpace::prepare_casse_cow` : copie si un autre espace possede encore
+// la frame, promotion sur place sinon. Le bit survit a `mprotect` : rendre une
+// telle plage inscriptible n'autorise PAS l'ecriture directe.
+pub const PTE_COW: u64 = 1 << 52;
+/// Avec `PTE_COW` : la page est INSCRIPTIBLE pour son espace (elle l'etait au
+/// `fork`, ou `mprotect` l'a rendue telle). Sans lui, une page COW est en
+/// lecture seule pour de bon : une ecriture du ring 3 y reste une faute.
+pub const PTE_COW_ECRITURE: u64 = 1 << 53;
+const PTE_COW_BITS: u64 = PTE_COW | PTE_COW_ECRITURE;
+
+/// La table des frames privees possedees par plusieurs espaces. Ordre des
+/// verrous : `Mm` -> `COW` -> allocateur de frames. Jamais l'inverse.
+static COW: crate::kernel::sync::SpinLock<crate::kernel::cow::TableCow> =
+    crate::kernel::sync::SpinLock::new(crate::kernel::cow::TableCow::neuve());
+static COW_COPIES: AtomicU64 = AtomicU64::new(0);
+static COW_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
+static COW_ECHECS_ALLOCATION: AtomicU64 = AtomicU64::new(0);
+
+/// Un espace cesse de posseder ces frames : rend celles que plus personne ne
+/// possede. Une seule prise de la table pour tout le lot.
+fn frames_a_liberer(frames: impl IntoIterator<Item = u64>) -> Vec<u64> {
+    let mut table = COW.lock();
+    if table.frames_partagees() == 0 {
+        drop(table);
+        return frames.into_iter().collect();
+    }
+    frames
+        .into_iter()
+        .filter(|&f| table.rend(f) == crate::kernel::cow::Rendu::Liberer)
+        .collect()
+}
+
+/// Un espace cesse de posseder `frame` (apres une copie a l'ecriture, APRES
+/// le shootdown qui a retire l'ancienne traduction de tous ses coeurs).
+pub fn rend_frame_possedee(frame: u64) {
+    let liberer = COW.lock().rend(frame) == crate::kernel::cow::Rendu::Liberer;
+    if liberer {
+        free_frame(frame);
+    }
+}
+
+/// (frames partagees maintenant, partages cumules, redevenues exclusives,
+/// copies a l'ecriture, promotions sans copie, echecs d'allocation)
+pub fn cow_stats() -> (usize, u64, u64, u64, u64, u64) {
+    let table = COW.lock();
+    let (partages, exclusives) = table.cumuls();
+    (
+        table.frames_partagees(),
+        partages,
+        exclusives,
+        COW_COPIES.load(Ordering::Relaxed),
+        COW_PROMOTIONS.load(Ordering::Relaxed),
+        COW_ECHECS_ALLOCATION.load(Ordering::Relaxed),
+    )
+}
+
+/// Issue de la casse d'une copie-a-l'ecriture sur une page.
+#[must_use]
+pub enum CasseCow {
+    /// La PTE n'est pas COW (absente, deja inscriptible, ou jamais partagee).
+    PasCow,
+    /// Seul proprietaire : la PTE est devenue inscriptible, sans copie.
+    Promue,
+    /// Copiee dans une frame neuve. L'appelant DOIT executer `invalidation`
+    /// (hors du verrou `Mm` si possible) PUIS `rend_frame_possedee(ancienne)`
+    /// -- dans cet ordre : tant qu'un coeur de cet espace peut encore lire
+    /// l'ancienne frame, l'autre proprietaire ne doit pas pouvoir la
+    /// promouvoir et y ecrire.
+    Copiee { invalidation: TlbInvalidation, ancienne: u64 },
+    /// Plus de frame : rien n'a change.
+    SansMemoire,
+}
 const FREE_LIST_END: u64 = u64::MAX;
 
 // --- Allocateur de frames physiques -----------------------------------------
@@ -1119,6 +1199,8 @@ pub struct DuplicationCompte {
     pub pages_vues: u64,
     pub pages_copiees: u64,
     pub pages_empruntees: u64,
+    /// Frames possedees partagees en copie-a-l'ecriture (BOUCHAUD_COW_V1).
+    pub pages_partagees: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1441,10 +1523,16 @@ impl AddressSpace {
             if let Some(entry) = self.entry_mut(page, false) {
                 if *entry & PTE_PRESENT != 0 {
                     // Les droits changent, pas l'origine comptable de la page.
-                    let masque = ADDR_MASK | PTE_RSS_KIND_MASK;
+                    let masque = ADDR_MASK | PTE_RSS_KIND_MASK | PTE_COW;
                     #[cfg(feature = "banc-gpu-venus")]
                     let masque = masque | PTE_NO_CACHE | PTE_WRITE_THROUGH;
-                    let new = (*entry & masque) | flags | PTE_PRESENT;
+                    let mut new = (*entry & masque) | (flags & !PTE_COW_BITS) | PTE_PRESENT;
+                    // BOUCHAUD_COW_V1 : une frame partagee reste en lecture
+                    // seule ; l'ecriture que `mprotect` autorise est notee
+                    // dans `PTE_COW_ECRITURE` et passera par la copie.
+                    if new & PTE_COW != 0 && new & PTE_WRITE != 0 {
+                        new = (new & !PTE_WRITE) | PTE_COW_ECRITURE;
+                    }
                     if *entry != new {
                         *entry = new;
                         flush(page);
@@ -1515,14 +1603,91 @@ impl AddressSpace {
 
     /// Rend les frames uniquement apres `UnmapRetirement::invalidation()`.
     pub fn finish_unmap(&mut self, retirement: UnmapRetirement) {
-        for phys in retirement.frames {
-            // `remove` rend `false` si la frame a deja ete retiree : c'est le
-            // cas quand la meme frame apparait deux fois dans `retirement`,
-            // et c'est ce qui interdit le double `free`.
-            if self.pages.remove(&phys) {
-                free_frame(phys);
-            }
+        // `remove` rend `false` si la frame a deja ete retiree : c'est le
+        // cas quand la meme frame apparait deux fois dans `retirement`,
+        // et c'est ce qui interdit le double `free`.
+        let rendues: Vec<u64> = retirement
+            .frames
+            .into_iter()
+            .filter(|phys| self.pages.remove(phys))
+            .collect();
+        // BOUCHAUD_COW_V1 : une frame encore possedee par un autre espace
+        // (partagee par `fork`) n'est pas rendue a l'allocateur.
+        for phys in frames_a_liberer(rendues) {
+            free_frame(phys);
         }
+    }
+
+    /// BOUCHAUD_COW_V1 -- rend `page` inscriptible pour CET espace si elle
+    /// est en copie-a-l'ecriture. Voir `CasseCow` pour ce que l'appelant doit
+    /// faire de l'issue. Ne verifie PAS le droit d'ecrire (la VMA) : c'est a
+    /// l'appelant de le faire.
+    ///
+    /// `pour_ecriture_utilisateur` : la casse est demandee pour une ecriture
+    /// soumise aux droits (faute du ring 3, `user_write`) ; une page COW sans
+    /// `PTE_COW_ECRITURE` rend alors `PasCow` -- l'ecriture reste interdite.
+    /// Les ecritures directes du noyau (`write`) cassent sans exiger le droit
+    /// et gardent la page en lecture seule.
+    pub fn prepare_casse_cow(&mut self, page: u64, pour_ecriture_utilisateur: bool) -> CasseCow {
+        let page = page & !(PAGE_SIZE - 1);
+        let entree = match self.entry_mut(page, false) {
+            Some(entree) => entree,
+            None => return CasseCow::PasCow,
+        };
+        let ancienne_pte = *entree;
+        if ancienne_pte & PTE_PRESENT == 0 || ancienne_pte & PTE_COW == 0 {
+            return CasseCow::PasCow;
+        }
+        let ancienne = ancienne_pte & ADDR_MASK;
+        if !self.pages.contains(&ancienne) {
+            // Une PTE COW sur une frame que l'espace ne possede pas viole
+            // l'invariant : refuser plutot que d'ecrire dans la frame d'un
+            // autre.
+            return CasseCow::PasCow;
+        }
+        let ecriture_permise = ancienne_pte & PTE_COW_ECRITURE != 0;
+        if pour_ecriture_utilisateur && !ecriture_permise {
+            return CasseCow::PasCow;
+        }
+        let drapeaux = (ancienne_pte & !ADDR_MASK & !PTE_COW_BITS)
+            | if ecriture_permise { PTE_WRITE } else { 0 };
+        if !COW.lock().est_partagee(ancienne) {
+            // Seul proprietaire : promotion sur place. Elargir un droit ne
+            // laisse aucune traduction dangereuse ailleurs (au pire une faute
+            // de plus, qui verra la page inscriptible).
+            *entree = ancienne | drapeaux;
+            flush(page);
+            COW_PROMOTIONS.fetch_add(1, Ordering::Relaxed);
+            return CasseCow::Promue;
+        }
+        let neuve = match alloc_frame_a_recouvrir() {
+            Some(f) => f,
+            None => {
+                COW_ECHECS_ALLOCATION.fetch_add(1, Ordering::Relaxed);
+                return CasseCow::SansMemoire;
+            }
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                memory::phys_to_virt(ancienne),
+                memory::phys_to_virt(neuve),
+                PAGE_SIZE as usize,
+            );
+        }
+        // Le contenu precede la PTE (P13_PAGE_REMPLIE_AVANT_PUBLICATION_V1).
+        core::sync::atomic::fence(Ordering::Release);
+        *entree = neuve | drapeaux;
+        flush(page);
+        self.pages.remove(&ancienne);
+        self.pages.insert(neuve);
+        COW_COPIES.fetch_add(1, Ordering::Relaxed);
+        CasseCow::Copiee { invalidation: self.invalidation(page, PAGE_SIZE), ancienne }
+    }
+
+    /// La PTE de `page` est-elle en copie-a-l'ecriture ?
+    pub fn est_cow(&mut self, page: u64) -> bool {
+        matches!(self.entry_mut(page & !(PAGE_SIZE - 1), false),
+            Some(e) if *e & (PTE_PRESENT | PTE_COW) == PTE_PRESENT | PTE_COW)
     }
 
     /// Traduit une adresse virtuelle utilisateur en adresse physique.
@@ -1637,59 +1802,79 @@ impl AddressSpace {
         self.map_accounted(virt, phys, flags, kind)
     }
 
-    /// Duplique le contenu utilisateur de `self` dans un espace neuf.
+    /// Duplique l'espace utilisateur de `self` pour `fork`.
     ///
-    /// Copie **immediate** de chaque page, sans copie-a-l'ecriture. C'est plus
-    /// couteux qu'un COW au moment du `fork`, mais cela evite d'avoir a
-    /// compter les references sur chaque frame et a traiter les fautes
-    /// d'ecriture : deux sources de corruption silencieuse difficiles a
-    /// diagnostiquer. Le cas d'usage courant (`fork` suivi d'un `execve`)
-    /// paie ici une copie que le COW aurait economisee ; c'est un compromis
-    /// assume, pas un oubli.
+    /// BOUCHAUD_COW_V1 : les frames POSSEDEES ne sont plus recopiees. Elles
+    /// sont partagees en copie-a-l'ecriture : la PTE du pere et celle du fils
+    /// pointent la meme frame, en lecture seule avec `PTE_COW`, et la table
+    /// compte les proprietaires. La premiere ecriture de l'un ou de l'autre
+    /// copie (ou promeut, s'il est devenu seul).
     ///
-    /// Les pages empruntees (framebuffer, cache partage) sont re-mappees sur
-    /// les memes frames plutot que dupliquees : c'est le comportement attendu
-    /// d'un `MAP_SHARED`.
-    pub fn duplicate(&self) -> Option<(AddressSpace, DuplicationCompte)> {
+    /// Les pages empruntees (framebuffer, cache partage, `MAP_SHARED`) sont
+    /// re-mappees sur les memes frames, inscriptibles comme avant : c'est la
+    /// semantique de `MAP_SHARED`.
+    ///
+    /// L'appelant DOIT executer l'invalidation rendue -- hors du verrou `Mm`
+    /// -- AVANT de laisser courir le fils : un autre fil du pere peut encore
+    /// tenir une traduction inscriptible d'une frame desormais partagee.
+    ///
+    /// Echec (tables du fils introuvables) : le fils est detruit, sa
+    /// destruction rend ses parts ; les PTE du pere restent en COW, ce qui
+    /// est sans danger (sa prochaine ecriture promeut, la frame etant
+    /// redevenue exclusive).
+    pub fn duplicate(&mut self) -> Option<(AddressSpace, DuplicationCompte, Option<TlbInvalidation>)> {
         let mut child = AddressSpace::new()?;
         #[cfg(feature = "banc-gpu-venus")]
         child.baux_gpu.clone_from(&self.baux_gpu);
         let mut compte = DuplicationCompte::default();
-        // Le parcours construit d'abord la liste complete des PTE utilisateur.
-        // Sur un espace de plusieurs centaines de mebioctets cette liste EST un
-        // cout, et elle est payee avant la premiere copie : la mesurer a part
-        // evite de l'imputer a la recopie.
         let pages = self.iter_user_pages();
         compte.pages_vues = pages.len() as u64;
+        let mut pere_modifie = false;
+        let mut partagees = BTreeSet::new();
+        // Une seule prise de la table pour tout le fork. Ordre respecte :
+        // `Mm` (tenu par l'appelant) -> `COW` -> allocateur (tables du fils).
+        let mut table = COW.lock();
         for (virt, entry) in pages {
             let phys = entry & ADDR_MASK;
-            let flags = entry & !ADDR_MASK;
             if self.owns_frame(phys) {
-                // Voir `alloc_frame_a_recouvrir` : la page est recouverte en
-                // ENTIER a la ligne suivante, donc la mettre a zero d'abord
-                // reviendrait a ecrire huit kibioctets pour en transmettre
-                // quatre. Le `copy_nonoverlapping` ci-dessous EST le contrat.
-                let frame = alloc_frame_a_recouvrir()?;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        memory::phys_to_virt(phys),
-                        memory::phys_to_virt(frame),
-                        PAGE_SIZE as usize,
-                    );
+                let partagee = if entry & PTE_COW != 0 {
+                    entry // deja partagee (fils d'un fils) : droits inchanges
+                } else if entry & PTE_WRITE != 0 {
+                    (entry & !PTE_WRITE) | PTE_COW | PTE_COW_ECRITURE
+                } else {
+                    entry | PTE_COW
+                };
+                if partagee != entry {
+                    if let Some(e) = self.entry_mut(virt, false) {
+                        *e = partagee;
+                        flush(virt);
+                        pere_modifie = true;
+                    }
                 }
-                child.pages.insert(frame);
-                if !child.map(virt, frame, flags) {
+                // Une part par frame et par fork, meme si la frame est
+                // projetee a deux adresses de l'espace.
+                if partagees.insert(phys) {
+                    table.partage(phys);
+                    child.pages.insert(phys);
+                }
+                if !child.map(virt, phys, partagee & !ADDR_MASK) {
+                    // La destruction du fils rend ses parts : la table doit
+                    // etre libre AVANT.
+                    drop(table);
                     return None;
                 }
-                compte.pages_copiees += 1;
+                compte.pages_partagees += 1;
             } else {
-                if !child.map(virt, phys, flags) {
+                if !child.map(virt, phys, entry & !ADDR_MASK) {
+                    drop(table);
                     return None;
                 }
                 compte.pages_empruntees += 1;
             }
         }
-        Some((child, compte))
+        drop(table);
+        let invalidation = pere_modifie.then(|| self.invalidation(0, 0));
+        Some((child, compte, invalidation))
     }
 
     /// Copie `len` octets depuis la memoire utilisateur vers un tampon noyau.
@@ -1713,7 +1898,34 @@ impl AddressSpace {
     }
 
     /// Copie un tampon noyau vers la memoire utilisateur.
+    ///
+    /// BOUCHAUD_COW_V1 : le noyau ecrit par la vue physique, sans passer par
+    /// le droit d'ecriture de la PTE. Une page COW est donc d'abord cassee
+    /// pour CET espace -- sinon l'ecriture modifierait aussi la memoire de
+    /// l'autre proprietaire. Les chemins courants (`user_write`, usercopy
+    /// native) la cassent AVANT de prendre le verrou ; ici n'arrivent que les
+    /// ecritures directes, et le shootdown eventuel s'execute alors sous le
+    /// verrou `Mm` (les coeurs vises l'acquittent en IRQ).
     pub fn write(&mut self, virt: u64, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        let fin = match virt.checked_add(data.len() as u64) {
+            Some(fin) => fin,
+            None => return false,
+        };
+        let mut page = virt & !(PAGE_SIZE - 1);
+        while page < fin {
+            match self.prepare_casse_cow(page, false) {
+                CasseCow::Copiee { invalidation, ancienne } => {
+                    invalidation.execute();
+                    rend_frame_possedee(ancienne);
+                }
+                CasseCow::SansMemoire => return false,
+                CasseCow::PasCow | CasseCow::Promue => {}
+            }
+            page += PAGE_SIZE;
+        }
         let mut done = 0usize;
         while done < data.len() {
             let addr = virt + done as u64;
@@ -1766,7 +1978,9 @@ impl Drop for AddressSpace {
         // Voir `free_frames_lot` : un espace d'adressage de 256 Mio rend
         // soixante-cinq mille frames, et les rendre une par une prenait le
         // verrou de l'allocateur autant de fois.
-        free_frames_lot(self.pages.iter().copied());
+        // BOUCHAUD_COW_V1 : les frames partagees avec un autre espace lui
+        // restent.
+        free_frames_lot(frames_a_liberer(self.pages.iter().copied()));
         free_frames_lot(self.tables.iter().copied());
         free_frame(self.pml4);
     }

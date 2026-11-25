@@ -31,7 +31,13 @@ fn resident_range(addr: u64, len: usize, write: bool) -> bool {
 
         if write {
             let process = crate::kernel::task::current_process();
-            if !process.mm.lock().space.writable(page) {
+            let inscriptible = process.mm.lock().space.writable(page);
+            drop(process);
+            // BOUCHAUD_COW_V1 : casser la copie-a-l'ecriture avant d'ecrire.
+            if !inscriptible
+                && crate::kernel::task::casse_cow_courant(page)
+                    != crate::kernel::task::IssueCow::Resolue
+            {
                 return false;
             }
         }
