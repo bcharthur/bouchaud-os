@@ -26,6 +26,10 @@ struct NotificationRendu(Arc<Process>);
 impl Drop for NotificationRendu {
     fn drop(&mut self) {
         self.0.espace_rendu.store(true, Ordering::Release);
+        #[cfg(feature = "banc-oom-quarantaine")]
+        if OOM_VICTIME.lock().as_ref().is_some_and(|v| v.pid == self.0.pid) {
+            crate::serial_println!("BANC_OOM_ESPACE_RENDU pid={}", self.0.pid);
+        }
     }
 }
 

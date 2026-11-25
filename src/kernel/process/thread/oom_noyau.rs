@@ -49,6 +49,12 @@ pub(crate) fn sur_faute_sans_memoire(fautif: u32) -> bool {
     match oom::action(recuperees, victime, crate::kernel::timer::monotonic_ns()) {
         Action::Reessaie => true,
         Action::AttendsVictime => {
+            #[cfg(feature = "banc-oom-quarantaine")]
+            if crate::kernel::timer::monotonic_ns() < BANC_QUARANTAINE_JUSQU_A.load(Ordering::Acquire) {
+                if let Some(victime) = victime {
+                    crate::serial_println!("BANC_OOM_ATTEND_QUARANTAINE pid={}", victime.pid);
+                }
+            }
             OOM_ATTENTES.fetch_add(1, Ordering::Relaxed);
             sleep_ticks_noyau(OOM_PAS_ATTENTE_TICKS);
             true

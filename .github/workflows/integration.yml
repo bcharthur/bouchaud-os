@@ -413,6 +413,17 @@ jobs:
           done
       - name: Retrait de memoire et OOM, KVM SMP2
         run: BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-mort-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie oom" 2 1024
+      - name: Victime OOM en quarantaine, KVM SMP2
+        run: |
+          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+          cargo bootimage --features banc-oom-quarantaine
+          BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-quarantaine-kvm.log" tools/ci/run_memoire_mort.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin oom 2 1024
+          awk '
+            /BANC_OOM_QUARANTAINE pid=/ { victime = $NF }
+            /BANC_OOM_ATTEND_QUARANTAINE pid=/ && $NF == victime { attend = victime }
+            /BANC_OOM_ESPACE_RENDU pid=/ && $NF == attend { rendu = attend }
+            END { exit !(rendu != "") }
+          ' memoire-quarantaine-kvm.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -422,6 +433,7 @@ jobs:
             tempete-exec-smp1/serie.log*
             tempete-exec-kvm-smp*/serie.log*
             memoire-mort-kvm.log
+            memoire-quarantaine-kvm.log
           if-no-files-found: warn
 
   atelier-reactivite:

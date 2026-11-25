@@ -335,13 +335,17 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
     // d'immobiliser le coeur du mourant (et ce qui attend derriere lui).
     identity.begin_retire();
     let echeance = crate::kernel::timer::monotonic_ns().saturating_add(QUIESCENCE_MORT_NS);
+    #[cfg(feature = "banc-oom-quarantaine")]
+    let banc = OOM_VICTIME.lock().as_ref().is_some_and(|v| v.pid == process.pid);
+    #[cfg(not(feature = "banc-oom-quarantaine"))]
+    let banc = false;
     let mut relances = 0u32;
     loop {
         let restants = identity.active_cpus() & !(1u64 << cpu);
-        if restants == 0 {
+        if restants == 0 && !banc {
             break;
         }
-        if crate::kernel::timer::monotonic_ns() >= echeance {
+        if banc || crate::kernel::timer::monotonic_ns() >= echeance {
             // Un autre coeur tient encore l'ancien CR3. Rien n'est rendu : le
             // `Mm` part en QUARANTAINE, ou il ne sera detruit qu'une fois
             // plus aucun coeur actif dessus (`vide_quarantaine`). Avant, il
@@ -358,6 +362,14 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
                 drop(process.mm.remplace(mort));
             });
             drop(identity);
+            #[cfg(feature = "banc-oom-quarantaine")]
+            if banc {
+                // Le banc differe le drainage sans toucher au CR3 des autres coeurs.
+                BANC_QUARANTAINE_JUSQU_A.store(
+                    crate::kernel::timer::monotonic_ns() + 250_000_000, Ordering::Release,
+                );
+                crate::serial_println!("BANC_OOM_QUARANTAINE pid={}", process.pid);
+            }
             ancien.publie_rendu_a_la_destruction(process);
             QUARANTAINE.lock().push(ancien);
             return;
@@ -404,6 +416,9 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
 
 /// Espaces de morts dont un coeur tenait encore le CR3 a l'echeance.
 /// Retires (`begin_retire`) : plus personne ne peut les activer.
+#[cfg(feature = "banc-oom-quarantaine")]
+static BANC_QUARANTAINE_JUSQU_A: AtomicU64 = AtomicU64::new(0);
+
 static QUARANTAINE: SpinLock<Vec<Arc<Mm>>> = SpinLock::new(Vec::new());
 
 /// Detruit les espaces en quarantaine qu'aucun coeur ne tient plus. Hors du
@@ -411,6 +426,10 @@ static QUARANTAINE: SpinLock<Vec<Arc<Mm>>> = SpinLock::new(Vec::new());
 /// Rend les espaces de la quarantaine que plus aucun coeur n'execute ; rend
 /// le nombre de pages ainsi liberees.
 pub fn vide_quarantaine() -> usize {
+    #[cfg(feature = "banc-oom-quarantaine")]
+    if crate::kernel::timer::monotonic_ns() < BANC_QUARANTAINE_JUSQU_A.load(Ordering::Acquire) {
+        return 0;
+    }
     let liberables: Vec<Arc<Mm>> = {
         let mut q = QUARANTAINE.lock();
         if q.is_empty() {

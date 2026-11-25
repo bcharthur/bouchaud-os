@@ -50,6 +50,7 @@ banc-io = []
 # (l'espace d'un mort repart a sa recolte, comme avant) pour isoler sa part
 # dans un incident de tempete-exec.
 banc-sans-espace-rendu = []
+banc-oom-quarantaine = []
 # BOUCHAUD_SOUFFRANCE_PROPRIETAIRE_V1 (#283) -- TEMOIN DU NOYAU FIGE.
 # Un fil noyau prend un verrou et tourne sans le rendre ; le demarrage l'attend.
 # Sur deux coeurs, plus rien ne s'ordonnance : seule la ligne
