@@ -788,7 +788,17 @@ fn peuple_page_loader(
                 zero_flags,
                 crate::kernel::vmm::ResidentKind::Anonymous,
             ) {
-                return FaultOutcome::IoError;
+                // BOUCHAUD_OOM_CONTROLE_V1 : plus de frame. Le verrou du `Mm`
+                // est rendu AVANT toute decision : on ne tue personne en
+                // tenant un verrou du noyau. Reessayer si de la memoire
+                // revient ou si une victime meurt ; sinon le fautif meurt,
+                // comme avant.
+                drop(p);
+                return if sur_faute_sans_memoire(processus.pid) {
+                    FaultOutcome::Retry
+                } else {
+                    FaultOutcome::IoError
+                };
             }
             FAULTS_ZERO.fetch_add(1, Ordering::Relaxed);
             note.pose(crate::kernel::fautes::Categorie::Zero);

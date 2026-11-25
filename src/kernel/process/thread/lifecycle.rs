@@ -100,6 +100,9 @@ threads_before={} threads_after=0 reason=dernier_thread",
         // memoire a son pere, qui reprend. Le pere ne peut pas le recolter
         // tant qu'il attend : sans cette liberation, ils s'attendraient l'un
         // l'autre (le filet de `Drop for Process` ne tire qu'apres `wait4`).
+        // Lu AVANT la liberation : apres, rien ne distingue plus le `Mm` du
+        // pere de celui du fils (BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1).
+        let emprunteur = current().process.emprunte_mm();
         current().process.libere_vfork(FinEmprunt::Sortie);
         // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : les descripteurs se ferment
         // A LA MORT, avant que le parent ne l'apprenne -- comme `exit_files`
@@ -120,6 +123,11 @@ threads_before={} threads_after=0 reason=dernier_thread",
         let nom = process.metadata.lock().name.clone();
         crate::kernel::services::gardien::mort(
             process.pid, process.parent, &nom, code, false);
+        // BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1 : la memoire revient a la mort,
+        // pas a la recolte. APRES tout ce qui touche encore au processus,
+        // AVANT de prevenir le pere : un `wait4` qui rend ce fils rend aussi
+        // une memoire deja libre.
+        rend_espace_a_la_mort(emprunteur);
     }
     if dernier_thread && releve_global {
         publie_cpu_cumul_sortie(pid_sortant);
@@ -148,6 +156,11 @@ total_us={} pire_us={} candidats_suffisants={}",
 
     // Previent le parent : SIGCHLD, et reveil s'il attendait dans `wait4`.
     notify_parent_of_exit();
+    // BOUCHAUD_ORPHELINS_RECOLTES_V1 : APRES la notification -- un pere vivant
+    // garde la main sur son fils ; seuls les orphelins sont recoltes ici.
+    if dernier_thread {
+        recolte_orphelins_a_la_mort();
+    }
 
     // Le programme de premier plan vient-il de se terminer ? Alors la session
     // est finie, et ce qu'il a laisse derriere lui n'a plus personne pour
@@ -1350,4 +1363,63 @@ replie_user_ms={} replie_noyau_ms={} vue_user_ms={} vue_noyau_ms={}",
         replie_user / 1_000_000, replie_noyau / 1_000_000,
         vue.user_ns / 1_000_000, vue.system_ns / 1_000_000,
     ));
+}
+
+// BOUCHAUD_ORPHELINS_RECOLTES_V1 -- PERSONNE NE RESTE ZOMBIE POUR TOUJOURS.
+//
+// Il n'y a pas d'`init` qui adopte les orphelins. Un fils dont le pere etait
+// mort restait donc zombie a jamais : `wait4` ne pouvait venir de personne, et
+// son `Process` -- avant BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1, toute sa memoire
+// -- restait dans le registre. C'est le cas ordinaire d'un navigateur qui
+// tombe : ses renderers meurent apres lui.
+//
+// Le noyau joue le role d'init, au seul moment ou il sait que plus personne
+// n'attendra :
+//
+//   1. un processus qui meurt recolte ses fils DEJA zombies ;
+//   2. un processus qui meurt alors que son pere est mort (ou zombie) se
+//      recolte lui-meme.
+//
+// Les deux regles couvrent les deux ordres de la course pere/fils : chacun
+// pose `zombie` sous son verrou AVANT de regarder l'autre. Si le fils voit son
+// pere vivant, le pere -- qui meurt apres -- le verra zombie (regle 1) ; s'il
+// le voit mort, il se recolte (regle 2). Les deux a la fois : `collect_child`
+// est idempotent. Le pid 0 (lance par le noyau) n'est jamais concerne : le
+// lancement synchrone lit le code de sa racine, et les travailleurs detaches
+// ont leur propre chemin (BOUCHAUD_HOTFIX13_ASYNC_KERNEL_REAP_V2).
+static ORPHELINS_RECOLTES: AtomicU64 = AtomicU64::new(0);
+
+fn pere_disparu(parent: u32) -> bool {
+    match process_by_pid(parent) {
+        Some(pere) => pere.lifecycle.lock().zombie,
+        None => true,
+    }
+}
+
+fn recolte_orphelins_a_la_mort() {
+    let (pid, parent) = {
+        let process = &current().process;
+        (process.pid, process.parent)
+    };
+    for (fils, _, _) in zombie_children(pid) {
+        if collect_child(fils) {
+            ORPHELINS_RECOLTES.fetch_add(1, Ordering::Relaxed);
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ORPHELIN_RECOLTE t={} pid={} pere_mort={} regle=fils_zombie",
+                crate::kernel::timer::monotonic_ms(), fils, pid,
+            ));
+        }
+    }
+    if parent != 0 && pere_disparu(parent) && collect_child(pid) {
+        ORPHELINS_RECOLTES.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::dmesg::log_fmt(format_args!(
+            "ORPHELIN_RECOLTE t={} pid={} pere_mort={} regle=pere_disparu",
+            crate::kernel::timer::monotonic_ms(), pid, parent,
+        ));
+    }
+}
+
+/// Orphelins recoltes par le noyau depuis le demarrage.
+pub fn orphelins_recoltes() -> u64 {
+    ORPHELINS_RECOLTES.load(Ordering::Relaxed)
 }

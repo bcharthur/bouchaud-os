@@ -238,3 +238,150 @@ pub fn ppid_visible(parent: u32) -> u32 {
         _ => 1,
     }
 }
+
+// BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1 -- LA MEMOIRE D'UN MORT REVIENT A SA MORT.
+//
+// Le defaut
+// =========
+// A la mort du dernier fil, les descripteurs et les handles natifs etaient
+// rendus (BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1, ..._HANDLES_...), mais PAS
+// l'espace d'adressage : il vivait dans le `Process`, donc jusqu'a ce que le
+// pere recolte le zombie par `wait4` -- et pour toujours si le pere ne le
+// faisait pas. Un renderer de 300 Mio tue gardait ses 300 Mio. Sous Linux,
+// `exit_mm` rend la memoire a la mort ; le zombie ne garde que son statut.
+//
+// Ce qui le rend possible : le `Mm` remplacable (BOUCHAUD_MM_REMPLACABLE_V1).
+// Le dernier fil, dans son propre contexte, quitte l'ancien CR3, attend
+// qu'aucun autre coeur ne le tienne encore (le meme protocole que `execve`),
+// pose dans la case le `Mm` des morts -- un espace vide, partage par tous les
+// zombies et jamais execute -- et rend l'ancien.
+//
+// Ce qui n'est PAS rendu ici :
+//   * le `Mm` d'un fils vfork mort sans `execve` : c'est celui du pere ;
+//   * un `Mm` qu'un fils vfork emprunte encore : le fils s'execute dessus ;
+//   * les processus tues de force par `tue_processus`, qui ne passent pas
+//     par la sortie de leur dernier fil : leur espace part a la recolte,
+//     comme avant.
+static MM_MORT: SpinLock<Option<Arc<Mm>>> = SpinLock::new(None);
+static ESPACES_RENDUS_A_LA_MORT: AtomicU64 = AtomicU64::new(0);
+static PAGES_RENDUES_A_LA_MORT: AtomicU64 = AtomicU64::new(0);
+static ESPACES_GARDES_A_LA_MORT: AtomicU64 = AtomicU64::new(0);
+/// Borne de l'attente des autres coeurs avant de rendre l'espace d'un mort.
+const QUIESCENCE_MORT_NS: u64 = 20_000_000;
+
+/// Le `Mm` des morts : un espace vide, cree une fois, jamais active par un
+/// fil utilisateur. `None` si meme sa table PML4 n'a pas pu etre allouee.
+fn mm_des_morts() -> Option<Arc<Mm>> {
+    let mut case = MM_MORT.lock();
+    if case.is_none() {
+        let space = AddressSpace::new()?;
+        *case = Some(Arc::new(Mm::new(MmState {
+            space,
+            brk_start: 0,
+            brk: 0,
+            mmap_next: crate::kernel::vmm::user_mmap_base(),
+            partages: Vec::new(),
+            limite_as: 0,
+            promesses: Vec::new(),
+            clean_pages: Vec::new(),
+        })));
+    }
+    case.clone()
+}
+
+/// Rend l'espace d'adressage du processus courant, dont le fil courant est
+/// le DERNIER et meurt. A appeler apres tout ce qui lit encore la memoire du
+/// mort (`clear_child_tid`), jamais pour un fils vfork qui n'a pas fait
+/// `execve` (`emprunteur`, lu AVANT `libere_vfork`).
+///
+/// Revient toujours, et ne laisse aucune reference vivante dans son cadre :
+/// `sortie_du_fil` ne revient pas, et ce qu'elle garderait serait perdu.
+pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
+    let tache = current();
+    if tache.noyau || emprunteur {
+        return;
+    }
+    let process = tache.process.clone();
+    let ancien = process.mm.get();
+    if ancien.est_emprunte() {
+        ESPACES_GARDES_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let mort = match mm_des_morts() {
+        Some(mm) => mm,
+        None => return,
+    };
+    if Arc::ptr_eq(&ancien, &mort) {
+        return;
+    }
+    let debut_ns = crate::kernel::timer::monotonic_ns();
+    let identity = ancien.lock().space.identity();
+    let cpu = smp::cpu_index();
+    // Le protocole de `execve` : plus personne ne pourra activer cet espace,
+    // et les coeurs qui le tiennent encore le lachent avant qu'on le rende.
+    //
+    // L'attente est BORNEE, contrairement a celle d'`execve` : rendre la
+    // memoire a la mort est une optimisation, pas une obligation. Un coeur
+    // qui ne lache pas l'ancien CR3 en `QUIESCENCE_MORT_NS` laisse l'espace
+    // au zombie -- il partira a la recolte, comme avant ce lot -- plutot que
+    // d'immobiliser le coeur du mourant (et ce qui attend derriere lui).
+    identity.begin_retire();
+    let echeance = crate::kernel::timer::monotonic_ns().saturating_add(QUIESCENCE_MORT_NS);
+    let mut relances = 0u32;
+    loop {
+        let restants = identity.active_cpus() & !(1u64 << cpu);
+        if restants == 0 {
+            break;
+        }
+        if crate::kernel::timer::monotonic_ns() >= echeance {
+            ESPACES_GARDES_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
+            crate::kernel::dmesg::log_fmt(format_args!(
+                "ESPACE_GARDE_A_LA_MORT t={} pid={} raison=quiescence coeurs={:#x}",
+                crate::kernel::timer::monotonic_ms(), process.pid, restants,
+            ));
+            return;
+        }
+        // Une relance par coeur toutes les ~4096 iterations : assez pour
+        // qu'un coeur au repos passe par l'ordonnanceur, sans inonder d'IPI.
+        if relances % 4096 == 0 {
+            for autre in 0..smp::MAX_CPUS.min(64) {
+                if restants & (1u64 << autre) != 0 {
+                    smp::reschedule_cpu(autre);
+                }
+            }
+        }
+        relances = relances.wrapping_add(1);
+        core::hint::spin_loop();
+    }
+    // Ce coeur quitte l'ancien CR3 AVANT que la case ne change : une
+    // commutation intercalee marquerait inactif le mauvais espace.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::kernel::vmm::activate_kernel();
+        identity.mark_inactive(cpu);
+        drop(process.mm.remplace(mort));
+    });
+    let pages = ancien.lock().space.mapped_pages() as u64;
+    drop(identity);
+    // Dernier detenteur (sauf lecteur passager) : `Drop for Mm` rend les
+    // references du cache, `Drop for AddressSpace` les frames.
+    drop(ancien);
+    ESPACES_RENDUS_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
+    PAGES_RENDUES_A_LA_MORT.fetch_add(pages, Ordering::Relaxed);
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "ESPACE_RENDU_A_LA_MORT t={} pid={} pages={} duree_us={}",
+        crate::kernel::timer::monotonic_ms(),
+        process.pid,
+        pages,
+        crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns) / 1_000,
+    ));
+    drop(process);
+}
+
+/// (espaces rendus a la mort, pages rendues, espaces gardes car empruntes)
+pub fn espaces_rendus_stats() -> (u64, u64, u64) {
+    (
+        ESPACES_RENDUS_A_LA_MORT.load(Ordering::Relaxed),
+        PAGES_RENDUES_A_LA_MORT.load(Ordering::Relaxed),
+        ESPACES_GARDES_A_LA_MORT.load(Ordering::Relaxed),
+    )
+}

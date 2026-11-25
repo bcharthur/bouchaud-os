@@ -80,6 +80,7 @@ include!("thread/modeles.rs");
 include!("thread/faute_memoire.rs");
 include!("thread/processus.rs");
 include!("thread/mm_courant.rs");
+include!("thread/oom_noyau.rs");
 include!("thread/registre.rs");
 include!("thread/tache.rs");
 include!("thread/etat_global.rs");

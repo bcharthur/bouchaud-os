@@ -22,6 +22,8 @@ pub mod prechauffage;
 pub mod frame_cache;
 #[path = "memory/pressure.rs"]
 pub mod memory_pressure;
+#[path = "memory/oom.rs"]
+pub mod oom;
 #[path = "debug/dmesg.rs"]
 pub mod dmesg;
 /// L'observatoire : UNE source de verite pour le demarrage, l'interface et la
