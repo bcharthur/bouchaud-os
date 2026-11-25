@@ -14,6 +14,29 @@ static OOM_VICTIME_TUEE_NS: AtomicU64 = AtomicU64::new(0);
 static OOM_VICTIMES: AtomicU64 = AtomicU64::new(0);
 static OOM_ABANDONS: AtomicU64 = AtomicU64::new(0);
 static OOM_ATTENTES: AtomicU64 = AtomicU64::new(0);
+/// BOUCHAUD_OOM_VICTIME_RENDUE_V1 : le dernier pid dont l'espace a ete rendu
+/// a la mort. Une victime devient zombie AVANT de rendre sa memoire (fermer
+/// ses descripteurs, ses handles, prevenir le gardien, puis
+/// `rend_espace_a_la_mort`) : la juger « morte » sur `zombie` faisait
+/// abandonner le fautif dans cette fenetre, sa memoire encore tenue
+/// (memoire-mort-probe oom sous charge : OOM_ABANDON 11 ms apres la
+/// victime, le pere tue par SIGSEGV).
+static OOM_ESPACE_RENDU_PID: AtomicU32 = AtomicU32::new(0);
+
+/// Appele par la sortie du dernier fil, une fois l'espace rendu (ou mis en
+/// quarantaine : `vide_quarantaine` le rendra des que les coeurs l'auront
+/// quitte).
+pub(crate) fn note_espace_rendu(pid: u32) {
+    OOM_ESPACE_RENDU_PID.store(pid, Ordering::Release);
+}
+
+/// La victime `pid` tient-elle encore sa memoire ? Oui tant qu'elle existe et
+/// que sa sortie ne l'a pas rendue. Un processus recolte n'existe plus : son
+/// `Mm` est parti avec lui.
+fn victime_tient_sa_memoire(pid: u32) -> bool {
+    OOM_ESPACE_RENDU_PID.load(Ordering::Acquire) != pid
+        && processes().iter().any(|p| p.pid == pid)
+}
 
 /// Pages que la reclamation tente de rendre avant de designer une victime.
 const OOM_RECLAMATION_PAGES: usize = 512;
@@ -28,13 +51,15 @@ pub(crate) fn sur_faute_sans_memoire(fautif: u32) -> bool {
     if condamnee_courante() || OOM_VICTIME_PID.load(Ordering::Acquire) == fautif {
         return false;
     }
-    let recuperees = crate::kernel::memory_pressure::reclaim_now(OOM_RECLAMATION_PAGES);
+    // Un espace en quarantaine dont les coeurs sont partis se rend ici.
+    let recuperees = crate::kernel::memory_pressure::reclaim_now(OOM_RECLAMATION_PAGES)
+        + vide_quarantaine();
     let victime = match OOM_VICTIME_PID.load(Ordering::Acquire) {
         0 => None,
         pid => Some(VictimeEnCours {
             pid,
             tuee_a_ns: OOM_VICTIME_TUEE_NS.load(Ordering::Acquire),
-            vivante: processus_actif(pid),
+            vivante: victime_tient_sa_memoire(pid),
         }),
     };
     match oom::action(recuperees, victime, crate::kernel::timer::monotonic_ns()) {

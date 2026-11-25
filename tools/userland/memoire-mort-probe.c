@@ -59,14 +59,20 @@ static void touche(unsigned char *p, size_t n)
 static int zombie(void)
 {
     const size_t taille = 48 * MIO;
-    int tube[2];
-    if (pipe(tube) != 0)
+    /* `tube` : le fils annonce qu'il tient sa memoire ; `feu` : le pere l'a
+     * mesuree, le fils peut mourir. Sans ce second tube, le fils sortait
+     * aussitot apres son annonce et le pere mesurait parfois un fils DEJA
+     * mort (memoire deja rendue : « vivant » valait le libre initial, et le
+     * banc concluait a tort que le zombie gardait sa memoire). */
+    int tube[2], feu[2];
+    if (pipe(tube) != 0 || pipe(feu) != 0)
         return echec("zombie", "pipe", 0);
     pid_t pid = fork();
     if (pid < 0)
         return echec("zombie", "fork", 0);
     if (pid == 0) {
         close(tube[0]);
+        close(feu[1]);
         unsigned char *p = malloc(taille);
         if (!p)
             _exit(2);
@@ -74,13 +80,19 @@ static int zombie(void)
         char c = 'p';
         if (write(tube[1], &c, 1) != 1)
             _exit(3);
+        if (read(feu[0], &c, 1) != 1)
+            _exit(4);
         _exit(0);
     }
     close(tube[1]);
+    close(feu[0]);
     char c;
     if (read(tube[0], &c, 1) != 1)
         return echec("zombie", "pret", 0);
     unsigned long vivant = libre_mio();
+    if (write(feu[1], &c, 1) != 1)
+        return echec("zombie", "feu", 0);
+    close(feu[1]);
     /* Fin de fichier : le fils est mort (ses descripteurs sont fermes a la
      * mort, avant toute recolte). */
     while (read(tube[0], &c, 1) > 0)

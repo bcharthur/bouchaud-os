@@ -299,7 +299,10 @@ pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
         return;
     }
     #[cfg(not(feature = "banc-sans-espace-rendu"))]
-    rend_espace_a_la_mort_effectif(emprunteur)
+    {
+        rend_espace_a_la_mort_effectif(emprunteur);
+        note_espace_rendu(current().process.pid);
+    }
 }
 
 #[cfg(not(feature = "banc-sans-espace-rendu"))]
