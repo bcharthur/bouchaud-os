@@ -168,7 +168,16 @@ pub fn handle(frame: &mut TrapFrame) {
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let (number, args) = frame.syscall_args();
     SYSCALL_HITS[(number as usize).min(SYSCALL_HITS_LEN - 1)].fetch_add(1, Ordering::Relaxed);
+    // BOUCHAUD_COUT_APPELS_V1 : duree TSC, hors appels commutes (voir profil).
+    let tache = task::current();
+    let commutations = tache.context_switches.charge();
+    let debut = crate::arch::x86_64::cpu::rdtsc();
     let result = dispatch(number, args, frame);
+    profil::note_duree(
+        number,
+        crate::arch::x86_64::cpu::rdtsc().wrapping_sub(debut),
+        tache.context_switches.charge() != commutations,
+    );
     // UNE BOUCLE D'ATTENTE ACTIVE SE RECONNAIT A SA REPONSE, PAS A SON APPEL.
     //
     // `lire` emis un million de fois ne dit pas s'il y a du travail. `lire`

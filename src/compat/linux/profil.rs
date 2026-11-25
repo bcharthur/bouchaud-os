@@ -143,3 +143,88 @@ pub fn plus_chauds(sortie: &mut [Chaud], lire_hits: impl Fn(usize) -> u32) -> (u
     }
     (poses, total)
 }
+
+// ─── BOUCHAUD_COUT_APPELS_V1 ────────────────────────────────────────────────
+//
+// Le classement par FREQUENCE ne dit pas ce qu'un appel COUTE : un million de
+// `getpid` a 100 cycles pese moins que mille `munmap` a 2 ms. Chaque appel est
+// mesure au TSC, du dispatch au retour. Un appel pendant lequel la tache a ete
+// commutee (`context_switches` a bouge : elle a dormi, ou a ete preemptee)
+// n'est pas additionne -- sa duree serait celle du sommeil, pas du travail --,
+// il est compte a part comme BLOQUE. Ce qui reste est le CPU noyau consomme par
+// l'appel lui-meme (interruptions comprises), hors cout de la transition
+// `syscall`/`sysret`, que mesure la sonde `appels-probe`.
+
+static CYCLES: [AtomicU64; NUMEROS] = [const { AtomicU64::new(0) }; NUMEROS];
+static PURS: [AtomicU32; NUMEROS] = [const { AtomicU32::new(0) }; NUMEROS];
+static BLOQUES: [AtomicU32; NUMEROS] = [const { AtomicU32::new(0) }; NUMEROS];
+static PIRE: [AtomicU64; NUMEROS] = [const { AtomicU64::new(0) }; NUMEROS];
+
+/// Note la duree d'un appel (`cycles` TSC) ; `bloque` : la tache a ete
+/// commutee pendant l'appel.
+#[inline]
+pub fn note_duree(numero: u64, cycles: u64, bloque: bool) {
+    let i = (numero as usize).min(NUMEROS - 1);
+    if bloque {
+        BLOQUES[i].fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    PURS[i].fetch_add(1, Ordering::Relaxed);
+    CYCLES[i].fetch_add(cycles, Ordering::Relaxed);
+    if cycles > PIRE[i].load(Ordering::Relaxed) {
+        PIRE[i].fetch_max(cycles, Ordering::Relaxed);
+    }
+}
+
+/// Une ligne du releve de cout : cumuls depuis le demarrage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cout {
+    pub numero: usize,
+    pub purs: u32,
+    pub cycles: u64,
+    pub pire: u64,
+    pub bloques: u32,
+}
+
+/// Les `sortie.len()` appels au plus fort CPU noyau cumule (cycles purs),
+/// decroissant. Rend le nombre de places occupees.
+pub fn plus_couteux(sortie: &mut [Cout]) -> usize {
+    let mut poses = 0usize;
+    for numero in 0..NUMEROS {
+        let c = Cout {
+            numero,
+            purs: PURS[numero].load(Ordering::Relaxed),
+            cycles: CYCLES[numero].load(Ordering::Relaxed),
+            pire: PIRE[numero].load(Ordering::Relaxed),
+            bloques: BLOQUES[numero].load(Ordering::Relaxed),
+        };
+        if c.purs == 0 && c.bloques == 0 {
+            continue;
+        }
+        poses = insere_cout(sortie, poses, c);
+    }
+    poses
+}
+
+/// Insertion dans un classement borne par cycles decroissants. Pur.
+pub fn insere_cout(sortie: &mut [Cout], poses: usize, c: Cout) -> usize {
+    let n = sortie.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut i = poses.min(n);
+    if i == n {
+        if sortie[n - 1].cycles >= c.cycles {
+            return poses;
+        }
+        i = n - 1;
+    }
+    while i > 0 && sortie[i - 1].cycles < c.cycles {
+        if i < n {
+            sortie[i] = sortie[i - 1];
+        }
+        i -= 1;
+    }
+    sortie[i] = c;
+    (poses + 1).min(n)
+}
