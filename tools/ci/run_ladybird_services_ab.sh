@@ -22,7 +22,7 @@ for ((t = 1; t <= paires; t++)); do
         code=$?
         duree=$(( $(date +%s) - debut ))
         rm -f -- "$d/amorce.bin" "ladybird-browser-host${suf}.img"
-        for j in serie-browser-host${suf}.log fixture-browser-host${suf}.log surface-browser-host${suf}.ppm convergence-browser-host${suf}.json; do
+        for j in serie-browser-host${suf}.log fixture-browser-host${suf}.log surface-browser-host${suf}.ppm surface-browser-host${suf}-t1.ppm surface-tentatives${suf}.txt convergence-browser-host${suf}.json; do
             [[ -f $j ]] && mv -- "$j" "$d/"
         done
         etat=echec; grep -qFx 'LADYBIRD_FUNCTIONAL_SMOKE ok' "$d/smoke.log" && etat=ok
