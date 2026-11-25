@@ -7,7 +7,9 @@
 #
 # Deux passes : `controle` (chaque page demontee lue par un enfant, qui doit
 # fauter) puis `sans_fork` (memes demontages, aucun enfant) : le compte de
-# memoire libre de la seconde passe est celui du demontage seul.
+# memoire libre de la seconde passe est celui du demontage seul. Troisieme
+# passe, `adresse_neuve` (#377) : sans enfant, reservation a une adresse neuve
+# a chaque cycle -- les tables videes doivent etre rendues par le demontage.
 #
 # Code 0 si la sonde a conclu (MUNMAP_INV_OK) sans faute noyau.
 set -euo pipefail
@@ -25,7 +27,7 @@ fi
 mkdir -p "$T/scenario/bin"
 cp "$T/munmap-invariants" "$T/scenario/bin/munmap-invariants"
 cat > "$T/scenario/autorun" <<AUTORUN
-echo MUNMAP_INV_BEGIN && /bin/munmap-invariants $CYCLES ; /bin/munmap-invariants $CYCLES sans_fork ; echo MUNMAP_INV_FIN
+echo MUNMAP_INV_BEGIN && /bin/munmap-invariants $CYCLES ; /bin/munmap-invariants $CYCLES sans_fork ; /bin/munmap-invariants $CYCLES adresse_neuve ; echo MUNMAP_INV_FIN
 AUTORUN
 (cd tools/userland && IMAGE="$T/probe.img" ./mkdisk.sh "$T/scenario")
 set +e
@@ -53,4 +55,4 @@ if grep -aE 'FAULT_FATAL' "$T/serie.log" | grep -avF 'app=/bin/munmap-invariants
   exit 1
 fi
 echo "MUNMAP_INV_FAUTES_NOYAU $(grep -acF 'FAULT_FATAL' "$T/serie.log")"
-[ "$(grep -acF 'MUNMAP_INV_OK' "$T/emis.log")" -eq 2 ]
+[ "$(grep -acF 'MUNMAP_INV_OK' "$T/emis.log")" -eq 3 ]

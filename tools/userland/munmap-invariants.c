@@ -2,7 +2,12 @@
  * BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 -- INVARIANTS du demontage (munmap / brk)
  * apres le saut des tables de pages absentes.
  *
- *   munmap-invariants [cycles] [sans_fork]
+ *   munmap-invariants [cycles] [sans_fork | adresse_neuve]
+ *
+ * `adresse_neuve` (BOUCHAUD_TABLES_VIDES_RENDUES_V1, #377) : sans enfant, et
+ * la reservation tombe a une adresse NEUVE a chaque cycle -- le cas d'un tas
+ * ou d'un GC qui reserve et demonte. Les tables de pages videes doivent etre
+ * rendues par le demontage : memoire libre revenue a 64 pages pres.
  *
  * Chaque cycle, sur une reservation de 3 Gio + 5 pages (bornes non alignees) :
  *   - pages ecrites de part et d'autre de chaque frontiere de 2 Mio et de
@@ -41,6 +46,7 @@ static int echecs;
  * de memoire du demontage de celui des processus de controle. */
 static int sans_fork;
 static int meme_adresse = 1;
+static int adresse_neuve;
 
 /* 1 si la lecture de `p` faute. Le noyau tue le processus fautif (pas de
  * remise de SIGSEGV a un gestionnaire) : la lecture se fait dans un ENFANT.
@@ -122,13 +128,15 @@ static void cycle_mmap(int cycle)
      * tables videes qu'a la destruction de l'espace d'adressage. Le compte
      * de memoire juge alors les PAGES DE DONNEES rendues par le demontage. */
     static char *indication;
-    char *p = mmap(indication, taille, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    char *p = mmap(adresse_neuve ? 0 : indication, taille, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) {
         echec("mmap", 0);
         return;
     }
     if (indication && p != indication)
         meme_adresse = 0;
+    /* En `adresse_neuve`, `meme_adresse` doit tomber a 0 : sinon le cas des
+     * tables neuves n'est pas exerce (echec `adresse_reutilisee`). */
     indication = p;
     uint64_t lo = (uint64_t)p, hi = lo + taille;
     n_ecrites = 0;
@@ -252,7 +260,8 @@ static void cycle_brk(int cycle)
 int main(int argc, char **argv)
 {
     int cycles = argc > 1 ? atoi(argv[1]) : 10;
-    sans_fork = argc > 2 && strcmp(argv[2], "sans_fork") == 0;
+    sans_fork = argc > 2 && (strcmp(argv[2], "sans_fork") == 0 || strcmp(argv[2], "adresse_neuve") == 0);
+    adresse_neuve = argc > 2 && strcmp(argv[2], "adresse_neuve") == 0;
     setvbuf(stdout, 0, _IOLBF, 0);
 
     /* Un cycle d'amorce : les tables et caches internes atteignent leur regime. */
@@ -266,14 +275,19 @@ int main(int argc, char **argv)
     uint64_t apres = libre();
     long long delta_pages = ((long long)avant - (long long)apres) / (long long)PAGE;
     printf("MUNMAP_INV memoire cycles=%d libre_avant_kio=%llu libre_apres_kio=%llu pages_perdues=%lld fautes_attendues_vues=%d mode=%s meme_adresse=%d\n",
-        cycles, (unsigned long long)(avant >> 10), (unsigned long long)(apres >> 10), delta_pages, fautes, sans_fork ? "sans_fork" : "controle", meme_adresse);
+        cycles, (unsigned long long)(avant >> 10), (unsigned long long)(apres >> 10), delta_pages, fautes, adresse_neuve ? "adresse_neuve" : sans_fork ? "sans_fork" : "controle", meme_adresse);
     /* Tolerance : 64 pages (journal, caches du noyau) -- pas une fuite par cycle. */
     /* Le compte ne juge que le demontage SEUL (`sans_fork`) : en passe de
      * controle, chaque enfant laisse aussi sa trace dans le noyau. */
-    if (sans_fork && !meme_adresse)
+    if (adresse_neuve && meme_adresse)
+        echec("adresse_reutilisee", 0);
+    if (sans_fork && !adresse_neuve && !meme_adresse)
         echec("adresse_non_reutilisee", 0);
     if (sans_fork && delta_pages > 64)
         echec("cadres_perdus", (uint64_t)delta_pages);
+    /* Plus de memoire libre qu'au depart : des cadres rendus deux fois. */
+    if (sans_fork && delta_pages < -64)
+        echec("cadres_en_trop", (uint64_t)(-delta_pages));
     if (echecs) {
         printf("MUNMAP_INV_KO echecs=%d\n", echecs);
         return 1;

@@ -937,8 +937,11 @@ pub struct AddressSpace {
     // BOUCHAUD_SMP_NG2_ADDRESS_SPACE_ACTIVE_CPUS_V1
     /// CPU logiques dont le CR3 pointe actuellement sur cet espace.
     identity: Arc<AddressSpaceIdentity>,
-    /// Frames de tables intermediaires, liberees avec l'espace.
-    tables: Vec<u64>,
+    /// Frames de tables intermediaires. Rendues avec l'espace, ou par
+    /// `finish_unmap` quand un demontage les a videes et detachees
+    /// (BOUCHAUD_TABLES_VIDES_RENDUES_V1) : un ENSEMBLE, pour qu'une table ne
+    /// puisse etre rendue qu'une fois et que le retrait soit en O(log n).
+    tables: BTreeSet<u64>,
     // BOUCHAUD_P2_PAGES_POSSEDEES_SET_V1
     //
     // ENSEMBLE, ET NON LISTE.
@@ -1092,6 +1095,10 @@ impl TlbInvalidation {
 pub struct UnmapRetirement {
     invalidation: TlbInvalidation,
     frames: Vec<u64>,
+    /// Tables de pages videes et DETACHEES par `prepare_unmap` : plus aucune
+    /// entree ne les designe, mais un coeur peut encore les tenir dans ses
+    /// caches de structures de pagination jusqu'a l'invalidation.
+    tables: Vec<u64>,
     #[cfg(feature = "banc-gpu-venus")]
     _baux_gpu: Vec<Arc<crate::drivers::virtio_gpu::BailGem>>,
 }
@@ -1105,6 +1112,11 @@ impl UnmapRetirement {
     /// phase : une finition longue doit pouvoir dire COMBIEN de pages.
     pub fn frames_a_rendre(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Tables de pages que `finish_unmap` rendra (BOUCHAUD_TABLES_VIDES_RENDUES_V1).
+    pub fn tables_a_rendre(&self) -> usize {
+        self.tables.len()
     }
 }
 
@@ -1229,7 +1241,7 @@ impl AddressSpace {
                 quiescence_seq: AtomicU64::new(0),
                 quiescence_waiter: AtomicU64::new(u64::MAX),
             }),
-            tables: Vec::new(),
+            tables: BTreeSet::new(),
             pages: BTreeSet::new(),
             resident: ResidentStats::default(),
             #[cfg(feature = "banc-gpu-venus")]
@@ -1298,7 +1310,7 @@ impl AddressSpace {
                     return None;
                 }
                 let frame = alloc_frame()?;
-                self.tables.push(frame);
+                self.tables.insert(frame);
                 table[index] = frame | PTE_PRESENT | PTE_WRITE | PTE_USER;
                 frame
             };
@@ -1540,9 +1552,33 @@ impl AddressSpace {
             page += PAGE_SIZE;
         }
 
+        // BOUCHAUD_TABLES_VIDES_RENDUES_V1 -- les tables que ce demontage a
+        // laissees VIDES sont detachees maintenant (sous le verrou mm, comme
+        // les PTE) et rendues par `finish_unmap`, APRES l'invalidation.
+        //
+        // Avant : une table n'etait rendue qu'a la destruction de l'espace.
+        // Un processus qui reserve et demonte a des adresses neuves (tas, GC
+        // de Ladybird) accumulait des tables vides : 274 pages par cycle de
+        // la sonde munmap-invariants, rendues seulement a sa mort (#377).
+        //
+        // Invalidation : une table detachee peut rester dans les caches de
+        // structures de pagination d'un coeur. Quand au moins une table est
+        // detachee, l'invalidation devient COMPLETE -- rechargement de CR3 ici,
+        // `len = 0` pour les autres coeurs actifs (flush_local_range : CR3) --
+        // quelle que soit l'etendue que la table couvrait hors de la plage.
+        // Aucune dependance a la portee exacte d'INVLPG sur ces caches.
+        let mut tables = Vec::new();
+        self.detache_tables_vides(start, end, &mut tables);
+        let longueur = if tables.is_empty() {
+            end.saturating_sub(start)
+        } else {
+            flush_local_range(0, 0);
+            0
+        };
         UnmapRetirement {
-            invalidation: self.invalidation(start, end.saturating_sub(start)),
+            invalidation: self.invalidation(start, longueur),
             frames: retired,
+            tables,
             #[cfg(feature = "banc-gpu-venus")]
             _baux_gpu: self.baux_gpu.iter().filter(|bail| bail.debut < end && bail.fin > start)
                 .map(|bail| Arc::clone(&bail.bail)).collect(),
@@ -1557,6 +1593,75 @@ impl AddressSpace {
             // et c'est ce qui interdit le double `free`.
             if self.pages.remove(&phys) {
                 free_frame(phys);
+            }
+        }
+        // BOUCHAUD_TABLES_VIDES_RENDUES_V1 : meme regle pour les tables. Une
+        // table n'est rendue que si l'espace la possede encore -- jamais deux
+        // fois, jamais une table qu'il ne possede pas.
+        for phys in retirement.tables {
+            if self.tables.remove(&phys) {
+                free_frame(phys);
+            }
+        }
+    }
+
+    /// BOUCHAUD_TABLES_VIDES_RENDUES_V1 -- detache les tables de pages de la
+    /// moitie UTILISATEUR qui recouvrent `[start, end)` et sont devenues
+    /// entierement vides (512 entrees nulles), du dernier niveau vers le haut :
+    /// table des pages, puis repertoire, puis PDPT. Une table n'est detachee
+    /// que si cet espace la possede (`self.tables`). L'entree parente est mise
+    /// a zero ; la frame va dans `sortie`, a rendre apres l'invalidation.
+    ///
+    /// Le parcours ne visite que les tables PRESENTES : son cout suit le
+    /// nombre de tables, pas l'etendue (une reservation de 8 Tio ne coute que
+    /// ses entrees de PML4 et de PDPT presentes).
+    fn detache_tables_vides(&mut self, start: u64, end: u64, sortie: &mut Vec<u64>) {
+        /// Fin (exclue) de la moitie utilisateur : 256 entrees de PML4.
+        const FIN_UTILISATEUR: u64 = 1u64 << 47;
+        let end = end.min(FIN_UTILISATEUR);
+        if start >= end {
+            return;
+        }
+        let index = |virt: u64, niveau: u32| ((virt >> (12 + 9 * niveau)) & 0x1FF) as usize;
+        let vide = |phys: u64| table_at(phys).iter().all(|&entree| entree == 0);
+        let pml4 = table_at(self.pml4);
+        for i in index(start, 3)..=index(end - 1, 3) {
+            let e4 = pml4[i];
+            if e4 & PTE_PRESENT == 0 {
+                continue;
+            }
+            let pdpt_phys = e4 & ADDR_MASK;
+            let base4 = (i as u64) << 39;
+            let (lo4, hi4) = (start.max(base4), end.min(base4 + (1u64 << 39)));
+            let pdpt = table_at(pdpt_phys);
+            for j in index(lo4, 2)..=index(hi4 - 1, 2) {
+                let e3 = pdpt[j];
+                if e3 & PTE_PRESENT == 0 || e3 & PTE_HUGE != 0 {
+                    continue;
+                }
+                let pd_phys = e3 & ADDR_MASK;
+                let base3 = base4 + ((j as u64) << 30);
+                let (lo3, hi3) = (lo4.max(base3), hi4.min(base3 + (1u64 << 30)));
+                let pd = table_at(pd_phys);
+                for k in index(lo3, 1)..=index(hi3 - 1, 1) {
+                    let e2 = pd[k];
+                    if e2 & PTE_PRESENT == 0 || e2 & PTE_HUGE != 0 {
+                        continue;
+                    }
+                    let pt_phys = e2 & ADDR_MASK;
+                    if self.tables.contains(&pt_phys) && vide(pt_phys) {
+                        pd[k] = 0;
+                        sortie.push(pt_phys);
+                    }
+                }
+                if self.tables.contains(&pd_phys) && vide(pd_phys) {
+                    pdpt[j] = 0;
+                    sortie.push(pd_phys);
+                }
+            }
+            if self.tables.contains(&pdpt_phys) && vide(pdpt_phys) {
+                pml4[i] = 0;
+                sortie.push(pdpt_phys);
             }
         }
     }
