@@ -1094,7 +1094,9 @@ pub struct AddressSpace {
     // le `Vec` n'imposait pas — et `finish_unmap` n'en retirait alors qu'une
     // occurrence, laissant fuir les autres.
     /// Frames de donnees mappees pour l'utilisateur.
-    pages: BTreeSet<u64>,
+    /// BOUCHAUD_TABLE_COW_HACHEE_V1 : ensemble hache (O(1)) ; l'ordre n'est
+    /// lu nulle part (la liberation passe par l'allocateur, qui fusionne).
+    pages: hashbrown::HashSet<u64>,
     /// Compteurs exacts mis a jour lors de la publication/retrait des PTE.
     /// Une lecture de RSS est ainsi O(1), quel que soit le nombre de pages.
     resident: ResidentStats,
@@ -1385,7 +1387,7 @@ impl AddressSpace {
                 quiescence_waiter: AtomicU64::new(u64::MAX),
             }),
             tables: Vec::new(),
-            pages: BTreeSet::new(),
+            pages: hashbrown::HashSet::new(),
             resident: ResidentStats::default(),
             #[cfg(feature = "banc-gpu-venus")]
             baux_gpu: Vec::new(),
@@ -1977,58 +1979,154 @@ impl AddressSpace {
     /// est sans danger (sa prochaine ecriture promeut, la frame etant
     /// redevenue exclusive).
     pub fn duplicate(&mut self) -> Option<(AddressSpace, DuplicationCompte, Option<TlbInvalidation>)> {
+        // BOUCHAUD_FORK_UN_PARCOURS_V1 -- le fork d'un pere de 64 Mio tenait
+        // son coeur 60 a 85 ms (TCG ; latence-probe, phase fork : p95 61 ms
+        // de retard pour un interactif). Par page, l'ancienne boucle :
+        // collectait (adresse, PTE) dans un vecteur, redescendait les quatre
+        // niveaux du pere pour retrograder la PTE, l'invalidait localement,
+        // redescendait les quatre niveaux du FILS pour la poser, invalidait
+        // une seconde fois -- dans le TLB courant, pour un espace qui n'est
+        // charge nulle part --, et faisait quatre operations d'arbre B.
+        //
+        // Ici : un seul parcours, la PTE du pere modifiee EN PLACE ; la table
+        // feuille du fils obtenue une fois par bloc de 2 Mio ; aucune
+        // invalidation pour le fils ; l'invalidation locale du pere groupee
+        // (au-dela de SEUIL_INVLPG pages, un seul vidage local, comme Linux) ;
+        // les parts COW enregistrees en lot apres tri, l'ensemble des pages du
+        // fils construit d'un bloc. Memes PTE, memes parts, memes comptes.
+        const SEUIL_INVLPG: usize = 32;
         let mut child = AddressSpace::new()?;
         #[cfg(feature = "banc-gpu-venus")]
         child.baux_gpu.clone_from(&self.baux_gpu);
         let mut compte = DuplicationCompte::default();
-        let pages = self.iter_user_pages();
-        compte.pages_vues = pages.len() as u64;
-        let mut pere_modifie = false;
-        let mut partagees = BTreeSet::new();
-        // Une seule prise de la table pour tout le fork. Ordre respecte :
-        // `Mm` (tenu par l'appelant) -> `COW` -> allocateur (tables du fils).
-        let mut table = COW.lock();
-        for (virt, entry) in pages {
-            let phys = entry & ADDR_MASK;
-            if self.owns_frame(phys) {
-                let partagee = if entry & PTE_COW != 0 {
-                    entry // deja partagee (fils d'un fils) : droits inchanges
-                } else if entry & PTE_WRITE != 0 {
-                    (entry & !PTE_WRITE) | PTE_COW | PTE_COW_ECRITURE
-                } else {
-                    entry | PTE_COW
-                };
-                if partagee != entry {
-                    if let Some(e) = self.entry_mut(virt, false) {
-                        *e = partagee;
-                        flush(virt);
-                        pere_modifie = true;
+        let mut possedees: Vec<u64> = Vec::with_capacity(self.pages.len());
+        child.pages.reserve(self.pages.len());
+        let mut retrogradees: Vec<u64> = Vec::new();
+        let mut nb_retrogradees = 0usize;
+        let mut reussi = true;
+        let pml4 = table_at(self.pml4);
+        'parcours: for creneau in 0..USER_SLOTS {
+            let slot = user_slot() + creneau;
+            let entry4 = pml4[slot];
+            if entry4 & PTE_PRESENT == 0 {
+                continue;
+            }
+            let pdpt = table_at(entry4 & ADDR_MASK);
+            for i3 in 0..512usize {
+                let entry3 = pdpt[i3];
+                if entry3 & PTE_PRESENT == 0 {
+                    continue;
+                }
+                let pd = table_at(entry3 & ADDR_MASK);
+                for i2 in 0..512usize {
+                    let entry2 = pd[i2];
+                    if entry2 & PTE_PRESENT == 0 || entry2 & PTE_HUGE != 0 {
+                        continue;
+                    }
+                    let pt = table_at(entry2 & ADDR_MASK);
+                    let bloc = ((slot as u64) << 39) | ((i3 as u64) << 30) | ((i2 as u64) << 21);
+                    let mut feuille_fils: Option<&'static mut [u64; 512]> = None;
+                    for i1 in 0..512usize {
+                        let entry = pt[i1];
+                        if entry & PTE_PRESENT == 0 {
+                            continue;
+                        }
+                        compte.pages_vues += 1;
+                        let virt = bloc | ((i1 as u64) << 12);
+                        let phys = entry & ADDR_MASK;
+                        let pte_fils = if self.pages.contains(&phys) {
+                            let partagee = if entry & PTE_COW != 0 {
+                                entry // deja partagee (fils d'un fils) : droits inchanges
+                            } else if entry & PTE_WRITE != 0 {
+                                (entry & !PTE_WRITE) | PTE_COW | PTE_COW_ECRITURE
+                            } else {
+                                entry | PTE_COW
+                            };
+                            if partagee != entry {
+                                pt[i1] = partagee;
+                                nb_retrogradees += 1;
+                                if retrogradees.len() < SEUIL_INVLPG {
+                                    retrogradees.push(virt);
+                                }
+                            }
+                            // Une part par frame et par fork, meme si la frame
+                            // est projetee a deux adresses : l'insertion dans
+                            // l'ensemble du fils dedoublonne.
+                            if child.pages.insert(phys) {
+                                possedees.push(phys);
+                            }
+                            compte.pages_partagees += 1;
+                            partagee
+                        } else {
+                            compte.pages_empruntees += 1;
+                            entry
+                        };
+                        if feuille_fils.is_none() {
+                            feuille_fils = child.table_feuille(bloc);
+                        }
+                        let Some(feuille) = feuille_fils.as_deref_mut() else {
+                            reussi = false;
+                            break 'parcours;
+                        };
+                        if feuille[i1] & PTE_PRESENT != 0 {
+                            reussi = false;
+                            break 'parcours;
+                        }
+                        feuille[i1] = pte_fils;
+                        child.resident.mapped(pte_fils);
                     }
                 }
-                // Une part par frame et par fork, meme si la frame est
-                // projetee a deux adresses de l'espace.
-                if partagees.insert(phys) {
-                    table.partage(phys);
-                    child.pages.insert(phys);
-                }
-                if !child.map(virt, phys, partagee & !ADDR_MASK) {
-                    // La destruction du fils rend ses parts : la table doit
-                    // etre libre AVANT.
-                    drop(table);
-                    return None;
-                }
-                compte.pages_partagees += 1;
-            } else {
-                if !child.map(virt, phys, entry & !ADDR_MASK) {
-                    drop(table);
-                    return None;
-                }
-                compte.pages_empruntees += 1;
             }
         }
-        drop(table);
-        let invalidation = pere_modifie.then(|| self.invalidation(0, 0));
+        // Le TLB LOCAL du pere : ses PTE retrogradees ne doivent plus y etre
+        // inscriptibles. Les autres coeurs : l'invalidation rendue, executee
+        // par l'appelant hors du verrou.
+        if nb_retrogradees > SEUIL_INVLPG {
+            flush_local_range(0, 0);
+        } else {
+            for &virt in &retrogradees {
+                flush(virt);
+            }
+        }
+        if !reussi {
+            // Le fils est detruit sans aucune part : on lui retire ses frames
+            // AVANT sa destruction (aucune part n'a ete enregistree), rien
+            // n'est rendu deux fois.
+            // Les PTE du pere restent en COW, sans danger (sa prochaine
+            // ecriture promeut, la frame lui etant exclusive).
+            child.pages.clear();
+            return None;
+        }
+        {
+            // Ordre respecte : `Mm` (tenu par l'appelant) -> `COW`.
+            let mut table = COW.lock();
+            for &frame in &possedees {
+                table.partage(frame);
+            }
+        }
+        let invalidation = (nb_retrogradees > 0).then(|| self.invalidation(0, 0));
         Some((child, compte, invalidation))
+    }
+
+    /// BOUCHAUD_FORK_UN_PARCOURS_V1 : la table des pages (dernier niveau) qui
+    /// couvre `virt`, creee au besoin -- comme `entry_mut(virt, true)`, mais
+    /// rendue entiere, pour poser les 512 entrees d'un bloc sans redescendre.
+    fn table_feuille(&mut self, virt: u64) -> Option<&'static mut [u64; 512]> {
+        let mut table = table_at(self.pml4);
+        for level in (1..4).rev() {
+            let index = ((virt >> (12 + 9 * level)) & 0x1FF) as usize;
+            let entry = table[index];
+            let next = if entry & PTE_PRESENT != 0 {
+                entry & ADDR_MASK
+            } else {
+                let frame = alloc_frame()?;
+                self.tables.push(frame);
+                table[index] = frame | PTE_PRESENT | PTE_WRITE | PTE_USER;
+                frame
+            };
+            table = table_at(next);
+        }
+        Some(table)
     }
 
     /// Copie `len` octets depuis la memoire utilisateur vers un tampon noyau.

@@ -64,3 +64,60 @@ fn copie_a_l_ecriture_du_pere_puis_mort_du_fils() {
     assert_eq!(t.rend(F), Rendu::Garder); // copie du pere
     assert_eq!(t.rend(F), Rendu::Liberer); // mort du fils
 }
+
+// BOUCHAUD_TABLE_COW_HACHEE_V1 : la table hachee contre un modele (BTreeMap),
+// sur une suite pseudo-aleatoire de partages et de rendus, avec croissance et
+// tombes reutilisees.
+#[test]
+fn la_table_hachee_suit_le_modele() {
+    use std::collections::BTreeMap;
+    let mut t = TableCow::neuve();
+    let mut m: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+    for _ in 0..200_000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let frame = (x % 3000 + 1) << 12;
+        if x & 0x10000 != 0 {
+            let attendu = m.get(&frame).map_or(2, |c| c + 1);
+            assert_eq!(t.partage(frame), attendu);
+            m.insert(frame, attendu);
+        } else {
+            let attendu = match m.get_mut(&frame) {
+                None => Rendu::Liberer,
+                Some(c) => {
+                    *c -= 1;
+                    if *c <= 1 {
+                        m.remove(&frame);
+                    }
+                    Rendu::Garder
+                }
+            };
+            assert_eq!(t.rend(frame), attendu);
+        }
+        if x % 1000 == 0 {
+            assert_eq!(t.frames_partagees(), m.len());
+            for (&f, &c) in m.iter().take(50) {
+                assert_eq!(t.proprietaires(f), c);
+                assert!(t.est_partagee(f));
+            }
+        }
+    }
+    assert_eq!(t.frames_partagees(), m.len());
+}
+
+#[test]
+fn la_frame_zero_et_les_grandes_adresses_sont_des_cles_valides() {
+    let mut t = TableCow::neuve();
+    for f in [0u64, 0x1000, 0xF_FFFF_F000, 0x000F_FFFF_FFFF_F000] {
+        assert_eq!(t.partage(f), 2);
+        assert_eq!(t.proprietaires(f), 2);
+    }
+    for f in [0u64, 0x1000, 0xF_FFFF_F000, 0x000F_FFFF_FFFF_F000] {
+        assert_eq!(t.rend(f), Rendu::Garder);
+        assert!(!t.est_partagee(f));
+        assert_eq!(t.rend(f), Rendu::Liberer);
+    }
+    assert_eq!(t.frames_partagees(), 0);
+}

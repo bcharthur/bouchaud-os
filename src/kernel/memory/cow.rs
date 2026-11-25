@@ -34,46 +34,130 @@
 //! Module PUR : ni `use crate::`, ni verrou. Le noyau tient la table sous son
 //! verrou ; `tools/memoire/test_cow.rs` la contredit sur l'hote.
 
-use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
-/// Ce que l'appelant doit faire de la frame qu'il cesse de posseder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rendu {
-    /// Plus personne ne la possede : la rendre a l'allocateur.
     Liberer,
-    /// Un autre espace la possede encore : ne rien liberer.
     Garder,
 }
 
-/// Les frames privees possedees par plusieurs espaces.
+// BOUCHAUD_TABLE_COW_HACHEE_V1 -- la table etait un `BTreeMap<u64, u32>`.
+// Un `fork` de 64 Mio y faisait 16 509 insertions (11,5 ms sous TCG, plus 10 ms
+// de tri pour dedoublonner) ; chaque destruction d'espace et chaque casse COW y
+// faisait une recherche. Ici : adressage ouvert, sonde lineaire, cle = frame + 1
+// (une frame est alignee sur 4 Kio : la cle est impaire, jamais 0 = vide ni
+// u64::MAX = tombe). O(1) attendu, aucune allocation hors croissance.
+const VIDE: u64 = 0;
+const TOMBE: u64 = u64::MAX;
+const CAPACITE_MIN: usize = 64;
+
 pub struct TableCow {
-    proprietaires: BTreeMap<u64, u32>,
+    cles: Vec<u64>,
+    comptes: Vec<u32>,
+    vivantes: usize,
+    tombes: usize,
     partages: u64,
     liberees_partagees: u64,
 }
 
+#[inline]
+fn cle(frame: u64) -> u64 {
+    frame | 1
+}
+
+#[inline]
+fn depart(frame: u64, masque: usize) -> usize {
+    ((frame >> 12).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 17) as usize & masque
+}
+
 impl TableCow {
     pub const fn neuve() -> Self {
-        Self { proprietaires: BTreeMap::new(), partages: 0, liberees_partagees: 0 }
+        Self { cles: Vec::new(), comptes: Vec::new(), vivantes: 0, tombes: 0, partages: 0, liberees_partagees: 0 }
     }
 
-    /// Un espace de plus possede `frame` (`fork`). Rend le nouveau compte.
+    /// L'emplacement de `frame`, s'il y est.
+    fn trouve(&self, frame: u64) -> Option<usize> {
+        if self.cles.is_empty() {
+            return None;
+        }
+        let masque = self.cles.len() - 1;
+        let k = cle(frame);
+        let mut i = depart(frame, masque);
+        loop {
+            match self.cles[i] {
+                VIDE => return None,
+                c if c == k => return Some(i),
+                _ => i = (i + 1) & masque,
+            }
+        }
+    }
+
+    /// Reconstruit la table a `capacite` emplacements (puissance de deux),
+    /// sans tombes.
+    fn retaille(&mut self, capacite: usize) {
+        let anciennes = core::mem::replace(&mut self.cles, alloc::vec![VIDE; capacite]);
+        let comptes = core::mem::replace(&mut self.comptes, alloc::vec![0; capacite]);
+        self.tombes = 0;
+        let masque = capacite - 1;
+        for (c, n) in anciennes.into_iter().zip(comptes) {
+            if c != VIDE && c != TOMBE {
+                let mut i = depart(c & !1, masque);
+                while self.cles[i] != VIDE {
+                    i = (i + 1) & masque;
+                }
+                self.cles[i] = c;
+                self.comptes[i] = n;
+            }
+        }
+    }
+
+    /// Une place libre pour `frame` (absente), apres croissance eventuelle.
+    fn place(&mut self, frame: u64) -> usize {
+        // Charge au plus 3/4, tombes comprises.
+        if (self.vivantes + self.tombes + 1) * 4 > self.cles.len() * 3 {
+            let voulu = ((self.vivantes + 1) * 2).max(CAPACITE_MIN).next_power_of_two();
+            self.retaille(voulu);
+        }
+        let masque = self.cles.len() - 1;
+        let mut i = depart(frame, masque);
+        loop {
+            match self.cles[i] {
+                VIDE => return i,
+                TOMBE => {
+                    self.tombes -= 1;
+                    return i;
+                }
+                _ => i = (i + 1) & masque,
+            }
+        }
+    }
+
     pub fn partage(&mut self, frame: u64) -> u32 {
-        let compte = self.proprietaires.entry(frame).or_insert(1);
-        *compte = compte.checked_add(1).expect("cow: debordement du compte de proprietaires");
         self.partages += 1;
-        *compte
+        if let Some(i) = self.trouve(frame) {
+            let n = self.comptes[i].checked_add(1).expect("cow: debordement du compte de proprietaires");
+            self.comptes[i] = n;
+            return n;
+        }
+        let i = self.place(frame);
+        self.cles[i] = cle(frame);
+        self.comptes[i] = 2;
+        self.vivantes += 1;
+        2
     }
 
-    /// Un espace cesse de posseder `frame`.
     pub fn rend(&mut self, frame: u64) -> Rendu {
-        match self.proprietaires.get_mut(&frame) {
+        match self.trouve(frame) {
             None => Rendu::Liberer,
-            Some(compte) => {
-                debug_assert!(*compte >= 2, "cow: frame en table avec un seul proprietaire");
-                *compte -= 1;
-                if *compte <= 1 {
-                    self.proprietaires.remove(&frame);
+            Some(i) => {
+                debug_assert!(self.comptes[i] >= 2, "cow: frame en table avec un seul proprietaire");
+                self.comptes[i] -= 1;
+                if self.comptes[i] <= 1 {
+                    self.cles[i] = TOMBE;
+                    self.comptes[i] = 0;
+                    self.vivantes -= 1;
+                    self.tombes += 1;
                     self.liberees_partagees += 1;
                 }
                 Rendu::Garder
@@ -81,23 +165,18 @@ impl TableCow {
         }
     }
 
-    /// Nombre d'espaces qui possedent `frame`, pour une frame possedee par
-    /// l'appelant (1 si elle n'est pas en table).
     pub fn proprietaires(&self, frame: u64) -> u32 {
-        self.proprietaires.get(&frame).copied().unwrap_or(1)
+        self.trouve(frame).map_or(1, |i| self.comptes[i])
     }
 
-    /// `frame` est-elle possedee par un autre espace que l'appelant ?
     pub fn est_partagee(&self, frame: u64) -> bool {
-        self.proprietaires.contains_key(&frame)
+        self.trouve(frame).is_some()
     }
 
-    /// Frames actuellement partagees.
     pub fn frames_partagees(&self) -> usize {
-        self.proprietaires.len()
+        self.vivantes
     }
 
-    /// (partages cumules, frames redevenues exclusives)
     pub fn cumuls(&self) -> (u64, u64) {
         (self.partages, self.liberees_partagees)
     }
