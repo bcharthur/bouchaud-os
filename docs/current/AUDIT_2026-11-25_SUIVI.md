@@ -46,6 +46,19 @@ Deux défauts voisins trouvés en chemin, corrigés : l'OOM jugeait une victime
 morte dès `zombie`, avant qu'elle ait rendu sa mémoire (`cffa6da`) ; la sonde
 `memoire-mort` mesurait parfois un fils déjà mort.
 
+### Coût mesuré de la barrière CR3
+
+Deux paires TCG SMP2, QEMU 10.0.13, même tempête fork/exec, entre
+`168ee875` et `f63dbe76`, avec ordre inversé pour la deuxième paire.
+Avec un seul pair distant, les émissions de shootdown et leurs réémissions
+représentent 14 828 → 32 010 puis 14 790 → 30 965 IPI. Sur environ 57 s
+dans l'invité, le temps CPU noyau augmente de 62,56 → 63,32 s puis
+62,89 → 64,34 s. Le p95 d'`execve` passe de 1,89 → 2,18 ms puis
+2,18 → 2,42 ms. Le temps cumulé dans les barrières est de 2,73 et 3,16 s,
+avec un maximum de 38 ms. Le débit de la phase complète varie entre les
+paires. La mesure provient de noyaux instrumentés localement avec des
+compteurs de durée, sans changement de la barrière livrée.
+
 ## 1. Commits de la branche
 
 | SHA | Lot |

@@ -299,10 +299,7 @@ pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
         return;
     }
     #[cfg(not(feature = "banc-sans-espace-rendu"))]
-    {
-        rend_espace_a_la_mort_effectif(emprunteur);
-        note_espace_rendu(current().process.pid);
-    }
+    rend_espace_a_la_mort_effectif(emprunteur);
 }
 
 #[cfg(not(feature = "banc-sans-espace-rendu"))]
@@ -361,6 +358,7 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
                 drop(process.mm.remplace(mort));
             });
             drop(identity);
+            ancien.publie_rendu_a_la_destruction(process);
             QUARANTAINE.lock().push(ancien);
             return;
         }
@@ -390,6 +388,7 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
     drop(identity);
     // Dernier detenteur (sauf lecteur passager) : `Drop for Mm` rend les
     // references du cache, `Drop for AddressSpace` les frames.
+    ancien.publie_rendu_a_la_destruction(Arc::clone(&process));
     drop(ancien);
     ESPACES_RENDUS_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
     PAGES_RENDUES_A_LA_MORT.fetch_add(pages, Ordering::Relaxed);
@@ -431,15 +430,15 @@ pub fn vide_quarantaine() -> usize {
     // Barriere HORS du verrou de l'Mm : on n'attend jamais d'acquittement
     // d'IPI en tenant un verrou qui coupe les interruptions.
     let mut pages = 0;
-    for mm in &liberables {
+    for mm in liberables {
         let (identity, n) = {
             let garde = mm.lock();
             (garde.space.identity(), garde.space.mapped_pages())
         };
         identity.barriere_cr3();
+        drop(mm);
         pages += n;
     }
-    drop(liberables);
     pages
 }
 

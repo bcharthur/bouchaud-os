@@ -222,6 +222,7 @@ fn construit_fils(
         vfork: SpinLock::new(vfork),
         files: Arc::new(FileTable::new(files)),
         metadata: SpinLock::new(ProcessMetadata { name, cwd, uid, gid, ecran }),
+        espace_rendu: core::sync::atomic::AtomicBool::new(false),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(child_signals),
         temps_recycle: task::TempsRecycle::neuf(),

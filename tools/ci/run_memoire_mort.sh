@@ -6,7 +6,7 @@
 #   tools/ci/run_memoire_mort.sh BOOTIMAGE [MODES] [SMP] [MEMOIRE_MIO]
 #
 # MODES : "zombie oom" par defaut. Code 0 si chaque mode imprime
-# MEMOIRE_MORT_OK, sans faute noyau. Banc court (TCG, quelques minutes).
+# MEMOIRE_MORT_OK, sans faute noyau. BO_QEMU_KVM=1 impose KVM.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 BOOT=${1:?usage: run_memoire_mort.sh BOOTIMAGE [MODES] [SMP] [MEMOIRE_MIO]}
@@ -26,11 +26,16 @@ cp "$BOOT" "$T/boot.bin"
   echo "echo MEMOIRE_MORT_FIN"
 } > "$T/scenario/autorun"
 (cd tools/userland && IMAGE="$T/probe.img" ./mkdisk.sh "$T/scenario" >/dev/null)
+accel=(-accel tcg -cpu max)
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  [ -w /dev/kvm ] || { echo "/dev/kvm inaccessible" >&2; exit 1; }
+  accel=(-accel kvm -cpu host)
+fi
 set +e
 timeout 900 qemu-system-x86_64 \
   -drive format=raw,file="$T/boot.bin" \
   -drive format=raw,file="$T/probe.img" \
-  -m "$MEMOIRE" -smp "$SMP" -accel tcg -cpu max -display none -no-reboot \
+  -m "$MEMOIRE" -smp "$SMP" "${accel[@]}" -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -serial file:"$T/serie.log"
@@ -43,6 +48,9 @@ grep -aoE 'MEMOIRE_MORT_[A-Z]+( .*)?$|OOM_(VICTIME|ABANDON) .*|PROCESS_FAULT .*'
 if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|panicked at' "$T/serie.log"; then
   echo 'faute noyau pendant la sonde' >&2
   exit 1
+fi
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  grep -aE 'BOUCHAUD_CPU_ISA hyperviseur=KVMKVMKVM([[:space:]]|$)' "$T/emis.log"
 fi
 for m in $MODES; do
   grep -aqF "MEMOIRE_MORT_OK mode=$m" "$T/emis.log" || { echo "mode $m : pas de MEMOIRE_MORT_OK" >&2; exit 1; }

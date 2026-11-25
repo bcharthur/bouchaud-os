@@ -21,6 +21,14 @@ pub struct RegionProjetee {
     pub region: Arc<crate::kernel::native::object::Object>,
 }
 
+struct NotificationRendu(Arc<Process>);
+
+impl Drop for NotificationRendu {
+    fn drop(&mut self) {
+        self.0.espace_rendu.store(true, Ordering::Release);
+    }
+}
+
 pub struct Mm {
     inner: SpinLock<MmState>,
     activation: SpinLock<Arc<crate::kernel::vmm::AddressSpaceIdentity>>,
@@ -28,6 +36,8 @@ pub struct Mm {
     /// Non nul : un `execve` d'un de ses processus doit installer un `Mm`
     /// neuf, jamais remplacer cet espace en place.
     pub emprunts: AtomicUsize,
+    // Detruit apres inner, donc apres les tables et les frames du Mm.
+    notification_rendu: SpinLock<Option<NotificationRendu>>,
 }
 impl Mm {
     pub fn new(state: MmState) -> Self {
@@ -36,7 +46,13 @@ impl Mm {
             inner: SpinLock::new(state),
             activation: SpinLock::new(activation),
             emprunts: AtomicUsize::new(0),
+            notification_rendu: SpinLock::new(None),
         }
+    }
+
+    // Le processus doit deja avoir quitte ce Mm, pour eviter un cycle Arc.
+    fn publie_rendu_a_la_destruction(&self, processus: Arc<Process>) {
+        *self.notification_rendu.lock() = Some(NotificationRendu(processus));
     }
 
     /// Ce `Mm` est-il partage avec un fils `vfork` encore en cours ?
@@ -126,6 +142,8 @@ pub struct Process {
     pub files: Arc<FileTable>,
     pub metadata: SpinLock<ProcessMetadata>,
     pub lifecycle: SpinLock<ProcessLifecycle>,
+    /// Publie apres le rendu du Mm, y compris apres une quarantaine.
+    pub espace_rendu: AtomicBool,
     pub signals: SpinLock<crate::kernel::signal::SignalState>,
     /// Temps CPU des fils de ce processus dont l'emplacement a ete recycle.
     pub temps_recycle: TempsRecycle,

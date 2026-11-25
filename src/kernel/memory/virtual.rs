@@ -1196,7 +1196,7 @@ impl AddressSpaceIdentity {
     /// avoir ecrit son nouveau CR3 ; l'identite etant en retrait, aucun ne
     /// peut plus y entrer apres.
     pub(crate) fn barriere_cr3(&self) {
-        smp::shootdown_tlb(self.pml4, u64::MAX, 0, 0);
+        smp::barriere_cr3(self.pml4);
         BARRIERES_CR3.fetch_add(1, Ordering::Relaxed);
     }
 

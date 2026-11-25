@@ -9,34 +9,17 @@
 // (BOUCHAUD_ESPACE_RENDU_A_LA_MORT_V1), sans attendre que son pere la
 // recolte. C'est ce qui rend l'attente du fautif bornee et utile.
 
-static OOM_VICTIME_PID: AtomicU32 = AtomicU32::new(0);
-static OOM_VICTIME_TUEE_NS: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone)]
+struct VictimeOom {
+    pid: u32,
+    tuee_a_ns: u64,
+    processus: alloc::sync::Weak<Process>,
+}
+
+static OOM_VICTIME: SpinLock<Option<VictimeOom>> = SpinLock::new(None);
 static OOM_VICTIMES: AtomicU64 = AtomicU64::new(0);
 static OOM_ABANDONS: AtomicU64 = AtomicU64::new(0);
 static OOM_ATTENTES: AtomicU64 = AtomicU64::new(0);
-/// BOUCHAUD_OOM_VICTIME_RENDUE_V1 : le dernier pid dont l'espace a ete rendu
-/// a la mort. Une victime devient zombie AVANT de rendre sa memoire (fermer
-/// ses descripteurs, ses handles, prevenir le gardien, puis
-/// `rend_espace_a_la_mort`) : la juger « morte » sur `zombie` faisait
-/// abandonner le fautif dans cette fenetre, sa memoire encore tenue
-/// (memoire-mort-probe oom sous charge : OOM_ABANDON 11 ms apres la
-/// victime, le pere tue par SIGSEGV).
-static OOM_ESPACE_RENDU_PID: AtomicU32 = AtomicU32::new(0);
-
-/// Appele par la sortie du dernier fil, une fois l'espace rendu (ou mis en
-/// quarantaine : `vide_quarantaine` le rendra des que les coeurs l'auront
-/// quitte).
-pub(crate) fn note_espace_rendu(pid: u32) {
-    OOM_ESPACE_RENDU_PID.store(pid, Ordering::Release);
-}
-
-/// La victime `pid` tient-elle encore sa memoire ? Oui tant qu'elle existe et
-/// que sa sortie ne l'a pas rendue. Un processus recolte n'existe plus : son
-/// `Mm` est parti avec lui.
-fn victime_tient_sa_memoire(pid: u32) -> bool {
-    OOM_ESPACE_RENDU_PID.load(Ordering::Acquire) != pid
-        && processes().iter().any(|p| p.pid == pid)
-}
 
 /// Pages que la reclamation tente de rendre avant de designer une victime.
 const OOM_RECLAMATION_PAGES: usize = 512;
@@ -48,20 +31,21 @@ pub(crate) fn sur_faute_sans_memoire(fautif: u32) -> bool {
 
     // Une tache condamnee, ou la victime designee elle-meme, n'attend pas :
     // sa propre mort est ce qui rendra la memoire.
-    if condamnee_courante() || OOM_VICTIME_PID.load(Ordering::Acquire) == fautif {
+    if condamnee_courante() || OOM_VICTIME.lock().as_ref().is_some_and(|v| v.pid == fautif) {
         return false;
     }
     // Un espace en quarantaine dont les coeurs sont partis se rend ici.
     let recuperees = crate::kernel::memory_pressure::reclaim_now(OOM_RECLAMATION_PAGES)
         + vide_quarantaine();
-    let victime = match OOM_VICTIME_PID.load(Ordering::Acquire) {
-        0 => None,
-        pid => Some(VictimeEnCours {
-            pid,
-            tuee_a_ns: OOM_VICTIME_TUEE_NS.load(Ordering::Acquire),
-            vivante: victime_tient_sa_memoire(pid),
-        }),
-    };
+    // La quarantaine garde le Process vivant meme apres wait4, y compris
+    // pendant la barriere. Le rendu est publie apres la destruction du Mm.
+    let en_cours = OOM_VICTIME.lock().clone();
+    let victime = en_cours.map(|v| VictimeEnCours {
+        pid: v.pid,
+        tuee_a_ns: v.tuee_a_ns,
+        vivante: v.processus.upgrade()
+            .is_some_and(|p| !p.espace_rendu.load(Ordering::Acquire)),
+    });
     match oom::action(recuperees, victime, crate::kernel::timer::monotonic_ns()) {
         Action::Reessaie => true,
         Action::AttendsVictime => {
@@ -87,17 +71,18 @@ pub(crate) fn sur_faute_sans_memoire(fautif: u32) -> bool {
             match oom::verdict(fautif, &candidats) {
                 Verdict::Tue(pid) => {
                     let pages = candidats.iter().find(|c| c.pid == pid).map(|c| c.pages).unwrap_or(0);
-                    OOM_VICTIME_TUEE_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Release);
-                    OOM_VICTIME_PID.store(pid, Ordering::Release);
-                    OOM_VICTIMES.fetch_add(1, Ordering::Relaxed);
-                    let nom = match process_by_pid(pid) {
-                        Some(victime) => {
-                            let nom = victime.metadata.lock().name.clone();
-                            victime.signals.lock().raise(crate::kernel::signal::SIGKILL);
-                            nom
-                        }
-                        None => String::new(),
+                    let Some(victime) = process_by_pid(pid) else {
+                        return true;
                     };
+                    *OOM_VICTIME.lock() = Some(VictimeOom {
+                        pid,
+                        tuee_a_ns: crate::kernel::timer::monotonic_ns(),
+                        processus: Arc::downgrade(&victime),
+                    });
+                    OOM_VICTIMES.fetch_add(1, Ordering::Relaxed);
+                    let nom = victime.metadata.lock().name.clone();
+                    victime.signals.lock().raise(crate::kernel::signal::SIGKILL);
+                    drop(victime);
                     reveille_pour_signal(pid);
                     crate::kernel::dmesg::log_fmt(format_args!(
                         "OOM_VICTIME t={} pid={} image={} kio={} fautif={}",

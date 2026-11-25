@@ -23,7 +23,7 @@ panique, toutes les phases passent.
   * ni `sert_shootdowns_en_attente` ni `sert_shootdowns` n'emettent d'EOI :
     hors IPI, aucun vecteur n'est en service.
 
-Fail-closed : une fonction introuvable est une faute. Deux tests negatifs.
+Fail-closed : une fonction introuvable est une faute. Trois tests negatifs.
 """
 
 import re
@@ -86,6 +86,12 @@ def verifie(racine: Path) -> list[str]:
             fautes.append(f"{SMP} : `{entete.strip('(')}` introuvable")
         elif "eoi" in bloc.lower():
             fautes.append(f"{SMP} : `{entete.strip('(')}` emet un EOI hors IPI")
+    service = corps(smp, "fn sert_shootdowns(") or ""
+    if not re.search(
+        r"if vmm::current_pml4\(\) == pml4 \{\s*if attend_sortie_cr3 \{\s*continue;",
+        service,
+    ):
+        fautes.append(f"{SMP} : la barriere peut acquitter sous le CR3 sortant")
     return fautes
 
 
@@ -113,7 +119,8 @@ def main() -> int:
         return 1
     negatifs = [
         [(UART, "crate::arch::x86_64::smp::sert_shootdowns_en_attente();", "")],
-        [(SMP, "fn sert_shootdowns(cpu: usize) {\n", "fn sert_shootdowns(cpu: usize) {\n    eoi_local();\n")],
+        [(SMP, "fn sert_shootdowns(cpu: usize) -> usize {\n", "fn sert_shootdowns(cpu: usize) -> usize {\n    eoi_local();\n")],
+        [(SMP, "if attend_sortie_cr3 {\n                    continue;", "if attend_sortie_cr3 {")],
     ]
     for n, mutation in enumerate(negatifs, 1):
         if not copie_mutee(mutation):

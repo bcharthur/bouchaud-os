@@ -61,6 +61,7 @@ pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
         metadata: SpinLock::new(ProcessMetadata { name: name.to_string(), cwd,
             uid,
             gid, ecran: None }),
+        espace_rendu: core::sync::atomic::AtomicBool::new(false),
         lifecycle: SpinLock::new(ProcessLifecycle { exit_code: 0, par_signal: false, zombie: false, threads: 1, groupe_en_sortie: false }),
         signals: SpinLock::new(crate::kernel::signal::SignalState::default()),
         temps_recycle: TempsRecycle::neuf(),

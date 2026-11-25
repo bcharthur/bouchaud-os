@@ -315,6 +315,7 @@ struct TlbSlot {
     len: AtomicU64,
     targets: AtomicU64,
     acknowledgements: AtomicU64,
+    attend_sortie_cr3: AtomicBool,
 }
 
 impl TlbSlot {
@@ -326,6 +327,7 @@ impl TlbSlot {
             len: AtomicU64::new(0),
             targets: AtomicU64::new(0),
             acknowledgements: AtomicU64::new(0),
+            attend_sortie_cr3: AtomicBool::new(false),
         }
     }
 }
@@ -1434,6 +1436,15 @@ pub fn local_scheduler_timer_enabled() -> bool {
 /// parfait pendant la migration. `AddressSpace::active_cpus` est tout de meme
 /// maintenu pour le diagnostic et l'optimisation future.
 pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
+    demande_shootdown(pml4, active_cpus, start, len, false);
+}
+
+pub(crate) fn barriere_cr3(pml4: u64) {
+    assert_ne!(vmm::current_pml4(), pml4, "barriere CR3 sur l'espace local");
+    demande_shootdown(pml4, u64::MAX, 0, 0, true);
+}
+
+fn demande_shootdown(pml4: u64, active_cpus: u64, start: u64, len: u64, attend_sortie_cr3: bool) {
     let current = cpu_index();
     let online = ONLINE_MASK.load(Ordering::Acquire) as u64;
     let self_bit = if current < 64 { 1u64 << current } else { 0 };
@@ -1453,6 +1464,7 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
     slot.len.store(len, Ordering::Relaxed);
     slot.targets.store(targets, Ordering::Relaxed);
     slot.acknowledgements.store(0, Ordering::Relaxed);
+    slot.attend_sortie_cr3.store(attend_sortie_cr3, Ordering::Relaxed);
     // Publication release: le handler qui observe la generation voit tous les
     // champs precedents. La slot n'est rendue libre qu'apres tous les ACK.
     slot.sequence.store(sequence, Ordering::Release);
@@ -1487,7 +1499,12 @@ pub fn shootdown_tlb(pml4: u64, active_cpus: u64, start: u64, len: u64) {
     let mut prochaine_relance = debut_attente.saturating_add(RELANCE_SHOOTDOWN_NS);
     let echeance = debut_attente.saturating_add(ECHEC_SHOOTDOWN_NS);
     let mut relance_comptee = false;
+    let irq_masquees = !x86_64::instructions::interrupts::are_enabled();
     loop {
+        // Un emetteur a IF=0 peut etre la cible d'un autre emetteur.
+        if irq_masquees {
+            sert_shootdowns(current);
+        }
         let acquittements = slot.acknowledgements.load(Ordering::Acquire);
         if acquittements & targets == targets {
             break;
@@ -1551,14 +1568,15 @@ pub fn handle_tlb_shootdown() {
 /// aucun IPI n'est en service. Cout nul hors shootdown : un balayage des
 /// creneaux, sans `cpu_index()` si aucun n'est publie (utilisable avant la
 /// mise en place du GS).
-pub fn sert_shootdowns_en_attente() {
+pub fn sert_shootdowns_en_attente() -> usize {
     if !TLB_SLOTS.iter().any(|slot| slot.sequence.load(Ordering::Acquire) != 0) {
-        return;
+        return 0;
     }
-    sert_shootdowns(cpu_index());
+    sert_shootdowns(cpu_index())
 }
 
-fn sert_shootdowns(cpu: usize) {
+fn sert_shootdowns(cpu: usize) -> usize {
+    let mut barrieres = 0;
     let bit = if cpu < 64 { 1u64 << cpu } else { 0 };
 
     if bit != 0 {
@@ -1572,7 +1590,13 @@ fn sert_shootdowns(cpu: usize) {
             }
 
             let pml4 = slot.pml4.load(Ordering::Relaxed);
+            let attend_sortie_cr3 = slot.attend_sortie_cr3.load(Ordering::Relaxed);
             if vmm::current_pml4() == pml4 {
+                // Un point de service a IF=0 peut encore voir le CR3 sortant.
+                // Un flush sur ce CR3 ne vaut pas une sortie de cet espace.
+                if attend_sortie_cr3 {
+                    continue;
+                }
                 vmm::flush_local_range(
                     slot.start.load(Ordering::Relaxed),
                     slot.len.load(Ordering::Relaxed),
@@ -1583,9 +1607,13 @@ fn sert_shootdowns(cpu: usize) {
                 }
             }
             // AcqRel ordonne l'invalidation avant l'ACK observe par l'emetteur.
-            slot.acknowledgements.fetch_or(bit, Ordering::AcqRel);
+            let precedents = slot.acknowledgements.fetch_or(bit, Ordering::AcqRel);
+            if attend_sortie_cr3 && precedents & bit == 0 {
+                barrieres += 1;
+            }
         }
     }
+    barrieres
 }
 
 /// L'etat du creneau de shootdown d'un CPU : (sequence, cibles, acquittements).
