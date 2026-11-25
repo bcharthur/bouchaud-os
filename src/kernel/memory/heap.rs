@@ -1048,3 +1048,11 @@ pub fn phys_dans_arene(ptr: *const u8, longueur: usize) -> Option<u64> {
     (p as u64).checked_sub(crate::kernel::memory::phys_offset())
 }
 
+/// Taille de l'arene du tas en octets (0 avant `switch_arena`) : base des
+/// quotas de ce qui y est alloue pour le compte des processus.
+pub fn taille_arene() -> usize {
+    let debut = ARENE_DEBUT.load(Ordering::Acquire);
+    let fin = ARENE_FIN.load(Ordering::Acquire);
+    if debut == BOOTSTRAP_DEBUT.load(Ordering::Acquire) { 0 } else { fin.saturating_sub(debut) }
+}
+

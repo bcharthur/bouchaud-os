@@ -14,6 +14,11 @@
  *                    modifier
  *   handle_ferme     la projection survit a la fermeture du handle
  *   unmap            apres bo_shm_unmap, l'acces tue (SIGSEGV)
+ *   quota            creer des regions de 32 Mio finit par NO_SPACE (quota du
+ *                    createur, BOUCHAUD_SHM_QUOTA_V1) ; pendant ce temps un
+ *                    AUTRE processus peut encore en creer une (sans quota, le
+ *                    premier avait epuise le tas du noyau) ; les fermer rend
+ *                    la charge
  *
  *     SHM_MAP_OK                 SHM_MAP_FAIL raison=...
  */
@@ -133,6 +138,31 @@ int main(void)
     if (bo_shm_unmap((void *)b) == 0)
         return echec("double_unmap_accepte", 0);
     printf("SHM_MAP_ETAPE unmap=ok\n");
+
+    bo_i64 tas[64];
+    int n = 0;
+    bo_i64 refus = 0;
+    for (; n < 64; n++) {
+        tas[n] = bo_shm_create(32u << 20);
+        if (tas[n] < 0) { refus = tas[n]; break; }
+    }
+    printf("SHM_MAP_QUOTA regions_32mio=%d refus=%lld\n", n, (long long)refus);
+    if (n == 64 || refus != -BO_E_NO_SPACE)
+        return echec("quota_absent", refus);
+    pid_t autre = fork();
+    if (autre == 0)
+        _exit(bo_shm_create(32u << 20) > 0 ? 0 : 1);
+    int st = 0;
+    waitpid(autre, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return echec("quota_un_processus_affame_les_autres", n);
+    for (int i = 0; i < n; i++)
+        bo_handle_close((bo_handle_t)tas[i]);
+    bo_i64 apres = bo_shm_create(32u << 20);
+    if (apres < 0)
+        return echec("quota_non_rendu", apres);
+    bo_handle_close((bo_handle_t)apres);
+    printf("SHM_MAP_ETAPE quota=ok\n");
     printf("SHM_MAP_OK\n");
     return 0;
 }

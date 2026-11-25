@@ -19,6 +19,58 @@ pub const MAX_SHARED_REGION: usize = 64 * 1024 * 1024;
 /// keeps its contiguous view (`avec_octets*`, used by the compositor).
 pub struct SharedRegion {
     bytes: SpinLock<Tampon>,
+    /// Le processus a qui la region est comptee (son createur) : la region
+    /// peut circuler, la charge reste a qui l'a demandee.
+    compte: u32,
+}
+
+// BOUCHAUD_SHM_QUOTA_V1 -- le stockage d'une region vit dans le TAS NOYAU.
+// Sans borne, un processus creait des regions de 64 Mio jusqu'a epuiser le
+// tas de tout le noyau. Deux plafonds, relatifs a l'arene : un quart par
+// processus createur, la moitie pour toute la machine. Refus deterministe
+// (NoSpace) AVANT toute allocation ; la charge est rendue a la destruction
+// de la region (dernier handle, derniere projection).
+static COMPTES: SpinLock<alloc::collections::BTreeMap<u32, usize>> =
+    SpinLock::new(alloc::collections::BTreeMap::new());
+static TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn plafonds() -> (usize, usize) {
+    let arene = crate::kernel::heap::taille_arene();
+    if arene == 0 { (MAX_SHARED_REGION, MAX_SHARED_REGION) } else { (arene / 4, arene / 2) }
+}
+
+fn reserve(pid: u32, octets: usize) -> Result<()> {
+    let (par_processus, global) = plafonds();
+    let mut comptes = COMPTES.lock();
+    let actuel = comptes.get(&pid).copied().unwrap_or(0);
+    let total = TOTAL.load(core::sync::atomic::Ordering::Relaxed);
+    if actuel.saturating_add(octets) > par_processus || total.saturating_add(octets) > global {
+        return Err(Error::NoSpace);
+    }
+    comptes.insert(pid, actuel + octets);
+    TOTAL.fetch_add(octets, core::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+fn rend(pid: u32, octets: usize) {
+    let mut comptes = COMPTES.lock();
+    if let Some(c) = comptes.get_mut(&pid) {
+        *c = c.saturating_sub(octets);
+        if *c == 0 { comptes.remove(&pid); }
+    }
+    TOTAL.fetch_sub(octets.min(TOTAL.load(core::sync::atomic::Ordering::Relaxed)), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Octets de regions comptes a `pid`, et pour toute la machine.
+pub fn charge(pid: u32) -> (usize, usize) {
+    (COMPTES.lock().get(&pid).copied().unwrap_or(0), TOTAL.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+impl Drop for SharedRegion {
+    fn drop(&mut self) {
+        let alloue = self.bytes.lock().alloue;
+        rend(self.compte, alloue);
+    }
 }
 
 /// Page-aligned zeroed storage, rounded up to whole pages: nothing else of the
@@ -64,7 +116,13 @@ impl Drop for Tampon {
 impl SharedRegion {
     pub fn new(size: usize) -> Result<Self> {
         if size == 0 || size > MAX_SHARED_REGION { return Err(Error::TooLarge); }
-        Ok(Self { bytes: SpinLock::new(Tampon::nouveau(size)?) })
+        let compte = crate::kernel::task::current_process_local().map(|p| p.pid).unwrap_or(0);
+        let alloue = size.checked_add(PAGE - 1).ok_or(Error::TooLarge)? & !(PAGE - 1);
+        reserve(compte, alloue)?;
+        match Tampon::nouveau(size) {
+            Ok(tampon) => Ok(Self { bytes: SpinLock::new(tampon), compte }),
+            Err(e) => { rend(compte, alloue); Err(e) }
+        }
     }
 
     /// BOUCHAUD_SHM_PROJECTION_V1 : (adresse physique, octets projetables --
