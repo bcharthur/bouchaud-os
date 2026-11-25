@@ -130,6 +130,22 @@ for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Com
 done
 cp "$OUT/BouchaudBrowserHost" "$SCENARIO/bo-navigateur"
 chmod 755 "$SCENARIO/bo-navigateur"
+# BOUCHAUD_SERVICES_UNIQUES_V1 : `BO_SMOKE_SERVICES_UNIQUES=1` livre les
+# services et `/bo-navigateur` comme liens physiques vers UN executable
+# multi-appels (`BouchaudServices`, meme artefact) : l'archive les porte en
+# entrees tar de type 1, le noyau les projette sur le meme noeud canonique.
+# Vide par defaut : livraison d'avant, octet pour octet.
+if [ "${BO_SMOKE_SERVICES_UNIQUES:-0}" = 1 ]; then
+  [ -x "$OUT/BouchaudServices" ] || { echo "BO_SMOKE_SERVICES_UNIQUES=1 sans $OUT/BouchaudServices" >&2; exit 2; }
+  UNIQUE="$SCENARIO/usr/libexec/ladybird/BouchaudServices"
+  cp "$OUT/BouchaudServices" "$UNIQUE"
+  chmod 755 "$UNIQUE"
+  for f in BouchaudBrowserHost WebContent RequestServer ImageDecoder WebWorker Compositor; do
+    ln -f "$UNIQUE" "$SCENARIO/usr/libexec/ladybird/$f"
+  done
+  ln -f "$UNIQUE" "$SCENARIO/bo-navigateur"
+  echo "BO_SMOKE_SERVICES_UNIQUES liens=$(stat -c %h "$UNIQUE") octets=$(stat -c %s "$UNIQUE")"
+fi
 if [ -d "$OUT/resources" ]; then
   cp -a "$OUT/resources/." "$SCENARIO/usr/share/ladybird/"
 fi

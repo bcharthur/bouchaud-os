@@ -126,7 +126,15 @@ param(
     # Mode userland classique uniquement.
     [switch]$AllowOlderUserland,
 
-    [switch]$Performance
+    [switch]$Performance,
+
+    # BOUCHAUD_SERVICES_UNIQUES_V2 -- Ladybird : les six services et
+    # /bo-navigateur deviennent des liens physiques vers UN executable
+    # multi-appels (BouchaudServices, artefact >= 126419b). Le noyau projette
+    # leurs pages sur un seul noeud. TCG, 6 paires (PR #373) : lectures disque
+    # -49 %, RAM page chargee -50 Mio, premiere trame -2,4 s. Desactive par
+    # defaut tant qu'une qualification WHPX n'est pas faite.
+    [switch]$ServicesUniques
 )
 
 $ErrorActionPreference = "Stop"
@@ -685,6 +693,18 @@ if ($LadybirdMode) {
         (Join-Path $NativeBrowserDir $BrowserEntry) `
         (Join-Path $ScenarioDir "bo-navigateur")
 
+    if ($ServicesUniques) {
+        if (-not $LadybirdInteractif) {
+            Fail "-ServicesUniques exige le navigateur interactif (BouchaudBrowserHost)."
+        }
+        $Unique = Join-Path $NativeBrowserDir "BouchaudServices"
+        if (-not (Test-Path $Unique)) {
+            Fail "-ServicesUniques : BouchaudServices absent de l'artefact (artefact anterieur a #373 ? relancer avec -RefreshLadybird)."
+        }
+        Copy-Item $Unique (Join-Path $LadybirdLibexec "BouchaudServices")
+        Write-Host "services   : uniques (BouchaudServices + 7 liens physiques)" -ForegroundColor Green
+    }
+
 
     # =========================================================================
     # Ressources Ladybird
@@ -1018,10 +1038,13 @@ import tarfile
 from pathlib import Path
 
 
-if len(sys.argv) != 3:
+if len(sys.argv) not in (3, 4):
     raise SystemExit(
-        "usage: bouchaud-make-ladybird-image.py <scenario> <image>"
+        "usage: bouchaud-make-ladybird-image.py <scenario> <image> [separes|uniques]"
     )
+mode_services = sys.argv[3] if len(sys.argv) == 4 else "separes"
+if mode_services not in ("separes", "uniques"):
+    raise SystemExit(f"mode de services inconnu: {mode_services}")
 
 
 root = Path(sys.argv[1]).resolve()
@@ -1083,9 +1106,34 @@ with tarfile.open(
     format=tarfile.USTAR_FORMAT,
 ) as archive:
 
+    # BOUCHAUD_SERVICES_UNIQUES_V2 : en mode `uniques`, BouchaudServices est
+    # archive AVANT tout le reste (avec ses repertoires parents) et les sept
+    # noms deviennent des entrees tar de type 1 (lien physique) vers lui :
+    # l'indexeur du noyau exige que la cible d'un lien soit deja connue.
+    unique_rel = "usr/libexec/ladybird/BouchaudServices"
+    liens = {
+        "bo-navigateur",
+        "usr/libexec/ladybird/BouchaudBrowserHost",
+        "usr/libexec/ladybird/WebContent",
+        "usr/libexec/ladybird/RequestServer",
+        "usr/libexec/ladybird/ImageDecoder",
+        "usr/libexec/ladybird/Compositor",
+        "usr/libexec/ladybird/WebWorker",
+    }
+    if mode_services == "uniques":
+        if not (root / unique_rel).is_file():
+            raise SystemExit(f"mode uniques sans {unique_rel}")
+        executables.add(unique_rel)
+        tete = {"usr", "usr/libexec", "usr/libexec/ladybird", unique_rel}
+    else:
+        tete = set()
+
     paths = sorted(
         root.rglob("*"),
-        key=lambda path: path.as_posix(),
+        key=lambda path: (
+            path.relative_to(root).as_posix() not in tete,
+            path.as_posix(),
+        ),
     )
 
 
@@ -1094,6 +1142,16 @@ with tarfile.open(
         relative = path.relative_to(root).as_posix()
 
         archive_name = f"./{relative}"
+
+        if mode_services == "uniques" and relative in liens:
+            lien = tarfile.TarInfo(archive_name)
+            lien.type = tarfile.LNKTYPE
+            lien.linkname = f"./{unique_rel}"
+            lien.mode = 0o755
+            lien.uid = lien.gid = 0
+            lien.uname = lien.gname = "root"
+            archive.addfile(lien)
+            continue
 
 
         info = archive.gettarinfo(
@@ -1218,10 +1276,12 @@ print(
 
     try {
 
+        $ModeServices = if ($ServicesUniques) { "uniques" } else { "separes" }
         python `
             $TempBuilder `
             $ScenarioDir `
-            $LadybirdImage
+            $LadybirdImage `
+            $ModeServices
 
 
         if ($LASTEXITCODE -ne 0) {

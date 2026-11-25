@@ -68,6 +68,69 @@ class ArtifactManifestTests(unittest.TestCase):
                 with self.assertRaises(m.ManifestError):
                     m.build_manifest(root, upstream)
 
+    def _manifeste(self, root, upstream):
+        with mock.patch.object(m, "git_head", return_value="b" * 40):
+            manifest = m.build_manifest(root, upstream)
+        path = root / m.MANIFEST_NAME
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest, path
+
+    def _arbre(self, td):
+        base = Path(td)
+        root = base / "artifact"
+        root.mkdir()
+        self.make_tree(root)
+        upstream = base / "UPSTREAM.md"
+        upstream.write_text("sha " + "a" * 40 + "\n", encoding="utf-8")
+        return root, upstream
+
+    def test_facultatif_present_est_couvert(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, upstream = self._arbre(td)
+            (root / "BouchaudServices").write_bytes(elf64() + b"unique")
+            manifest, path = self._manifeste(root, upstream)
+            entree = [e for e in manifest["files"] if e["path"] == "BouchaudServices"]
+            self.assertEqual(len(entree), 1)
+            self.assertTrue(entree[0]["elf_static"])
+            m.verify_manifest(root, upstream, path, check_head=False)
+            # Contenu modifie apres le manifeste : refus.
+            (root / "BouchaudServices").write_bytes(elf64() + b"autre")
+            with self.assertRaises(m.ManifestError):
+                m.verify_manifest(root, upstream, path, check_head=False)
+
+    def test_facultatif_absent_reste_valide(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, upstream = self._arbre(td)
+            manifest, path = self._manifeste(root, upstream)
+            self.assertNotIn("BouchaudServices", {e["path"] for e in manifest["files"]})
+            m.verify_manifest(root, upstream, path, check_head=False)
+
+    def test_facultatif_non_declare_est_refuse(self):
+        # Le defaut corrige : un BouchaudServices ajoute sans entree au manifeste.
+        with tempfile.TemporaryDirectory() as td:
+            root, upstream = self._arbre(td)
+            _, path = self._manifeste(root, upstream)
+            (root / "BouchaudServices").write_bytes(elf64())
+            with self.assertRaises(m.ManifestError):
+                m.verify_manifest(root, upstream, path, check_head=False)
+
+    def test_facultatif_declare_puis_retire_est_refuse(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, upstream = self._arbre(td)
+            (root / "BouchaudServices").write_bytes(elf64())
+            _, path = self._manifeste(root, upstream)
+            (root / "BouchaudServices").unlink()
+            with self.assertRaises(m.ManifestError):
+                m.verify_manifest(root, upstream, path, check_head=False)
+
+    def test_facultatif_dynamique_est_refuse(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, upstream = self._arbre(td)
+            (root / "BouchaudServices").write_bytes(elf64(interp=True))
+            with mock.patch.object(m, "git_head", return_value="b" * 40):
+                with self.assertRaises(m.ManifestError):
+                    m.build_manifest(root, upstream)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

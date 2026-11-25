@@ -65,6 +65,10 @@ const PREFIX: usize = 345;
 const TYPE_FILE: u8 = b'0';
 const TYPE_FILE_ALT: u8 = b'\0';
 const TYPE_DIR: u8 = b'5';
+/// Lien physique (`ln`) : un second nom pour un fichier deja dans l'archive.
+const TYPE_LINK: u8 = b'1';
+/// Champ `linkname` d'un en-tete `ustar`.
+const LINKNAME: usize = 157;
 
 /// Lit un champ numerique octal termine par un espace ou un zero.
 fn octal(header: &[u8], offset: usize, len: usize) -> u64 {
@@ -91,6 +95,51 @@ fn field(header: &[u8], offset: usize, len: usize) -> &str {
     let slice = &header[offset..offset + len];
     let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
     core::str::from_utf8(&slice[..end]).unwrap_or("")
+}
+
+/// BOUCHAUD_SERVICES_UNIQUES_V1 -- un lien physique de l'archive.
+///
+/// Les services Ladybird peuvent etre livres comme UN executable
+/// multi-appels et plusieurs noms (`WebContent`, `RequestServer`...). GNU tar
+/// range les noms suivants en entrees de type `1` qui designent le premier.
+/// Le nom est cree dans le RAMFS et partage l'etendue de sa cible
+/// (`backing::alias`) : un seul jeu de pages physiques pour tous les noms.
+/// Une cible au contenu en ligne est recopiee. Cible absente : `false`.
+fn lie(path: &str, header: &[u8], mode: u16) -> bool {
+    let cible = field(header, LINKNAME, 100).trim_start_matches("./").trim_start_matches('/');
+    if path.is_empty() || cible.is_empty() {
+        return false;
+    }
+    let (parent_path, file_name) = match path.rfind('/') {
+        Some(index) => (&path[..index], &path[index + 1..]),
+        None => ("", path),
+    };
+    let parent = if parent_path.is_empty() { 0 } else { mkdir_path(parent_path) };
+    let mut fs = ramfs::fs();
+    let chemin_cible = alloc::format!("/{}", cible);
+    let Some(noeud_cible) = fs.resolve(&chemin_cible, 0) else {
+        return false;
+    };
+    let node = match fs.find_child(parent, file_name) {
+        Some(existing) => existing,
+        None => match fs.touch_at(parent, file_name) {
+            Ok(created) => created,
+            Err(_) => return false,
+        },
+    };
+    if node == noeud_cible {
+        return true;
+    }
+    let mode_cible = fs.nodes[noeud_cible].mode;
+    fs.nodes[node].mode = if mode == 0 { mode_cible } else { mode };
+    if crate::fs::backing::alias(node, noeud_cible) {
+        fs.nodes[node].content.clear();
+    } else {
+        crate::fs::backing::unregister(node);
+        let contenu = fs.nodes[noeud_cible].content.clone();
+        fs.nodes[node].content = contenu;
+    }
+    true
 }
 
 /// L'en-tete porte-t-il la signature `ustar` ?
@@ -239,6 +288,13 @@ pub fn unpack(archive: &[u8]) -> Unpacked {
             }
             // Liens, peripheriques, entetes longues GNU : ignores en silence,
             // ils n'ont pas d'equivalent dans le RAMFS.
+            TYPE_LINK => {
+                if lie(path, &header, mode) {
+                    result.files += 1;
+                } else {
+                    result.skipped += 1;
+                }
+            }
             _ => result.skipped += 1,
         }
 
@@ -411,6 +467,13 @@ fn index_data_disk() -> Option<Unpacked> {
                     result.bytes += size;
                 }
             }
+            TYPE_LINK => {
+                if lie(path, &header, mode) {
+                    result.files += 1;
+                } else {
+                    result.skipped += 1;
+                }
+            }
             _ => result.skipped += 1,
         }
 
@@ -448,6 +511,10 @@ pub fn mount_data_disk() {
         MOUNTED = Some((result.files, result.directories, result.bytes));
     }
     let (lazy_files, lazy_bytes, _, _) = crate::fs::backing::stats();
+    crate::kernel::dmesg::log_fmt(format_args!(
+        "BOUCHAUD_SERVICES_UNIQUES liens_physiques={}",
+        crate::fs::backing::alias_enregistres()
+    ));
     crate::kernel::dmesg::log_fmt(format_args!(
         "tar: hdb deplie -> {} fichiers, {} repertoires, {} Kio{}{} ({} fichiers paresseux, {} Kio non copies)",
         result.files,
@@ -563,6 +630,13 @@ fn index_boot_ramdisk(address: u64, byte_len: usize) -> Option<Unpacked> {
                     }
                     result.files += 1;
                     result.bytes += size;
+                }
+            }
+            TYPE_LINK => {
+                if lie(path, &header, mode) {
+                    result.files += 1;
+                } else {
+                    result.skipped += 1;
                 }
             }
             _ => result.skipped += 1,
