@@ -64,6 +64,9 @@ musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/calculatr
 # BOUCHAUD_NOTES_RING3_V1 : Bouchaud Notes est elle aussi une application ring 3.
 musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/notes-gui" \
   userland/apps/notes/notes-gui.c
+# BOUCHAUD_JOURNAL_RING3_V1 : le Journal aussi (trace lue dans /proc/bouchaud).
+musl-gcc -O2 -static-pie -fPIE -I userland/libs/police -o "$SORTIE/bin/journal-gui" \
+  userland/apps/journal/journal-gui.c
 
 # --- DOOM ------------------------------------------------------------------------
 [ -x target/doom-bouchaud/doom-bouchaud ] || tools/doom/build-linux.sh >/dev/null

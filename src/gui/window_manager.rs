@@ -2593,9 +2593,22 @@ fn lance_calculatrice(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats) {
 pub(crate) const CHEMIN_NOTES: &str = "/bin/notes-gui";
 const ZONE_NOTES: (i32, i32) = (660, 470);
 
+/// BOUCHAUD_JOURNAL_RING3_V1 : le Journal ne capture, ne filtre ni ne dessine
+/// plus la trace dans le noyau ; c'est l'application ring 3
+/// `/bin/journal-gui`, qui lit `/proc/bouchaud/journal` (reserve a la
+/// capacite DEBUG). Meme fenetre que l'ancienne : 760x460, soit cette zone
+/// utile. `gui/apps/journal.rs` ne reste qu'en repli si le binaire manque.
+pub(crate) const CHEMIN_JOURNAL: &str = "/bin/journal-gui";
+const ZONE_JOURNAL: (i32, i32) = (758, 426);
+
 fn ouvre_app_integree(wins: &mut Vec<Win>, cwd: usize, degats: &mut Degats, kind: usize, spawn_n: &mut i32) {
     if kind == window::KIND_NOTES
         && lance_application_zone(wins, cwd, degats, CHEMIN_NOTES, "Bouchaud Notes", ZONE_NOTES)
+    {
+        return;
+    }
+    if kind == window::KIND_JOURNAL
+        && lance_application_zone(wins, cwd, degats, CHEMIN_JOURNAL, "Journal \u{2014} TOUT", ZONE_JOURNAL)
     {
         return;
     }

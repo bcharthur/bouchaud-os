@@ -864,6 +864,16 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
             "uptime" => proc_uptime(),
             "mounts" | "self/mounts" => proc_mounts(),
             "bouchaud/memoire" => proc_memoire_bouchaud(),
+            // BOUCHAUD_JOURNAL_RING3_V1 : l'anneau de trace, tel qu'au moment
+            // de l'ouverture, pour l'application Journal (anneau 3) ; reserve
+            // a `DEBUG` (`security::filesystem::kernel_trace`). Et le total
+            // ecrit depuis le demarrage : au-dela de la capacite de l'anneau,
+            // sa premiere ligne est tronquee.
+            "bouchaud/journal" => crate::drivers::serial::trace_snapshot(),
+            "bouchaud/journal_octets" => alloc::format!(
+                "{} {}\n", crate::drivers::serial::trace_total_bytes(),
+                crate::drivers::serial::trace_capacite(),
+            ).into_bytes(),
             "self/status" => proc_status(crate::kernel::task::current_process().pid)?,
             _ => {
                 if let Some(pid) = proc_pid_stat_depuis_chemin(path) {
@@ -897,7 +907,10 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
             }
             "self" => ["stat", "status", "maps", "smaps", "mounts", "reveil", "fil"]
                 .iter().map(|n| Entree::fichier(n)).collect(),
-            "bouchaud" => alloc::vec![Entree::fichier("memoire"), Entree::fichier("ota")],
+            "bouchaud" => alloc::vec![
+                Entree::fichier("memoire"), Entree::fichier("ota"),
+                Entree::fichier("journal"), Entree::fichier("journal_octets"),
+            ],
             pid if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
                 let pid = pid.parse::<u32>().ok()?;
                 crate::kernel::task::process_by_pid(pid)?;

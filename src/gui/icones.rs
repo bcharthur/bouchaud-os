@@ -203,6 +203,7 @@ pub fn pour_app(app: &crate::gui::window::App) -> Option<usize> {
         // le programme lance, pas par le titre que le client choisit.
         App::Application { client } => match client.image.as_str() {
             crate::gui::window_manager::CHEMIN_NOTES => 6,
+            crate::gui::window_manager::CHEMIN_JOURNAL => 9,
             _ => return None,
         },
         App::Navigateur { .. } => 0,

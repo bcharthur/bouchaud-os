@@ -32,6 +32,8 @@ pub enum FsDeny {
     Ownership,
     StickyDirectory,
     MappingAccess,
+    /// BOUCHAUD_JOURNAL_RING3_V1 : la trace du noyau exige `DEBUG`.
+    KernelTrace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +58,7 @@ pub const fn detail(reason: FsDeny) -> u64 {
         FsDeny::Ownership => 6,
         FsDeny::StickyDirectory => 7,
         FsDeny::MappingAccess => 8,
+        FsDeny::KernelTrace => 9,
     }
 }
 
@@ -69,6 +72,7 @@ pub const fn reason(reason: FsDeny) -> &'static str {
         FsDeny::Ownership => "ownership-denied",
         FsDeny::StickyDirectory => "sticky-directory-denied",
         FsDeny::MappingAccess => "mapping-access-denied",
+        FsDeny::KernelTrace => "kernel-trace-denied",
     }
 }
 
@@ -79,6 +83,14 @@ fn privileged_device(path: &str) -> bool {
         || path == "/dev/port"
         || path.starts_with("/dev/ata")
         || path.starts_with("/dev/pci")
+}
+
+/// BOUCHAUD_JOURNAL_RING3_V1 -- la trace du noyau (`/proc/bouchaud/journal`)
+/// : adresses noyau, chemins internes, etat des pilotes. Elle etait lue DANS
+/// le noyau par l'application Journal ; servie a l'anneau 3, elle se reserve
+/// a qui porte `DEBUG` (le profil Systeme), comme `ptrace`.
+fn kernel_trace(path: &str) -> bool {
+    path == "/proc/bouchaud/journal"
 }
 
 fn wants_write(flags: u32) -> bool {
@@ -280,6 +292,9 @@ pub fn open_allowed(
         && !security.capabilities.contains(Capabilities::DEVICE_IO)
     {
         return Err(FsDeny::PrivilegedDevice);
+    }
+    if kernel_trace(canonical.as_str()) && !security.capabilities.contains(Capabilities::DEBUG) {
+        return Err(FsDeny::KernelTrace);
     }
 
     let write = wants_write(flags);
