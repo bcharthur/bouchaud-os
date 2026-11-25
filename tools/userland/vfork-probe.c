@@ -216,6 +216,36 @@ static int epreuve_tid_apres_fork(void)
     return 0;
 }
 
+/* --- 4 bis. CLONE_CHILD_SETTID brut, sans la glibc ------------------------
+ *
+ * `clone` est emis directement : aucune compensation de la libc ne peut
+ * reecrire le mot. Le noyau doit y poser le tid du FILS, dans l'espace du
+ * fils seulement : le pere garde sa valeur.
+ */
+static volatile int mot_tid = -1;
+
+static int epreuve_settid_brut(void)
+{
+    const long flags = 0x01000000L /* CLONE_CHILD_SETTID */ | SIGCHLD;
+    long r = syscall(SYS_clone, flags, 0L, NULL, (int *)&mot_tid, 0L);
+    if (r < 0)
+        return echec("clone_brut", errno);
+    if (r == 0) {
+        long tid = syscall(SYS_gettid);
+        syscall(SYS_exit_group, mot_tid == (int)tid ? 0 : (mot_tid == -1 ? 3 : 4));
+        for (;;)
+            ;
+    }
+    int statut = 0;
+    if (waitpid((pid_t)r, &statut, 0) != (pid_t)r)
+        return echec("settid_waitpid", errno);
+    if (!WIFEXITED(statut) || WEXITSTATUS(statut) != 0)
+        return echec("settid_brut_fils", WIFEXITED(statut) ? WEXITSTATUS(statut) : -statut);
+    if (mot_tid != -1)
+        return echec("settid_ecrit_chez_le_pere", mot_tid);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--enfant") == 0)
@@ -230,6 +260,9 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("VFORK_PROBE_BEGIN n=%ld\n", n);
     if (argc > 2 && strcmp(argv[2], "tid") == 0) {
+        if (epreuve_settid_brut())
+            return 1;
+        printf("VFORK_PROBE_ETAPE settid_brut=ok\n");
         if (epreuve_tid_apres_fork())
             return 1;
         printf("VFORK_PROBE_ETAPE tid_apres_fork=ok\n");
@@ -243,6 +276,9 @@ int main(int argc, char **argv)
     if (epreuve_execve_rate())
         return 1;
     printf("VFORK_PROBE_ETAPE execve_rate=ok\n");
+    if (epreuve_settid_brut())
+        return 1;
+    printf("VFORK_PROBE_ETAPE settid_brut=ok\n");
     if (epreuve_tid_apres_fork())
         return 1;
     printf("VFORK_PROBE_ETAPE tid_apres_fork=ok\n");

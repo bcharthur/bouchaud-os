@@ -91,11 +91,6 @@ impl MmCourant {
         core::mem::replace(&mut *self.case.lock(), neuf)
     }
 
-    /// Les deux processus designent-ils le meme `Mm` ?
-    pub fn meme_que(&self, autre: &MmCourant) -> bool {
-        Arc::ptr_eq(&self.case.lock(), &autre.case.lock())
-    }
-
     // Les operations d'activation suivent le `Mm` COURANT : apres un
     // `execve`, c'est le nouvel espace que la commutation charge.
     #[inline]
@@ -314,6 +309,7 @@ pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
     if Arc::ptr_eq(&ancien, &mort) {
         return;
     }
+    vide_quarantaine();
     let debut_ns = crate::kernel::timer::monotonic_ns();
     let identity = ancien.lock().space.identity();
     let cpu = smp::cpu_index();
@@ -334,11 +330,23 @@ pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
             break;
         }
         if crate::kernel::timer::monotonic_ns() >= echeance {
+            // Un autre coeur tient encore l'ancien CR3. Rien n'est rendu : le
+            // `Mm` part en QUARANTAINE, ou il ne sera detruit qu'une fois
+            // plus aucun coeur actif dessus (`vide_quarantaine`). Avant, il
+            // restait au zombie et `Drop for Process` le detruisait plus tard
+            // sans relire les coeurs actifs.
             ESPACES_GARDES_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
             crate::kernel::dmesg::log_fmt(format_args!(
-                "ESPACE_GARDE_A_LA_MORT t={} pid={} raison=quiescence coeurs={:#x}",
+                "ESPACE_QUARANTAINE t={} pid={} raison=quiescence coeurs={:#x}",
                 crate::kernel::timer::monotonic_ms(), process.pid, restants,
             ));
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                crate::kernel::vmm::activate_kernel();
+                identity.mark_inactive(cpu);
+                drop(process.mm.remplace(mort));
+            });
+            drop(identity);
+            QUARANTAINE.lock().push(ancien);
             return;
         }
         // Une relance par coeur toutes les ~4096 iterations : assez pour
@@ -375,6 +383,37 @@ pub(crate) fn rend_espace_a_la_mort(emprunteur: bool) {
         crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns) / 1_000,
     ));
     drop(process);
+}
+
+/// Espaces de morts dont un coeur tenait encore le CR3 a l'echeance.
+/// Retires (`begin_retire`) : plus personne ne peut les activer.
+static QUARANTAINE: SpinLock<Vec<Arc<Mm>>> = SpinLock::new(Vec::new());
+
+/// Detruit les espaces en quarantaine qu'aucun coeur ne tient plus. Hors du
+/// verrou : la destruction rend des milliers de frames.
+pub fn vide_quarantaine() {
+    let liberables: Vec<Arc<Mm>> = {
+        let mut q = QUARANTAINE.lock();
+        if q.is_empty() {
+            return;
+        }
+        let mut sortis = Vec::new();
+        let mut i = 0;
+        while i < q.len() {
+            if q[i].lock().space.active_cpus() == 0 {
+                sortis.push(q.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        sortis
+    };
+    drop(liberables);
+}
+
+/// Espaces encore en quarantaine.
+pub fn quarantaine_len() -> usize {
+    QUARANTAINE.lock().len()
 }
 
 /// (espaces rendus a la mort, pages rendues, espaces gardes car empruntes)
