@@ -18,11 +18,31 @@ jamais KVM, WHPX ni PHYSICAL — rien ici ne vaut au-delà.
 | `BOUCHAUD_ORPHELINS_RECOLTES_V1` | B/D « reparentage et récolte des orphelins » | sans `init`, un fils dont le père était mort restait zombie **pour toujours** | `tools/ci/run_orphelins.sh` : témoin ÉCHEC `g1_zombie_pour_toujours` ; nouvelle image OK (règles « fils déjà zombie » et « père disparu ») |
 | ligne `[PROC-CYCLE]` | O « comptage des pertes, ressources non libérées » | ces mécanismes n'avaient aucun compteur | publiée avec `[PROC-STAT]` : vfork, espaces rendus, orphelins, victimes OOM |
 
-Non-régression jouée sur les images finales (TCG) : `run_tempete_exec.sh`
-SMP4 (≈ 7 600 processus créés, 21 en mémoire à la fin, 0 échec),
-`run_os_primitives.sh` (`OS_PRIMITIVES_VERDICT_OK`), gardes d'architecture
-(214/216, les deux mêmes échecs qu'avant la branche :
-`verifie-audit-chantiers.py`, `verifie-pile-noyau-profondeur.py`), suites hôte.
+Non-régression jouée (TCG) : `run_os_primitives.sh` OK sur chaque image
+(54 à 657 espaces rendus à la mort pendant le scénario, 2 orphelins récoltés),
+suites hôte 152/152, gardes d'architecture 216/216 (le bloc mesure de
+`AUDIT_12_CHANTIERS.md`, déjà faux avant la branche, a été réécrit par
+`tools/mesure-chantiers.py --ecris`).
+
+**Tempête d'exec (SMP4, 30 s en mode complet)** — à lire avec sa limite :
+
+| Image | Passages | Gels |
+|---|---|---|
+| référence (`main@5b6db15`) | 5 | 0 |
+| vfork seul | 2 | 0 |
+| + mémoire rendue à la mort et OOM | 1 | 0 |
+| + orphelins, attente à la mort NON bornée | 3 | **1** |
+| finale (attente à la mort bornée à 20 ms) | 3 | 0 |
+
+Le gel unique a la signature du « silence total » déjà documenté sur `main`
+le 17/11 dans l'en-tête de `run_tempete_exec.sh` (sortie série coupée au
+milieu d'une ligne, aucune ligne `[DIAG-EN-SOUFFRANCE]`). Il n'est **pas
+attribué** : le relevé des vCPU par le moniteur QEMU n'a pas fonctionné dans
+cet environnement (`QEMU_CPUS_ABSENT`). Par précaution, la seule attente non
+bornée ajoutée par la branche (celle des autres cœurs avant de rendre
+l'espace d'un mort) a été bornée ; 3/3 depuis. Un échantillon de cette taille
+ne prouve ni l'innocence ni la culpabilité : la campagne KVM/CI de la PR doit
+rejouer la tempête plusieurs fois.
 
 ### Contrats introduits
 
@@ -37,8 +57,10 @@ SMP4 (≈ 7 600 processus créés, 21 en mémoire à la fin, 0 échec),
   `Process` (filet). Le père attend en `TASK_KILLABLE` : un signal ordinaire ne
   le reprend pas, une condamnation si.
 - **À la mort du dernier fil, l'espace est rendu** — sauf si c'est le `Mm`
-  du père (fils vfork mort sans `execve`) ou s'il est encore emprunté. Le
-  zombie pointe sur un `Mm` des morts partagé, vide, jamais exécuté.
+  du père (fils vfork mort sans `execve`), s'il est encore emprunté, ou si un
+  autre cœur ne lâche pas l'ancien CR3 en 20 ms (`ESPACE_GARDE_A_LA_MORT`,
+  l'espace part alors à la récolte, comme avant). Le zombie pointe sur un
+  `Mm` des morts partagé, vide, jamais exécuté.
 - **L'OOM ne tue jamais sous verrou**, attend sa victime au plus
   `DELAI_MORT_NS` (3 s) par victime, et abandonne (comportement d'avant) si le
   fautif est lui-même le plus gros ou si personne n'est désignable.
