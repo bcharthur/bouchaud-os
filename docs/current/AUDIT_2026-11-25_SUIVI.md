@@ -59,6 +59,34 @@ avec un maximum de 38 ms. Le débit de la phase complète varie entre les
 paires. La mesure provient de noyaux instrumentés localement avec des
 compteurs de durée, sans changement de la barrière livrée.
 
+### Session manuelle WHPX et fermeture forcee
+
+Sur `9f1014ca`, WHPX materiel confirme, SMP1, 8 192 Mio, le test utilisateur
+a atteint le bureau en 2 642 ms depuis le noyau. Ladybird a presente sa
+fenetre 17,33 ms apres le clic. Example.com a pris 873 ms et le delai depuis
+le lancement du navigateur etait de 2 981 ms. Sept forks ont partage
+16 346 pages COW sans copie immediate ni echec d'allocation. Les medianes
+etaient de 3,957 ms pour fork et 1,176 ms pour execve. Le Mm du WebWorker
+(20 105 pages) a ete rendu en 2 030 us. Aucun panic ni crash Ladybird
+detecte, extinction QEMU avec le code 0.
+
+Apres la fermeture forcee, le dernier releve WHPX indiquait 82 taches
+zombies, 13 vivantes, 21 processus crees, aucun detruit et environ 1 700 Mio
+de RAM. Sur `main@5b6db15` et `9f1014ca`, un controle TCG SMP1 avec un
+client de test a trois processus et quinze fils reproduit la retention
+apres le clic sur la croix. Les deux bras ont 15 taches zombies et aucun
+processus detruit jusqu'a la reouverture, puis zero zombie et trois
+processus detruits. Le chemin force recolte le registre de processus.
+Les references des taches zombies, et donc leurs Mm, restent jusqu'au
+recyclage des emplacements. Le chemin normal de dernier fil rend le Mm
+plus tot sur le candidat. Le releve WHPX totalise les frames du systeme.
+
+Observations de la meme session WHPX, a confirmer sur une reference
+appariee si elles deviennent un sujet de travail. CPU proche de 99 % en
+SMP1, 15 pics HID (maximum 233 845 us), 32 `PERSIST-SLOW` (mediane
+environ 494 ms), attente ATA jusqu'a 341 ms, aucun GPU materiel et YouTube
+charge en environ 30 s.
+
 ## 1. Commits de la branche
 
 | SHA | Lot |

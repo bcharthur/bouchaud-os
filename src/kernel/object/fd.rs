@@ -752,11 +752,21 @@ pub fn device_for_path(path: &str) -> Option<FdKind> {
 /// La table des montages, initialisee au premier usage : `devfs` sur `/dev`,
 /// `procfs` sur `/proc`.
 pub fn montages() -> &'static crate::fs::vfs::Table<FdKind> {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use crate::kernel::sync::SpinLockIrq;
+
     static TABLE: crate::fs::vfs::Table<FdKind> = crate::fs::vfs::Table::vide();
-    static MONTEE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-    if !MONTEE.swap(true, core::sync::atomic::Ordering::AcqRel) {
-        TABLE.monte("/dev", &DEVFS);
-        TABLE.monte("/proc", &PROCFS);
+    static MONTEE: AtomicBool = AtomicBool::new(false);
+    static INITIALISATION: SpinLockIrq<()> = SpinLockIrq::new(());
+    if !MONTEE.load(Ordering::Acquire) {
+        let _initialisation = INITIALISATION.lock();
+        if !MONTEE.load(Ordering::Relaxed) {
+            TABLE.monte("/dev", &DEVFS);
+            TABLE.monte("/proc", &PROCFS);
+            // Les lecteurs concurrents ne doivent pas tomber sur le /proc
+            // statique du RAMFS avant la publication des deux montages.
+            MONTEE.store(true, Ordering::Release);
+        }
     }
     &TABLE
 }
