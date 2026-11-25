@@ -58,6 +58,7 @@ typedef long i64;
 #define BO_SHM_READ       (BO_BASE + 0x42)
 #define BO_SHM_WRITE      (BO_BASE + 0x43)
 #define BO_SHM_FILL_RECT  (BO_BASE + 0x44)
+#define BO_SHM_MAP        (BO_BASE + 0x45)
 #define BO_DISPLAY_PRESENT (BO_BASE + 0x80)
 #define BO_DISPLAY_INFO    (BO_BASE + 0x81)
 #define BO_FENETRE_POMPE   (BO_BASE + 0x90)
@@ -605,6 +606,10 @@ static int vivantes;
 static i64 attente_g;
 static int ordre[FEN_MAX];   /* ordre[0] : fond ... ordre[nfen-1] : premier plan */
 static i64 affichage_g, region_g;
+/* BOUCHAUD_SHM_PROJECTION_V1 : l'image de l'ecran projetee dans ce processus
+ * (ABI 1.7). Non nulle : remplissages, texte et curseur s'ecrivent en memoire,
+ * sans appel systeme ; nulle (noyau plus ancien) : chemin par appels. */
+static u32 *ecran_px;
 static u64 lit_ns, lit_max, pres_ns, pres_max, trames_total, pixels_total, recompositions;
 /* Appels systeme d'ecriture dans la region (remplissages + lignes). */
 static u64 appels_region;
@@ -634,6 +639,13 @@ static int intersecte(struct rect a, struct rect b, struct rect *out)
 static i64 remplit(struct rect r, u32 couleur)
 {
     if (!r.l || !r.h) return 0;
+    if (ecran_px) {
+        for (u32 y = r.y; y < r.y + r.h; y++) {
+            u32 *ligne = ecran_px + (u64)y * ecran_l + r.x;
+            for (u32 x = 0; x < r.l; x++) ligne[x] = couleur;
+        }
+        return 0;
+    }
     appels_region++;
     i64 e = sys6(BO_SHM_FILL_RECT, (u64)region_g, ((u64)r.y * ecran_l + r.x) * 4u, couleur,
                  r.l, r.h, (u64)ecran_l * 4u);
@@ -662,6 +674,11 @@ static void ecris_texte(u32 x, u32 y, const char *t, unsigned e, u32 encre, u32 
         for (u32 xx = i.x; xx < i.x + i.l; xx++) {
             u32 col = (xx - x) / e, ci = col / (POLICE_L + 1), gx = col % (POLICE_L + 1);
             ligne_texte[xx - i.x] = (gx < POLICE_L && police_allume(t[ci], gx, gy)) ? encre : fond;
+        }
+        if (ecran_px) {
+            u32 *dst = ecran_px + (u64)yy * ecran_l + i.x;
+            for (u32 k = 0; k < i.l; k++) dst[k] = ligne_texte[k];
+            continue;
         }
         appels_region++;
         sys6(BO_SHM_WRITE, (u64)region_g, ((u64)yy * ecran_l + i.x) * 4u, (u64)ligne_texte, (u64)i.l * 4u, 0, 0);
@@ -1150,6 +1167,16 @@ static void superpose_curseur(struct rect r)
     u32 ligne[CUR_L];
     for (u32 y = i.y; y < i.y + i.h; y++) {
         u64 decalage = ((u64)y * ecran_l + i.x) * 4u;
+        if (ecran_px) {
+            u32 *px = ecran_px + (u64)y * ecran_l;
+            const char *forme = curseur_forme[y - cur_y];
+            for (u32 x = i.x; x < i.x + i.l; x++) {
+                char p = forme[x - cur_x];
+                if (p == 'X') px[x] = 0x000000u;
+                else if (p == 'O') px[x] = 0xffffffu;
+            }
+            continue;
+        }
         if (sys6(BO_SHM_READ, (u64)region_g, decalage, (u64)ligne, (u64)i.l * 4u, 0, 0) < 0) return;
         const char *forme = curseur_forme[y - cur_y];
         for (u32 x = i.x; x < i.x + i.l; x++) {
@@ -1521,6 +1548,12 @@ static int bureau(i64 affichage, u64 *pile)
     region_g = sys6(BO_SHM_CREATE, (u64)ecran_l * ecran_h * 4u, 0, 0, 0, 0, 0);
     exige(region_g > 0, "bureau : image de l'ecran creee");
     if (region_g <= 0) return 1;
+    {
+        /* Lecture + ecriture : le curseur se compose sur ce qui est deja la. */
+        i64 a = sys6(BO_SHM_MAP, (u64)region_g, 3, 0, 0, 0, 0);
+        if (a > 0) ecran_px = (u32 *)a;
+        ecris_nombre("[COMPOSITED] projection_ecran=", ecran_px ? 1 : 0);
+    }
     struct rect tout = { 0, 0, ecran_l, ecran_h };
     if (dock) {
         /* Un bureau utilisable : dock, curseur et cases visibles d'emblee. */
