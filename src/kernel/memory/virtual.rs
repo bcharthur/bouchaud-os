@@ -2097,6 +2097,42 @@ impl AddressSpace {
         true
     }
 
+    /// BOUCHAUD_ECRITURE_UTILISATEUR_V1 -- une ecriture du noyau POUR LE
+    /// COMPTE du processus, a une adresse qu'il a choisie (`CHILD_SETTID`,
+    /// `clear_child_tid`, copies d'appels systeme).
+    ///
+    /// `write` ecrit par la vue physique : il ne regarde pas le droit
+    /// d'ecriture de la PTE. C'est ce qu'il faut au chargeur ELF, qui remplit
+    /// le texte en lecture seule qu'il vient d'allouer -- et c'est une faille
+    /// des qu'une page en lecture seule n'appartient PAS au processus : le
+    /// vDSO et sa page de donnees sont partages par tous, un `clone` avec
+    /// `CHILD_SETTID` pointe dedans aurait reecrit le code d'horloge de tous
+    /// les processus, root compris. Apres la casse eventuelle de la COW,
+    /// chaque page doit etre presente, utilisateur et INSCRIPTIBLE ; sinon,
+    /// rien n'est ecrit (Linux : `put_user` echoue, `EFAULT`).
+    pub fn write_utilisateur(&mut self, virt: u64, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        let Some(fin) = virt.checked_add(data.len() as u64) else { return false };
+        let mut page = virt & !(PAGE_SIZE - 1);
+        while page < fin {
+            match self.prepare_casse_cow(page, true) {
+                CasseCow::Copiee { invalidation, ancienne } => {
+                    invalidation.execute();
+                    rend_frame_possedee(ancienne);
+                }
+                CasseCow::SansMemoire => return false,
+                CasseCow::PasCow | CasseCow::Promue | CasseCow::DejaInscriptible => {}
+            }
+            if !self.writable(page) {
+                return false;
+            }
+            page += PAGE_SIZE;
+        }
+        self.write(virt, data)
+    }
+
     /// Lit une chaine C (terminee par 0) depuis l'espace utilisateur.
     pub fn read_cstr(&mut self, virt: u64, max: usize) -> Option<alloc::string::String> {
         let mut bytes = Vec::new();

@@ -252,7 +252,7 @@ fn construit_fils(
     // dans une page que le pere a deja touchee, donc copiee).
     if demande.flags & CLONE_CHILD_SETTID != 0 && demande.child_tid != 0 {
         let tid = child_task.tid as u32;
-        child.mm.lock().space.write(demande.child_tid, &tid.to_le_bytes());
+        child.mm.lock().space.write_utilisateur(demande.child_tid, &tid.to_le_bytes());
     }
     // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le fils herite du masque du fil qui
     // appelle `fork` (posix_spawn de la glibc : tout bloque, le fils le

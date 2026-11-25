@@ -36,7 +36,7 @@ fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
             // tourner, et l'invalidation les vise.
             let _ = casse_cow_courant(clear);
             let process = task.process.clone();
-            process.mm.lock().space.write(clear, &0u32.to_le_bytes());
+            process.mm.lock().space.write_utilisateur(clear, &0u32.to_le_bytes());
             futex_wake(clear, 1);
         }
         let process = task.process.clone();

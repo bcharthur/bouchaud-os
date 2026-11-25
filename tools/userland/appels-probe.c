@@ -11,6 +11,10 @@
  *              gettimeofday et time concordent (a 1 s pres pour time)
  *   coeurs     deux fils sur deux coeurs se passent un jeton horodate :
  *              la lecture de l'un n'est jamais anterieure a celle de l'autre
+ *   protection (si AT_SYSINFO_EHDR) : les pages du vDSO sont COMMUNES a
+ *              tous les processus -- mprotect(PROT_WRITE) refuse, read()
+ *              vers elles refuse, clone(CLONE_CHILD_SETTID) pointe dedans
+ *              sans effet, et le vDSO marche dans un fils de fork
  *
  *     APPELS_PROBE_OK              APPELS_PROBE_FAIL raison=...
  *
@@ -25,7 +29,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
+#include <signal.h>
+#include <sys/auxv.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -88,6 +97,42 @@ static void *partenaire(void *arg)
         atomic_store(&tour, 0);
     }
     return NULL;
+}
+
+static int protection(void)
+{
+    unsigned long base = getauxval(AT_SYSINFO_EHDR);
+    printf("APPELS_PROBE_VDSO base=%#lx\n", base);
+    if (!base) return 0;
+    unsigned char avant[64], apres[64];
+    memcpy(avant, (void *)base, sizeof avant);
+    if (memcmp(avant, "\177ELF", 4)) return echec("vdso_sans_entete_elf", 0);
+    errno = 0;
+    if (mprotect((void *)base, 4096, PROT_READ | PROT_WRITE) == 0) return echec("vdso_mprotect_ecriture", 0);
+    if (mprotect((void *)(base - 4096), 4096, PROT_READ | PROT_WRITE) == 0) return echec("vvar_mprotect_ecriture", 0);
+    int t[2];
+    if (pipe(t)) return echec("pipe", errno);
+    if (write(t[1], "XXXXXXXX", 8) != 8) return echec("pipe_ecriture", errno);
+    if (read(t[0], (void *)(base + 16), 8) >= 0) return echec("vdso_read_accepte", 0);
+    close(t[0]); close(t[1]);
+    long pid = syscall(SYS_clone, (long)(SIGCHLD | CLONE_CHILD_SETTID), 0L, 0L, (long)(base + 16), 0L);
+    if (pid == 0) _exit(0);
+    if (pid < 0) return echec("clone", errno);
+    int etat;
+    waitpid((pid_t)pid, &etat, 0);
+    pid_t f = fork();
+    if (f == 0) {
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        _exit(b.tv_sec > a.tv_sec || (b.tv_sec == a.tv_sec && b.tv_nsec >= a.tv_nsec) ? 0 : 3);
+    }
+    if (f < 0 || waitpid(f, &etat, 0) != f || !WIFEXITED(etat) || WEXITSTATUS(etat))
+        return echec("vdso_fils_fork", etat);
+    memcpy(apres, (void *)base, sizeof apres);
+    if (memcmp(avant, apres, sizeof avant)) return echec("vdso_modifie", 0);
+    printf("APPELS_PROBE_ETAPE protection=ok\n");
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -153,6 +198,7 @@ int main(int argc, char **argv)
         if (atomic_load(&reculs)) return echec("recul_entre_coeurs", atomic_load(&reculs));
         printf("APPELS_PROBE_ETAPE coeurs=ok\n");
     }
+    if (protection()) return 1;
     printf("APPELS_PROBE_OK\n");
     return 0;
 }

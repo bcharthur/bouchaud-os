@@ -476,7 +476,7 @@ pub fn user_write(addr: u64, data: &[u8]) -> bool {
         return false;
     }
 
-    avec_processus(|process| process.mm.lock().space.write(addr, data))
+    avec_processus(|process| process.mm.lock().space.write_utilisateur(addr, data))
 }
 
 /// Ecrit une valeur 64 bits dans l'espace utilisateur.
@@ -858,10 +858,14 @@ fn dispatch(number: u64, args: [u64; 6], frame: &mut TrapFrame) -> i64 {
             0
         }
         GETTIMEOFDAY => {
-            let ms = realtime_ms();
+            // BOUCHAUD_VDSO_V1 : a la microseconde, comme le vDSO. La
+            // milliseconde tronquee mettait `gettimeofday` jusqu'a 1 ms en
+            // retard sur `clock_gettime(CLOCK_REALTIME)` (appels-probe :
+            // -145 a -167 us).
+            let ns = realtime_ns();
             if args[0] != 0 {
-                user_write(args[0], &(ms / 1000).to_le_bytes());
-                user_write(args[0] + 8, &((ms % 1000) * 1000).to_le_bytes());
+                user_write(args[0], &(ns / 1_000_000_000).to_le_bytes());
+                user_write(args[0] + 8, &((ns % 1_000_000_000) / 1000).to_le_bytes());
             }
             0
         }
@@ -982,6 +986,8 @@ fn pose_ancre_murale() {
             EPOCH_SECONDS.store(seconds, Ordering::Relaxed);
             EPOCH_MONO_NS.store(crate::kernel::timer::monotonic_ns(), Ordering::Relaxed);
             EPOCH_POSEE.store(2, Ordering::Release);
+            // BOUCHAUD_VDSO_V1 : l'horloge murale du vDSO suit l'ancre.
+            crate::kernel::vdso::publie();
         }
         while EPOCH_POSEE.load(Ordering::Acquire) != 2 {
             core::hint::spin_loop();
@@ -1023,6 +1029,17 @@ pub fn realtime_ns_ancree() -> Option<u64> {
     let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed);
     let ecoule_ns = crate::kernel::timer::monotonic_ns().saturating_sub(base_ns);
     Some(base_seconds.saturating_mul(1_000_000_000).saturating_add(ecoule_ns))
+}
+
+/// BOUCHAUD_VDSO_V1 : `realtime = monotone + decalage`, si l'ancre est posee.
+/// Meme valeur que `realtime_ns` pour toute lecture apres l'ancrage.
+pub fn decalage_mural_ns() -> Option<i64> {
+    if EPOCH_POSEE.load(Ordering::Acquire) != 2 {
+        return None;
+    }
+    let base_seconds = EPOCH_SECONDS.load(Ordering::Relaxed) as i64;
+    let base_ns = EPOCH_MONO_NS.load(Ordering::Relaxed) as i64;
+    Some(base_seconds.saturating_mul(1_000_000_000).saturating_sub(base_ns))
 }
 
 /// Secondes depuis l'epoch Unix.

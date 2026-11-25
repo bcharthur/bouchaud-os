@@ -143,6 +143,8 @@ pub mod vma;
 pub mod frames_libres;
 #[path = "memory/projection.rs"]
 pub mod projection;
+#[path = "memory/vdso.rs"]
+pub mod vdso;
 #[path = "memory/virtual.rs"]
 pub mod vmm;
 

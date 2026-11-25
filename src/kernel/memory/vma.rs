@@ -51,6 +51,12 @@ pub enum Backing {
         phys_base: u64,
         mapping_start: u64,
     },
+    /// BOUCHAUD_VDSO_V1 : la page vvar ou le texte du vDSO, communs a tous
+    /// les processus (`kernel::vdso`). Empruntes, jamais inscriptibles.
+    Vdso {
+        phys_base: u64,
+        mapping_start: u64,
+    },
 }
 
 impl Backing {
@@ -63,6 +69,7 @@ impl Backing {
             Backing::GemGpu { .. } => "gem-gpu",
             Backing::Framebuffer { .. } => "framebuffer",
             Backing::RegionNative { .. } => "region-native",
+            Backing::Vdso { .. } => "vdso",
         }
     }
 }
