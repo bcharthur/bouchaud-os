@@ -10,32 +10,41 @@ TCG local, avec témoin négatif quand il y en a un), **INTÉGRÉ** (exercé dan
 vrai bureau ou par un composant réel de l'OS). Aucun résultat KVM, WHPX ni
 PHYSICAL dans ce document.
 
-## 0. Point bloquant ouvert — incident de la tempête d'exec
+## 0. Incident de la tempête d'exec — cause établie, correctif mesuré
 
-**À lire avant toute fusion.** `tools/ci/run_tempete_exec.sh` (mode
-`complet` : fork + execve + fils + mémoire, 3 lanceurs, SMP4) produit, sur les
-images de la branche et **sous forte charge de l'hôte (≥ 4 QEMU parallèles)**,
-des incidents : gel total (sortie série coupée en pleine ligne), arrêt muet de
-QEMU (triple faute), ou panique `page fault @ <adresse utilisateur>` en mode
-noyau, le CPU s'exécutant sur la pile noyau d'un fil mourant (`syscall_nr=60`)
-alors que la tâche courante est un autre fil.
+`tools/ci/run_tempete_exec.sh` (mode `complet` : fork + execve + fils +
+mémoire, 3 lanceurs, SMP4) produisait, sur les images de la branche et **sous
+forte charge de l'hôte (≥ 4 QEMU parallèles)**, des incidents : gel total,
+arrêt muet de QEMU (triple faute), ou panique `page fault @ <adresse
+utilisateur>` en mode noyau sur la pile d'un fil mourant.
+
+**Cause (lecture du code, `f63dbe7`)** : `switch_to` efface le bit d'activité
+du cœur sortant (`quitte_espace`) **avant** d'écrire le CR3 suivant
+(`install`). Dans cette fenêtre, à IF=0, le cœur exécute encore sous
+l'ancienne PML4. La branche rend désormais l'espace d'un mort **à sa mort**
+(et `execve` l'ancien espace) sur la seule foi de ces bits : la PML4 et ses
+tables pouvaient être réutilisées et réécrites sous un cœur qui les parcourait
+encore. La référence ne rendait l'espace qu'à la récolte, bien plus tard :
+d'où « défaut introduit par la branche, visible seulement sous charge ».
+
+**Correctif** : `AddressSpaceIdentity::barriere_cr3` — un IPI de shootdown vers
+**tous** les cœurs en ligne et l'attente de leurs ACK avant tout rendu d'espace
+(mort, vidage de quarantaine, `execve`). Un cœur dans la fenêtre n'acquitte
+qu'après avoir écrit son nouveau CR3.
 
 | Image | Charge | Passages | Incidents |
 |---|---|---|---|
-| référence `main@5b6db15` | ×2 | 5 | 0 |
-| référence `main@5b6db15` | ×4 | 12 | **0** |
-| branche (avant COW) | ×2 | 9 | 1 |
-| branche (COW + page zéro) | ×4 | ~10 | plusieurs |
-| branche, avec / sans libération à la mort (`banc-sans-espace-rendu`) | ×2 | 6 / 6 | 0 / 0 |
+| référence `main@5b6db15` | ×4 | 12 | 0 |
+| branche avant correctif (A/B exit_mm) | ×4 | 6 / 6 | 1 triple faute / 0 |
+| **branche avec barrière CR3** | ×4 (4 QEMU) + bancs | **32** | **0 au noyau** (31 terminés `echecs=0`, 2 000 à 5 000 barrières par run ; le 32e n'a jamais atteint le noyau : vCPU0 en mode réel à `0x7607`, chargeur affamé par 6 QEMU) |
 
-Conclusion à ce stade : **défaut introduit par la branche**, visible seulement
-sous forte charge (cadence des vCPU), **non attribué**. Écartés par l'expérience
-ou par lecture : la libération à la mort sous charge ×2 (A/B), la course TOCTOU
-de la COW (corrigée, cause d'un autre symptôme), la réentrance de verrou dans
-`MmCourant`, le recyclage d'un emplacement de tâche encore sur un cœur
-(`on_cpu < 0` exigé). Outils en place : relevé des vCPU au gel par le moniteur
-QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
-×4 est la prochaine mesure.
+Le taux initial était bas : la mesure **corrobore** le mécanisme, elle ne le
+prouve pas seule. Statut : **corrigé, à confirmer** par une campagne plus
+longue (et KVM) avant de déclarer la Memory Fabric stabilisée.
+
+Deux défauts voisins trouvés en chemin, corrigés : l'OOM jugeait une victime
+morte dès `zombie`, avant qu'elle ait rendu sa mémoire (`cffa6da`) ; la sonde
+`memoire-mort` mesurait parfois un fils déjà mort.
 
 ## 1. Commits de la branche
 
@@ -53,6 +62,14 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 | `7eb61a2` | VFS : table de montages, devfs/procfs montés, `/proc` vivant |
 | `62ef599` | option témoin `banc-sans-espace-rendu` |
 | `de7c67f` | quota des `SharedRegion` par processus créateur |
+| `cc55dc0` | suivi d'audit A à O |
+| `168ee87` | gardes d'architecture rétablies (8 régressions de la branche) ; ABI native sans compat Linux (`kernel::projection`) |
+| `f63dbe7` | **barrière CR3** avant de rendre un espace (incident §0) |
+| `cffa6da` | OOM : la victime tient sa mémoire jusqu'à l'avoir rendue |
+| `f385bbb` + `ef72e1a` | VFS : répertoires des systèmes montés (`getdents`, `stat`, `/proc/<pid>`) — `f385bbb` seul ne compile pas (raté de découpage, corrigé par `ef72e1a`) |
+| `a38db1c` | icône d'une application ring 3 choisie par son image (régression de Notes) |
+| `c25b577` | Journal en application ring 3 ; trace réservée à `DEBUG` |
+| `359b8d1` | sonde : refus de la trace sans `DEBUG` (témoin discriminant) |
 
 ## 2. Chantiers A à O
 
@@ -67,8 +84,8 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 - **Initial** : `getppid` constant, `CLONE_CHILD_SETTID` ignoré, orphelins zombies à vie ; clés de futex physiques.
 - **Réalisé** : `getppid` réel ; `CHILD_SETTID`/`CLEARTID`/`SETTLS` ; récolte des orphelins (deux règles) ; **clés de futex `(PML4, adresse)` pour les pages privées**, `(0, physique)` pour les empruntées (indispensable à la COW : sinon réveils mêlés entre père et fils, et réveil perdu après une copie).
 - **Preuve** : TCG avec témoins (`run_vfork.sh … tid`, `run_orphelins.sh`, `cow-probe` étape `futex`).
-- **État** : implémenté, qualifié TCG. Incident §0 ouvert.
-- **Prochaine tranche** : attribuer l'incident §0 ; signaux pendant l'attente vfork.
+- **État** : implémenté, qualifié TCG. Incident §0 : cause établie, corrigé, à confirmer.
+- **Prochaine tranche** : campagne longue tempête (et KVM) ; signaux pendant l'attente vfork.
 
 ### C — Mémoire virtuelle et récupération (Memory Fabric)
 - **Initial** : `fork` recopiait tout ; pas de page zéro ; espace d'un mort retenu jusqu'à la récolte ; OOM tuant le fautif.
@@ -77,12 +94,12 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
   - **fork Copy-on-Write** : table de propriétaires (`src/kernel/memory/cow.rs`, pure), bits `PTE_COW`/`PTE_COW_ECRITURE`, copie ou promotion à la faute, part rendue après l'invalidation TLB, `mprotect` cohérent, échec d'allocation → politique OOM ;
   - **écritures du noyau** (`user_write`, usercopy native, `clear_child_tid`, `AddressSpace::write`) : cassent la COW avant d'écrire ;
   - **page zéro partagée** pour les lectures anonymes ;
-  - mémoire rendue à la mort (attente bornée, quarantaine si un cœur tient encore le CR3) ; OOM contrôlé (victime = plus gros consommateur) ;
+  - mémoire rendue à la mort (attente bornée, quarantaine si un cœur tient encore le CR3, **barrière CR3** avant tout rendu d'espace) ; OOM contrôlé (victime = plus gros consommateur, attendue jusqu'à ce qu'elle ait **rendu** sa mémoire ; la quarantaine est vidée avant de choisir) ;
   - `MAP_SHARED|MAP_ANONYMOUS` réellement partagé (défaut préexistant découvert par la sonde).
 - **Mesures** (TCG) : fork d'un père de 64 Mio : **192 Kio** consommés contre **66 076 Kio** (référence) ; lire 128 Mio anonymes : **264 Kio** contre **131 332 Kio** ; `fork+execve` 30 → 19 ms ; zombie : mémoire rendue 14 ms après la mort, avant récolte.
-- **Preuve** : HOST (`test_cow`, `test_oom`) ; TCG SMP1/2/4 avec témoins (`run_cow.sh`, `run_page_zero.sh`, `run_memoire_mort.sh`).
-- **État** : implémenté et qualifié TCG **hors incident §0**, qui bloque la déclaration « stabilisé ».
-- **Prochaine tranche** : attribuer §0 ; regrouper le shootdown du fork ; réclamation sous pression (pages COW) ; tables de pages vides (#379, non réimplémenté ici).
+- **Preuve** : HOST (`test_cow`, `test_oom`) ; TCG SMP1/2/4 avec témoins (`run_cow.sh`, `run_page_zero.sh`, `run_memoire_mort.sh` — 4/4 sous charge ×4) ; tempête ×4 : 31/31 runs au noyau sans incident (§0).
+- **État** : implémenté et qualifié TCG ; la cause de l'incident §0 est corrigée, la stabilisation reste à confirmer sur une campagne longue.
+- **Prochaine tranche** : campagne longue + KVM ; regrouper le shootdown du fork ; réclamation sous pression (pages COW) ; tables de pages vides (#379, non réimplémenté ici).
 
 ### D — Création, exécution, destruction des processus
 - **Initial** : `posix_spawn` = fork à copie complète.
@@ -94,7 +111,7 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 
 ### E — IPC natif et mémoire partagée
 - **Initial** : `SharedRegion` lisible/écrivable seulement par appels (copie).
-- **Réalisé** : ABI 1.7 `bo_shm_map`/`bo_shm_unmap` (droits MAP/READ/WRITE, W^X, région tenue par les projections, héritée au fork, rendue au munmap/exec/mort) ; stockage aligné page dans l'arène physique du tas (aucune autre donnée ne partage ses frames, arène d'amorçage refusée) ; **quota par processus créateur** ; **adoption par `composited`**.
+- **Réalisé** : ABI 1.7 `bo_shm_map`/`bo_shm_unmap` — la mécanique VM est dans un module neutre `kernel::projection`, partagé avec la compat Linux : le cœur natif ne dépend plus de `compat/linux` (garde `verifie-abi-native`) — (droits MAP/READ/WRITE, W^X, région tenue par les projections, héritée au fork, rendue au munmap/exec/mort) ; stockage aligné page dans l'arène physique du tas (aucune autre donnée ne partage ses frames, arène d'amorçage refusée) ; **quota par processus créateur** ; **adoption par `composited`**.
 - **Mesures** : `composited` glisser une fenêtre : 32 → **0** appels de région par pas, 16,8 → 12,0 ms par pas (TCG, bruité).
 - **Preuve** : TCG (`run_shm_map.sh`, témoin quota) ; INTÉGRÉ (`banc_bureau_ring3_entrees.py`).
 - **État** : implémenté, intégré au compositeur ring 3.
@@ -110,11 +127,11 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 - **Prochaine tranche** : surfaces clientes projetées des deux côtés, double tampon sans copie.
 
 ### H — Atelier en ring 3
-- **Initial** : la Calculatrice était déjà ring 3 ; Notes, Fichiers, Terminal… dans le noyau.
-- **Réalisé** : **Bouchaud Notes en application ring 3** (`/bin/notes-gui`), ouverte par l'icône, le menu et « ouvrir dans Notes » ; rendu identique via l'**atlas de police d'Atelier** publié par le noyau (`/usr/share/atelier/glyphes-*.bin`, `userland/libs/police/atelier.h`) ; enregistrement `write`+`fsync` sur `/persist`.
-- **Preuve** : INTÉGRÉ, TCG (`banc_notes_bureau.py` : lancement, police, saisie, F2, F3, capture).
-- **État** : intégré ; `gui/apps/notes.rs` ne reste qu'en repli si le binaire manque.
-- **Prochaine tranche** : retirer le repli quand toutes les images l'embarquent ; migrer Fichiers ou Insights.
+- **Initial** : la Calculatrice était déjà ring 3 ; Notes, Journal, Fichiers, Terminal… dans le noyau.
+- **Réalisé** : **Journal en application ring 3** (`/bin/journal-gui`) : le noyau ne fait plus que publier la trace (`/proc/bouchaud/journal`, réservée à `DEBUG`) ; même fenêtre au pixel près (capture comparée au témoin noyau), séquences ANSI retirées ; icône d'une application ring 3 choisie par son image (Notes avait perdu la sienne). **Bouchaud Notes en application ring 3** (`/bin/notes-gui`), ouverte par l'icône, le menu et « ouvrir dans Notes » ; rendu identique via l'**atlas de police d'Atelier** publié par le noyau (`/usr/share/atelier/glyphes-*.bin`, `userland/libs/police/atelier.h`) ; enregistrement `write`+`fsync` sur `/persist`.
+- **Preuve** : INTÉGRÉ, TCG (`banc_notes_bureau.py` : lancement, police, saisie, F2, F3, capture ; `banc_journal_bureau.py` 7/7 : lancement, accès, police, filtre, recapture, défilement, capture + `--temoin`).
+- **État** : intégré ; `gui/apps/notes.rs` et `gui/apps/journal.rs` ne restent qu'en repli si le binaire manque.
+- **Prochaine tranche** : retirer les replis quand toutes les images embarquent les binaires ; migrer Fichiers (consommateur du VFS : `opendir`/`stat`) — demande de publier les icônes d'Atelier comme l'atlas de police.
 
 ### I — Ladybird
 - Exclu par la demande. Bénéficie sans modification de vfork/COW/page zéro.
@@ -122,16 +139,17 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 ### J — Stockage, VFS
 - **Initial** : `/dev` et `/proc` = comparaisons de chaînes ; `/proc/meminfo` figé au démarrage.
 - **Réalisé** : interface `SystemeFichiers`, **table de montages**, résolution par point de montage, `Vnode` ; **devfs** et **procfs** montés ; `/proc` vivant (`meminfo`, `uptime`, `mounts`, `bouchaud/memoire`, `<pid>/status`) ; union avec le RAMFS.
-- **Preuve** : HOST (`tools/fs/test_vfs.rs`), TCG avec témoin (`run_vfs.sh`).
-- **État** : première tranche intégrée au chemin `open` de tous les programmes.
-- **Prochaine tranche** : adaptateur RAMFS derrière la même interface et descripteurs indépendants des indices ; `getdents` sur les montages ; puis système de fichiers disque inscriptible (BFS existant), cache de pages unifié, writeback/fsync.
+- **Preuve** : HOST (`tools/fs/test_vfs.rs`, 5 tests), TCG avec témoin (`run_vfs.sh` : montages, `/proc` vivant, liste des pids, `/proc/<fils>` après `wait`, `/dev/input`, refus de la trace).
+- **Réalisé (tranche 2)** : `SystemeFichiers::liste`, `Ouverture::Dossier`, `FdKind::DossierMonte` ; `getdents` fait l'**union** RAMFS + système monté (un nom une fois) ; `/proc` liste les **processus vivants** (`/proc/<pid>` disparaît à la récolte), devfs liste ses périphériques ; `stat`/`fstat`/`statx` : `S_IFDIR`. Limite : `chdir`/`openat` relatif sous un répertoire monté absent du RAMFS → `ENOTDIR`.
+- **État** : deux tranches intégrées au chemin `open`/`getdents`/`stat` de tous les programmes.
+- **Prochaine tranche** : adaptateur RAMFS derrière la même interface et descripteurs indépendants des indices (porteront le chemin : lève la limite ci-dessus) ; puis système de fichiers disque inscriptible (BFS existant), cache de pages unifié, writeback/fsync.
 
 ### K — Réseau
 - **État** : inchangé.
 
 ### L — Sécurité et isolation
-- **Réalisé** : droits stricts et refus déterministes de `bo_shm_map` ; quota du tas noyau par processus ; W^X vérifié sur les projections.
-- **Preuve** : TCG.
+- **Réalisé** : droits stricts et refus déterministes de `bo_shm_map` ; quota du tas noyau par processus ; W^X vérifié sur les projections ; **la trace du noyau exige `DEBUG`** (`FsDeny::KernelTrace`, refus audité).
+- **Preuve** : TCG ; refus de la trace : témoin discriminant (sans la garde, un processus uid 1000 l'ouvre).
 
 ### M — Matériel physique
 - **État** : inchangé ; aucune qualification PHYSICAL.
@@ -140,7 +158,7 @@ QEMU, `-d cpu_reset`, option témoin `banc-sans-espace-rendu`. L'A/B sous charge
 - **État** : inchangé.
 
 ### O — Observabilité
-- **Réalisé** : `[PROC-CYCLE]`, `[MEM-COW]`, `/proc/bouchaud/memoire`, `COW_REFUS`, `OOM_VICTIME`, `ESPACE_RENDU_A_LA_MORT`, `ESPACE_QUARANTAINE`.
+- **Réalisé** : `[PROC-CYCLE]` (dont `barrieres_cr3=`), `[MEM-COW]`, `/proc/bouchaud/memoire`, `COW_REFUS`, `OOM_VICTIME`, `ESPACE_RENDU_A_LA_MORT`, `ESPACE_QUARANTAINE`.
 
 ## 3. Rejouer
 
@@ -155,6 +173,7 @@ tools/ci/run_orphelins.sh $B 2
 tools/ci/run_shm_map.sh $B 2
 tools/ci/run_vfs.sh $B 2
 python3 tools/ci/banc_notes_bureau.py --boot $B
+python3 tools/ci/banc_journal_bureau.py --boot $B          # et --temoin
 python3 tools/ci/banc_bureau_ring3_entrees.py --boot $B
-tools/ci/run_tempete_exec.sh $B 30     # incident §0
+tools/ci/run_tempete_exec.sh $B 30     # incident §0 (sous charge : 4 instances en parallèle)
 ```
