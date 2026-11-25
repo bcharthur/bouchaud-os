@@ -145,6 +145,13 @@ static inline bo_i64 bo_shm_read(bo_handle_t shm, bo_usize off, void *out, bo_us
 static inline bo_i64 bo_shm_write(bo_handle_t shm, bo_usize off, const void *data, bo_usize len)
 { return bo__sys6(BO_NR_SHM_WRITE, shm, off, (bo_u64)data, len, 0, 0); }
 
+/* ABI 1.7 : projection sans copie. Rend l'adresse (>= 0) ou -BO_E_*. */
+static inline bo_i64 bo_shm_map(bo_handle_t shm, bo_u32 prot)
+{ return bo__sys6(BO_NR_SHM_MAP, shm, prot, 0, 0, 0, 0); }
+
+static inline bo_i64 bo_shm_unmap(void *addr)
+{ return bo__sys6(BO_NR_SHM_UNMAP, (bo_u64)addr, 0, 0, 0, 0, 0); }
+
 /* ---- processes --------------------------------------------------------- */
 
 /* Launch `path` with `count` bootstrap handles, each attenuated to masks[i]

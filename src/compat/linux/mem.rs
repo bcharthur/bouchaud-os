@@ -628,10 +628,12 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
 
     // V14: the VM/caches have their own domains; avoid a TASKS/BKL lookup.
     let process = super::processus_courant();
+    let regions_rendues;
     let (retirement, liberes, clean_liberes, pml4) = {
         let mut process = process.mm.lock();
         let liberes = process.retire_partages(addr, length);
         let clean_liberes = process.retire_clean_pages(addr, length);
+        regions_rendues = process.retire_regions_natives(addr, length);
         vma::retire(&mut process.promesses, addr, fin);
         let retirement = process.space.prepare_unmap(addr, length);
         #[cfg(feature = "banc-gpu-venus")]
@@ -649,6 +651,8 @@ pub fn sys_munmap(addr: u64, length: u64) -> i64 {
     execute_process_invalidation(&process, retirement.invalidation());
 
     process.mm.lock().space.finish_unmap(retirement);
+    // Apres l'invalidation : plus aucun coeur ne peut lire ces frames.
+    drop(regions_rendues);
 
     for node in liberes {
         partage::demappe(node);
@@ -940,3 +944,48 @@ pub fn sys_msync(addr: u64, _length: u64) -> i64 {
     }
     0
 }
+
+/// BOUCHAUD_SHM_PROJECTION_V1 -- projette une `SharedRegion` native dans le
+/// processus courant, a une adresse choisie par le noyau. `phys` est le debut
+/// physique de la region (contigue), `longueur` sa taille arrondie a la page.
+/// Rend l'adresse, ou un errno negatif. Les droits ont ete verifies par
+/// l'appelant (handle) ; W^X l'est ici.
+pub fn projette_region_native(
+    phys: u64,
+    longueur: u64,
+    ecriture: bool,
+    region: alloc::sync::Arc<crate::kernel::native::object::Object>,
+) -> Result<u64, i64> {
+    if longueur == 0 || longueur & (PAGE_SIZE - 1) != 0 || phys & (PAGE_SIZE - 1) != 0 {
+        return Err(-errno::EINVAL);
+    }
+    let prot = PROT_READ | if ecriture { PROT_WRITE } else { 0 };
+    let drapeaux = prot_to_flags_verifie(prot).ok_or(-errno::EACCES)?;
+    let process_rc = task::current_process();
+    let mut process = process_rc.mm.lock();
+    if !process.tient_sous_limite(longueur) {
+        return Err(-errno::ENOMEM);
+    }
+    let base = choisit_base_mmap(&mut process, 0, longueur, MAP_SHARED)?;
+    let (retirement, liberes, clean_liberes) = installe_vma(
+        &mut process,
+        base,
+        longueur,
+        drapeaux,
+        Backing::RegionNative { phys_base: phys, mapping_start: base },
+        false,
+    );
+    process.regions_natives.push(task::RegionProjetee { base, length: longueur, region });
+    drop(process);
+    finish_mapping_replacement(&process_rc, retirement, &liberes, &clean_liberes);
+    c22_trace_vma_syscall(process_rc.pid, "shm_map", base, longueur, prot, MAP_SHARED, base as i64);
+    Ok(base)
+}
+
+/// La longueur de la projection native qui commence exactement a `base`.
+pub fn longueur_region_native(base: u64) -> Option<u64> {
+    let process = task::current_process();
+    let mm = process.mm.lock();
+    mm.regions_natives.iter().find(|r| r.base == base).map(|r| r.length)
+}
+

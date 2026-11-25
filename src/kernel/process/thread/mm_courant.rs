@@ -272,6 +272,7 @@ fn mm_des_morts() -> Option<Arc<Mm>> {
         let space = AddressSpace::new()?;
         *case = Some(Arc::new(Mm::new(MmState {
             space,
+            regions_natives: Vec::new(),
             brk_start: 0,
             brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(),

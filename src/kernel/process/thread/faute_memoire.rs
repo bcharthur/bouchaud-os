@@ -846,6 +846,22 @@ fn peuple_page_loader(
                 FaultOutcome::IoError
             }
         }
+        PromesseBacking::RegionNative { phys_base, mapping_start } => {
+            // Les frames appartiennent a la region (tenue par
+            // `MmState::regions_natives`), jamais a l'espace : empruntees.
+            let phys = phys_base.saturating_add(page.saturating_sub(mapping_start));
+            if p.space.map_foreign_accounted(
+                page,
+                phys,
+                effective.drapeaux,
+                crate::kernel::vmm::ResidentKind::Shared,
+            ) {
+                note.pose(crate::kernel::fautes::Categorie::Partage);
+                FaultOutcome::Resolved
+            } else {
+                FaultOutcome::IoError
+            }
+        }
         PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
             let phys = phys_base.saturating_add(phys_offset)
                 .saturating_add(page.saturating_sub(mapping_start));

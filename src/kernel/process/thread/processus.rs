@@ -1,5 +1,9 @@
 pub struct MmState {
     pub space: AddressSpace,
+    /// BOUCHAUD_SHM_PROJECTION_V1 : les `SharedRegion` natives projetees dans
+    /// cet espace. Chaque entree tient la region vivante. APRES `space` :
+    /// les champs sont detruits dans l'ordre, l'espace (donc ses PTE) d'abord.
+    pub regions_natives: Vec<RegionProjetee>,
     pub brk_start: u64,
     pub brk: u64,
     pub mmap_next: u64,
@@ -7,6 +11,14 @@ pub struct MmState {
     pub limite_as: u64,
     pub promesses: Vec<Promesse>,
     pub clean_pages: Vec<CleanPageMapping>,
+}
+
+/// Une `SharedRegion` projetee : la plage, et la reference qui la garde.
+#[derive(Clone)]
+pub struct RegionProjetee {
+    pub base: u64,
+    pub length: u64,
+    pub region: Arc<crate::kernel::native::object::Object>,
 }
 
 pub struct Mm {
@@ -241,6 +253,25 @@ pub struct CleanPageMapping {
 }
 
 impl MmState {
+    /// BOUCHAUD_SHM_PROJECTION_V1 : retire les projections natives que
+    /// `[addr, addr+len)` couvre ENTIEREMENT. Une projection seulement
+    /// entamee reste tenue jusqu'a la fin de l'espace : garder une region un
+    /// peu plus longtemps est sans danger, la rendre trop tot ne l'est pas.
+    /// L'appelant les detruit APRES l'invalidation TLB du retrait.
+    pub fn retire_regions_natives(&mut self, addr: u64, len: u64) -> Vec<RegionProjetee> {
+        let fin = addr.saturating_add(len);
+        let mut rendues = Vec::new();
+        self.regions_natives.retain(|r| {
+            if r.base >= addr && r.base.saturating_add(r.length) <= fin {
+                rendues.push(r.clone());
+                false
+            } else {
+                true
+            }
+        });
+        rendues
+    }
+
     pub fn retire_clean_pages(&mut self, addr: u64, len: u64) -> Vec<crate::kernel::clean_page_cache::Key> {
         let fin = addr.saturating_add(len);
         let mut keys = Vec::new();

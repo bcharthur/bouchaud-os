@@ -39,6 +39,14 @@ pub const SHM_WRITE: u64 = NATIVE_BASE + 0x43;
 /// sans rien lire de l'appelant (region, decalage, couleur, pixels, lignes,
 /// pas) -> pixels ecrits. Bornes : `shm_rect_contrat::valide`.
 pub const SHM_FILL_RECT: u64 = NATIVE_BASE + 0x44;
+/// BOUCHAUD_SHM_PROJECTION_V1 (ABI 1.7) : projeter une region dans l'espace de
+/// l'appelant (region, prot : bit 0 lecture, bit 1 ecriture) -> adresse.
+/// Droits : MAP, plus READ et/ou WRITE selon `prot`. Sans copie : les frames
+/// de la region sont celles que voient le noyau et les autres projections.
+pub const SHM_MAP: u64 = NATIVE_BASE + 0x45;
+/// (adresse rendue par SHM_MAP) -> 0. Retire la projection ; la region vit
+/// tant qu'un handle ou une autre projection la tient.
+pub const SHM_UNMAP: u64 = NATIVE_BASE + 0x46;
 
 pub const PROCESS_SPAWN: u64 = NATIVE_BASE + 0x50;
 pub const PROCESS_INFO: u64 = NATIVE_BASE + 0x51;
@@ -119,6 +127,8 @@ pub const fn name(number: u64) -> &'static str {
         SHM_READ => "bo_shm_read",
         SHM_WRITE => "bo_shm_write",
         SHM_FILL_RECT => "bo_shm_fill_rect",
+        SHM_MAP => "bo_shm_map",
+        SHM_UNMAP => "bo_shm_unmap",
         PROCESS_SPAWN => "bo_process_spawn",
         PROCESS_INFO => "bo_process_info",
         PROCESS_KILL => "bo_process_kill",

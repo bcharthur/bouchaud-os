@@ -20,7 +20,7 @@ typedef unsigned long      bo_usize;
 
 /* ABI version: major << 16 | minor. */
 #define BO_ABI_MAJOR 1
-#define BO_ABI_MINOR 6
+#define BO_ABI_MINOR 7
 
 #define BO_NATIVE_BASE            0x424f0000UL
 #define BO_NR_VERSION             (BO_NATIVE_BASE + 0x00)
@@ -46,6 +46,11 @@ typedef unsigned long      bo_usize;
 #define BO_NR_SHM_READ            (BO_NATIVE_BASE + 0x42)
 #define BO_NR_SHM_WRITE           (BO_NATIVE_BASE + 0x43)
 #define BO_NR_SHM_FILL_RECT       (BO_NATIVE_BASE + 0x44)
+/* ABI 1.7 (BOUCHAUD_SHM_PROJECTION_V1) : projection sans copie d'une region. */
+#define BO_NR_SHM_MAP             (BO_NATIVE_BASE + 0x45)
+#define BO_NR_SHM_UNMAP           (BO_NATIVE_BASE + 0x46)
+#define BO_SHM_PROT_READ          1u
+#define BO_SHM_PROT_WRITE         2u
 #define BO_NR_PROCESS_SPAWN       (BO_NATIVE_BASE + 0x50)
 #define BO_NR_PROCESS_INFO        (BO_NATIVE_BASE + 0x51)
 #define BO_NR_PROCESS_KILL        (BO_NATIVE_BASE + 0x52)

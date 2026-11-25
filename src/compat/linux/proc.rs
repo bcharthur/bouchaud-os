@@ -78,14 +78,17 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     // coute, et sur quelles pages.
     let debut_ns = crate::kernel::timer::monotonic_ns();
 
-    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, invalidation) = {
+    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, invalidation, regions_natives) = {
         let mut mm = parent.mm.lock();
         let (space, compte, invalidation) = match mm.space.duplicate() {
             Some(resultat) => resultat,
             None => return -errno::ENOMEM,
         };
         (space, compte, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
-            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), invalidation)
+            mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), invalidation,
+            // Le fils herite des projections natives (memes frames, partagees) :
+            // il doit tenir les regions lui aussi.
+            mm.regions_natives.clone())
     };
     // BOUCHAUD_COW_V1 : les pages du pere viennent de passer en lecture seule.
     // Un autre fil du pere peut encore en tenir une traduction inscriptible
@@ -120,7 +123,7 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     // pas au meme endroit : il est donc borne a part.
     let apres_references_ns = crate::kernel::timer::monotonic_ns();
 
-    let mm = Arc::new(Mm::new(MmState { space, brk_start, brk, mmap_next,
+    let mm = Arc::new(Mm::new(MmState { space, regions_natives, brk_start, brk, mmap_next,
         partages, limite_as, promesses, clean_pages }));
     let (pid, nom_journal) = construit_fils(&parent, mm, None, frame, &demande);
 
@@ -499,6 +502,7 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
         let limite_as = mm_ancien.lock().limite_as;
         let neuf = Arc::new(Mm::new(MmState {
             space,
+            regions_natives: Vec::new(),
             brk_start,
             brk: brk_start,
             mmap_next: vmm::user_mmap_base(),
@@ -520,6 +524,7 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
         process.libere_vfork(task::FinEmprunt::Execve);
         (0, crate::kernel::timer::monotonic_ns())
     } else {
+        let mut regions_anciennes = Vec::new();
         let (old, old_clean, old_shared) = {
             let mut mm = process.mm.lock();
             mm.brk_start = brk_start;
@@ -529,6 +534,9 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
             // tenait sur le cache partage doivent partir avec lui.
             let old_shared = core::mem::take(&mut mm.partages);
             let old_clean = core::mem::take(&mut mm.clean_pages);
+            // Les regions natives de l'ancienne image sont rendues APRES la
+            // destruction de l'ancien espace (plus aucune PTE ne les vise).
+            regions_anciennes = core::mem::take(&mut mm.regions_natives);
             mm.promesses = new_promises;
             // L'ancien espace est detruit ici. Son `Drop` remet CR3 sur la table du
             // noyau s'il etait actif : c'est pour cela qu'on active le nouveau
@@ -557,6 +565,7 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
         // rendre. Le second passage etait invisible.
         let pages_rendues = old.mapped_pages() as u64;
         drop(old);
+        drop(regions_anciennes);
         (pages_rendues, apres_bascule_ns)
     };
     drop(mm_ancien);

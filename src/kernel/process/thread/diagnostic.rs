@@ -53,7 +53,7 @@ pub fn new_process_avec(name: &str, cwd: usize, parent: u32, uid: u32, gid: u32)
         parent,
         resource_group_id: pid,
         resource_group_name: name.to_string(),
-        mm: MmCourant::new(Arc::new(Mm::new(MmState { space, brk_start: 0, brk: 0,
+        mm: MmCourant::new(Arc::new(Mm::new(MmState { space, regions_natives: Vec::new(), brk_start: 0, brk: 0,
             mmap_next: crate::kernel::vmm::user_mmap_base(), partages: Vec::new(),
             limite_as: 0, promesses: Vec::new(), clean_pages: Vec::new() }))),
         vfork: SpinLock::new(None),

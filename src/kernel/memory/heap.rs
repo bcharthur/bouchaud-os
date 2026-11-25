@@ -1027,3 +1027,24 @@ pub fn log_ng_stats() {
         }
     }
 }
+
+/// BOUCHAUD_SHM_PROJECTION_V1 -- l'adresse PHYSIQUE d'un bloc du tas.
+///
+/// Apres `switch_arena`, le tas est une arene physique contigue lue par la
+/// vue directe (`virtuel = PHYS_OFFSET + physique`) : un bloc qui y vit a donc
+/// une adresse physique, et un bloc aligne sur la page couvre des frames
+/// entieres. `None` pour tout ce qui n'est pas dans cette arene -- en
+/// particulier l'arene d'amorcage, tableau statique de l'image noyau, que
+/// rien ne doit jamais projeter en espace utilisateur.
+pub fn phys_dans_arene(ptr: *const u8, longueur: usize) -> Option<u64> {
+    let debut = ARENE_DEBUT.load(Ordering::Acquire);
+    let fin = ARENE_FIN.load(Ordering::Acquire);
+    let amorce = (BOOTSTRAP_DEBUT.load(Ordering::Acquire), BOOTSTRAP_FIN.load(Ordering::Acquire));
+    let p = ptr as usize;
+    let p_fin = p.checked_add(longueur)?;
+    if debut == amorce.0 || p < debut || p_fin > fin || (p < amorce.1 && p_fin > amorce.0) {
+        return None;
+    }
+    (p as u64).checked_sub(crate::kernel::memory::phys_offset())
+}
+
