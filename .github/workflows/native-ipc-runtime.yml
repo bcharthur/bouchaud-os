@@ -5,6 +5,9 @@ on:
     paths:
       - 'src/kernel/process/**'
       - 'src/kernel/scheduler/**'
+      # BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 : les attentes de l'IPC native passent par
+      # sync::WaitQueue ; une regression de reveil s'y verrait.
+      - 'src/kernel/sync/**'
       - 'src/kernel/time/**'
       - 'src/arch/x86_64/idt/**'
       - 'src/arch/x86_64/idt.rs'
@@ -78,6 +81,9 @@ on:
     paths:
       - 'src/kernel/process/**'
       - 'src/kernel/scheduler/**'
+      # BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 : les attentes de l'IPC native passent par
+      # sync::WaitQueue ; une regression de reveil s'y verrait.
+      - 'src/kernel/sync/**'
       - 'src/kernel/time/**'
       - 'src/arch/x86_64/idt/**'
       - 'src/arch/x86_64/idt.rs'
