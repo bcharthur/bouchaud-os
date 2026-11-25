@@ -380,6 +380,9 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
         identity.mark_inactive(cpu);
         drop(process.mm.remplace(mort));
     });
+    // BOUCHAUD_BARRIERE_CR3_V1 : un coeur peut encore etre dans la fenetre
+    // « bit efface, CR3 pas encore change » de `switch_to`.
+    identity.barriere_cr3();
     let pages = ancien.lock().space.mapped_pages() as u64;
     drop(identity);
     // Dernier detenteur (sauf lecteur passager) : `Drop for Mm` rend les
@@ -403,11 +406,13 @@ static QUARANTAINE: SpinLock<Vec<Arc<Mm>>> = SpinLock::new(Vec::new());
 
 /// Detruit les espaces en quarantaine qu'aucun coeur ne tient plus. Hors du
 /// verrou : la destruction rend des milliers de frames.
-pub fn vide_quarantaine() {
+/// Rend les espaces de la quarantaine que plus aucun coeur n'execute ; rend
+/// le nombre de pages ainsi liberees.
+pub fn vide_quarantaine() -> usize {
     let liberables: Vec<Arc<Mm>> = {
         let mut q = QUARANTAINE.lock();
         if q.is_empty() {
-            return;
+            return 0;
         }
         let mut sortis = Vec::new();
         let mut i = 0;
@@ -420,7 +425,19 @@ pub fn vide_quarantaine() {
         }
         sortis
     };
+    // Barriere HORS du verrou de l'Mm : on n'attend jamais d'acquittement
+    // d'IPI en tenant un verrou qui coupe les interruptions.
+    let mut pages = 0;
+    for mm in &liberables {
+        let (identity, n) = {
+            let garde = mm.lock();
+            (garde.space.identity(), garde.space.mapped_pages())
+        };
+        identity.barriere_cr3();
+        pages += n;
+    }
     drop(liberables);
+    pages
 }
 
 /// Espaces encore en quarantaine.

@@ -550,6 +550,10 @@ fn prepare_execve(path_addr: u64, argv_addr: u64, envp_addr: u64) -> Result<Trap
             (old, old_clean, old_shared)
         };
         let apres_bascule_ns = crate::kernel::timer::monotonic_ns();
+        // BOUCHAUD_BARRIERE_CR3_V1 : meme fenetre que pour un mort -- un
+        // frere qui vient d'effacer son bit peut encore executer sous
+        // l'ancienne PML4 jusqu'a son prochain CR3.
+        old_identity.barriere_cr3();
         task::forget_fault_space(old.pml4());
         for mapping in old_clean {
             crate::kernel::clean_page_cache::release(mapping.key);

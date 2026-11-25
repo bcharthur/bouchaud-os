@@ -177,6 +177,10 @@ static COW_COPIES: AtomicU64 = AtomicU64::new(0);
 static COW_PROMOTIONS: AtomicU64 = AtomicU64::new(0);
 static COW_ECHECS_ALLOCATION: AtomicU64 = AtomicU64::new(0);
 static PAGES_ZERO_PROJETEES: AtomicU64 = AtomicU64::new(0);
+static BARRIERES_CR3: AtomicU64 = AtomicU64::new(0);
+
+/// Barrieres CR3 executees avant de rendre un espace (BOUCHAUD_BARRIERE_CR3_V1).
+pub fn barrieres_cr3() -> u64 { BARRIERES_CR3.load(Ordering::Relaxed) }
 static PAGES_ZERO_MATERIALISEES: AtomicU64 = AtomicU64::new(0);
 
 /// (projections de la page zero, pages zero devenues privees par ecriture)
@@ -1175,6 +1179,25 @@ impl AddressSpaceIdentity {
 
     pub(crate) fn begin_retire(&self) {
         self.retiring.store(true, Ordering::Release);
+    }
+
+    /// BOUCHAUD_BARRIERE_CR3_V1 -- a appeler APRES `begin_retire` et la
+    /// quiescence des bits, AVANT de rendre la PML4 et ses tables.
+    ///
+    /// Un coeur efface son bit d'activite dans `switch_to` AVANT d'ecrire le
+    /// CR3 suivant : pendant cette fenetre (IF=0), il execute encore sous
+    /// l'ancienne PML4, et un defaut de TLB y parcourt les tables. Rendre la
+    /// PML4 sur la seule foi des bits la laissait reutiliser et reecrire sous
+    /// ses pieds -- faute noyau, double faute, triple faute (tempete-exec,
+    /// mode complet, sous forte charge de l'hote).
+    ///
+    /// Un IPI vers TOUS les coeurs en ligne, et l'attente de leurs
+    /// acquittements : un coeur dans la fenetre a IF=0 et n'acquitte qu'apres
+    /// avoir ecrit son nouveau CR3 ; l'identite etant en retrait, aucun ne
+    /// peut plus y entrer apres.
+    pub(crate) fn barriere_cr3(&self) {
+        smp::shootdown_tlb(self.pml4, u64::MAX, 0, 0);
+        BARRIERES_CR3.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn active_cpus(&self) -> u64 {

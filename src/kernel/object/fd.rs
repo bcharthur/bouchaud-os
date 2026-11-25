@@ -869,9 +869,10 @@ fn proc_memoire_bouchaud() -> Vec<u8> {
     alloc::format!(
         "cow_frames_partagees {}\ncow_partages {}\ncow_redevenues_exclusives {}\ncow_copies {}\ncow_promotions {}\ncow_echecs_allocation {}\n\
 page_zero_projetees {}\npage_zero_materialisees {}\nespaces_rendus_a_la_mort {}\npages_rendues_a_la_mort {}\n\
-espaces_gardes {}\noom_victimes {}\noom_abandons {}\noom_attentes {}\n",
+espaces_gardes {}\noom_victimes {}\noom_abandons {}\noom_attentes {}\nbarrieres_cr3 {}\n",
         partagees, partages, exclusives, copies, promotions, echecs, zero_proj, zero_mat,
         rendus, pages_rendues, gardes, victimes, abandons, attentes,
+        crate::kernel::vmm::barrieres_cr3(),
     ).into_bytes()
 }
 

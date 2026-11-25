@@ -888,12 +888,13 @@ zombies_ms={} temps_recycle_ms={} ecart_ms={} residu_ms={}",
         crate::serial_println!(
             "[PROC-CYCLE] vfork={} vfork_execve={} vfork_sortie={} vfork_attente_ms={} vfork_pire_ms={} \
 espaces_rendus_a_la_mort={} pages_rendues_a_la_mort={} espaces_gardes_empruntes={} \
-orphelins_recoltes={} oom_victimes={} oom_abandons={} oom_attentes={} quarantaine={}",
+orphelins_recoltes={} oom_victimes={} oom_abandons={} oom_attentes={} quarantaine={} barrieres_cr3={}",
             vf_crees, vf_exec, vf_sortie, vf_attente_ns / 1_000_000, vf_pire_ns / 1_000_000,
             rendus, pages_rendues, gardes,
             crate::kernel::task::orphelins_recoltes(),
             oom_victimes, oom_abandons, oom_attentes,
             crate::kernel::task::quarantaine_len(),
+            crate::kernel::vmm::barrieres_cr3(),
         );
         // BOUCHAUD_COW_V1 / BOUCHAUD_PAGE_ZERO_V1.
         let (partagees, partages, exclusives, copies, promotions, echecs) = crate::kernel::vmm::cow_stats();
