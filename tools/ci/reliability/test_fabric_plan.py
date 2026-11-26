@@ -16,7 +16,7 @@ from fabric_plan import COMPAT, CONSUMERS, MIGRATED, plan
 class FabricPlan(unittest.TestCase):
     def test_les_contrats_pointent_vers_des_bancs_actifs(self):
         root = Path(__file__).resolve().parents[3]
-        contracts = json.loads((root / "tools/ci/fabric_contracts.json").read_text())
+        contracts = json.loads((root / "tools/ci/fabric_contracts.json").read_text())["contracts"]
         for identifier, record in contracts.items():
             with self.subTest(contract=identifier):
                 document = yaml.safe_load((root / record["workflow"]).read_text())

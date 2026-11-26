@@ -73,7 +73,7 @@ jobs:
           output = Path(os.environ["GITHUB_OUTPUT"])
           manual = os.environ["MANUAL_FABRIC"]
           domains = MIGRATED
-          profile = os.environ["MANUAL_PROFILE"]
+          profile = os.environ["MANUAL_PROFILE"] or "FABRIC"
           branch = os.environ["PROOF_BRANCH"]
           prefix = "refs/tags/ci-fabric/"
           ref = os.environ["PROOF_REF"]
@@ -107,8 +107,8 @@ jobs:
               entry = next(line for line in output.read_text().splitlines() if line.startswith("fabric_plan="))
               plan = json.loads(entry.removeprefix("fabric_plan="))
               selected = sorted(domains & set(plan["domains"]))
-          contracts = json.loads(Path("tools/ci/fabric_contracts.json").read_text())
-          report = {**plan, "profile": "FABRIC", "sha": os.environ["TEST_SHA"], "migrated": selected,
+          contracts = json.loads(Path("tools/ci/fabric_contracts.json").read_text())["contracts"]
+          report = {**plan, "profile": profile, "sha": os.environ["TEST_SHA"], "migrated": selected,
                     "contracts": {key: value for key, value in contracts.items() if value["owner"] in selected}}
           Path("fabric-plan.json").write_text(json.dumps(report, indent=2) + "\n")
           with output.open("a") as stream:
@@ -262,6 +262,32 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fabric-merge-verdict
+          name: fabric-merge-verdict-${{ github.run_attempt }}
           path: fabric-merge-verdict.json
+          if-no-files-found: error
+
+  merge-gate:
+    name: Bouchaud Merge Gate
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Vérifier la preuve FULL avant fusion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_BRANCH: ${{ github.head_ref }}
+        run: python3 tools/ci/fabric_pr_gate.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-pr-verdict-${{ github.run_attempt }}
+          path: fabric-pr-verdict.json
           if-no-files-found: error

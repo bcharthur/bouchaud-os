@@ -44,11 +44,12 @@ def verdict(needs):
 
 
 def main():
-    results = verdict(json.loads(os.environ["NEEDS_JSON"]))
+    needs = json.loads(os.environ["NEEDS_JSON"])
+    results = verdict(needs)
     go = all(result in ("PASS", "SKIPPED_BY_PLAN") for result in results.values())
     report = {
         "sha": os.environ["GITHUB_SHA"],
-        "profile": "FABRIC",
+        "profile": needs.get("plan", {}).get("outputs", {}).get("profile"),
         "run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
         "decision": "PASS_SCOPE" if go else "NO-GO",
         "global_qualification": "NOT_RUN",
