@@ -212,3 +212,24 @@ impl TableCow {
         (self.partages, self.liberees_partagees)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reservation_impossible_preserve_les_parts() {
+        let frames = [0x1000, 0x2000];
+        let mut table = TableCow::neuve();
+        assert!(table.partage_lot(&frames));
+        let cumuls = table.cumuls();
+        // Ce majorant echoue dans try_reserve_exact sans toucher aux vecteurs.
+        assert!(!table.retaille(usize::MAX));
+        assert_eq!(table.cumuls(), cumuls);
+        for frame in frames {
+            assert_eq!(table.proprietaires(frame), 2);
+            assert_eq!(table.rend(frame), Rendu::Garder);
+            assert_eq!(table.rend(frame), Rendu::Liberer);
+        }
+    }
+}

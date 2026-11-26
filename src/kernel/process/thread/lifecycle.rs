@@ -490,9 +490,11 @@ pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32, bool)> {
     out
 }
 
-/// Ce pid a-t-il encore des fils (zombies ou vivants) ?
-pub fn has_children(parent_pid: u32) -> bool {
-    processes().iter().any(|p| p.parent == parent_pid)
+/// Le parent a-t-il encore un fils qui correspond a l'attente ?
+pub fn has_children(parent_pid: u32, enfant: Option<u32>) -> bool {
+    PROCESSES.lock().iter().any(|p| {
+        p.parent == parent_pid && enfant.is_none_or(|pid| p.pid == pid)
+    })
 }
 
 /// Retire un fils zombie (il a ete recolte). Rend `true` si CET appel l'a retire.

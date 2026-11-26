@@ -18,7 +18,11 @@
  *     MEMOIRE_MORT_OK mode=...       MEMOIRE_MORT_FAIL mode=... raison=...
  */
 #define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,6 +246,119 @@ static int cohorte_force(void)
     return 0;
 }
 
+static long rss_kio(void)
+{
+    FILE *status = fopen("/proc/self/status", "r");
+    if (!status)
+        return -1;
+    char ligne[128];
+    long rss = -1;
+    while (fgets(ligne, sizeof ligne, status))
+        if (sscanf(ligne, "VmRSS: %ld kB", &rss) == 1)
+            break;
+    if (fclose(status) != 0)
+        return -1;
+    return rss;
+}
+
+struct collecte {
+    pid_t pid;
+    pid_t resultat;
+    int statut;
+    int erreur;
+    atomic_int *prets;
+};
+
+static void *attend_meme_fils(void *arg)
+{
+    struct collecte *c = arg;
+    atomic_fetch_add(c->prets, 1);
+    c->resultat = waitpid(c->pid, &c->statut, 0);
+    c->erreur = errno;
+    return NULL;
+}
+
+static int rss_course(void)
+{
+    const char *mode = "rss-course";
+    enum { NB = 4, TOURS = 20 };
+    const size_t taille = 1024 * 1024;
+    volatile unsigned char *pages = mmap(NULL, taille, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pages == MAP_FAILED)
+        return echec(mode, "mmap", 0);
+    for (size_t i = 0; i < taille; i += 4096)
+        pages[i] = 1;
+    for (int tour = 0; tour < TOURS; ++tour) {
+        int depart[2];
+        pid_t fils[NB];
+        if (pipe(depart) != 0)
+            return echec(mode, "pipe", tour);
+        for (int n = 0; n < NB; ++n) {
+            fils[n] = fork();
+            if (fils[n] < 0)
+                return echec(mode, "fork", n);
+            if (fils[n] == 0) {
+                close(depart[1]);
+                char jeton;
+                if (read(depart[0], &jeton, 1) != 1 || rss_kio() < 0)
+                    _exit(2);
+                const long avant = rss_kio();
+                for (size_t i = 0; i < taille; i += 4096) {
+                    if (pages[i] != 1)
+                        _exit(3);
+                    pages[i] = 2;
+                }
+                long copie = rss_kio();
+                if (munmap((void *)pages, taille) != 0)
+                    _exit(4);
+                long apres = rss_kio();
+                if (avant < 0 || copie != avant || apres != avant - (long)(taille / 1024)) {
+                    printf("RSS_COURSE_FAIL tour=%d avant=%ld copie=%ld apres=%ld\n",
+                           tour, avant, copie, apres);
+                    _exit(5);
+                }
+                _exit(0);
+            }
+        }
+        close(depart[0]);
+        pthread_t threads[2];
+        atomic_int prets = 0;
+        struct collecte collecte[2] = {
+            { .pid = fils[0], .prets = &prets },
+            { .pid = fils[0], .prets = &prets },
+        };
+        for (int i = 0; i < 2; ++i)
+            if (pthread_create(&threads[i], NULL, attend_meme_fils, &collecte[i]))
+                return echec(mode, "pthread_create", i);
+        while (atomic_load(&prets) != 2)
+            sched_yield();
+        if (write(depart[1], "xxxx", NB) != NB)
+            return echec(mode, "depart", tour);
+        close(depart[1]);
+        int gagnants = 0, perdants = 0;
+        for (int i = 0; i < 2; ++i) {
+            if (pthread_join(threads[i], NULL))
+                return echec(mode, "pthread_join", i);
+            const struct collecte *c = &collecte[i];
+            gagnants += c->resultat == fils[0] && WIFEXITED(c->statut) && !WEXITSTATUS(c->statut);
+            perdants += c->resultat == -1 && c->erreur == ECHILD;
+        }
+        if (gagnants != 1 || perdants != 1)
+            return echec(mode, "collecte_unique", tour);
+        for (int n = 1; n < NB; ++n) {
+            int statut;
+            if (waitpid(fils[n], &statut, 0) != fils[n] || !WIFEXITED(statut) || WEXITSTATUS(statut))
+                return echec(mode, "statut", tour);
+        }
+        for (size_t i = 0; i < taille; i += 4096)
+            if (pages[i] != 1)
+                return echec(mode, "parent_modifie", tour);
+    }
+    printf("MEMOIRE_MORT_OK mode=%s tours=%d fils=%d\n", mode, TOURS, TOURS * NB);
+    return 0;
+}
+
 static int oom(void)
 {
     const unsigned long marge_mio = 24;
@@ -306,6 +423,8 @@ int main(int argc, char **argv)
         return vfork_force();
     if (strcmp(mode, "cohorte-force") == 0)
         return cohorte_force();
+    if (strcmp(mode, "rss-course") == 0)
+        return rss_course();
     if (strcmp(mode, "oom") == 0)
         return oom();
     return echec(mode, "mode_inconnu", 0);

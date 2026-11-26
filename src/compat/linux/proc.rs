@@ -679,6 +679,9 @@ pub fn statut_wait(code: i32, par_signal: bool) -> u32 {
 pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 {
     const WNOHANG: u32 = 1;
     let parent_pid = task::current_process().pid;
+    // Apres une recolte concurrente, les autres fils ne peuvent pas
+    // satisfaire une attente qui designe un PID precis.
+    let enfant = (pid > 0).then_some(pid as u32);
 
     loop {
         let zombies = task::zombie_children(parent_pid);
@@ -704,7 +707,7 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             return child_pid as i64;
         }
 
-        if !task::has_children(parent_pid) {
+        if !task::has_children(parent_pid, enfant) {
             return -errno::ECHILD;
         }
         if options & WNOHANG != 0 {
@@ -739,7 +742,7 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         let deja_la = task::zombie_children(parent_pid)
             .iter()
             .any(|(child, _, _)| pid <= 0 || *child == pid as u32);
-        if deja_la || !task::has_children(parent_pid) {
+        if deja_la || !task::has_children(parent_pid, enfant) {
             // Annule le parking. Si le fils a gagne le CAS entre-temps, il
             // nous remet pret lui-meme ; dans les deux cas on reboucle.
             let _ = task::current().waiting_for_child.compare_exchange(true, false);

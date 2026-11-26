@@ -421,6 +421,11 @@ jobs:
             BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-smp${smp}.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie-force vfork-force" "$smp" 1024
           done
           BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-cohorte.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin cohorte-force 4 1024
+      - name: CPU Fabric, RSS concurrent, waitpid et repli getcpu KVM
+        run: |
+          set -e
+          BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/rss-course-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin rss-course 4 1024
+          BO_QEMU_KVM=1 BO_APPELS_REQUIRE_VDSO=1 BO_APPELS_REPLI_GETCPU=1 GARDE_JOURNAL="$PWD/appels-kvm-repli.log" tools/ci/run_appels.sh image/bootimage-bouchaud-os.bin 2 5000
       - name: Retrait de memoire et OOM, KVM SMP2
         run: BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-mort-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie oom" 2 1024
       - name: Victime OOM en quarantaine, KVM SMP2
@@ -442,7 +447,8 @@ jobs:
             tempete-exec-smp4/serie.log*
             tempete-exec-smp1/serie.log*
             tempete-exec-kvm-smp*/serie.log*
-            appels-kvm-smp*.log
+            appels-kvm-*.log
+            rss-course-kvm.log
             latence-kvm-smp*.log
             memoire-force-kvm-*.log
             memoire-mort-kvm.log

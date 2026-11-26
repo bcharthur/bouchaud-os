@@ -29,7 +29,7 @@ Le banc versionné `tools/ci/run_cpu_fabric_fork64.sh BOOT_A BOOT_B NOUVELLE_SOR
 
 Sonde glibc et musl et mort SIGKILL des deux perturbateurs en calcul pur observées sous TCG SMP1/2/4. Modèle COW de 200 000 opérations et nouveau test de croissance par lots, 8/8. Garde vDSO positive et mutants réussis. Les 1 593/1 573 cycles, 154 suites hôte et 217 gardes publiés par Claude restent des résultats de sa session. La CI Integration lance la tempête KVM SMP1/2/4 déjà issue de #383 et ajoute vDSO et SIGKILL en mode strict avec journaux.
 
-## Récolte différée à reprendre
+## Retrait différé des espaces d’adressage
 
 Le mode `zombie-force` de la sonde de #383 reproduit la rétention sous TCG SMP2 sans rouvrir d'application. Mémoire libre 143 Mio vivant, 143 Mio après le délai et 143 Mio immédiatement après `waitpid`. La sonde reçoit le statut SIGKILL et échoue sur la restitution. Elle ne reproduit pas le décompte des 82 tâches WHPX. Le travail non poussé de Claude n'apparaît pas dans la branche.
 
@@ -37,4 +37,25 @@ Le second lot ajoute une file tenant les processus condamnés jusqu'au traitemen
 
 Sur l'image avec ce correctif, la sonde avant waitpid repasse au vert TCG SMP1/2/4 sur sortie normale et forcée. Après mort forcée, libre de 143 à 191, 191 et 185 Mio en 14, 18 et 12 ms dans ces passages. Aucun lancement d'application n'intervient entre le signal et la mesure. Les références résiduelles du Mm sont rendues à sa destruction. Les slots de tâches stables et les piles noyau gardent encore le recyclage existant. Leur récolte autonome et les sorties concurrentes restent à qualifier. Sous TCG SMP4, la cohorte de 82 victimes restitue 77 Mio avant waitpid (103 → 180 Mio) avec 82 statuts SIGKILL. Le témoin sur le lot précédent reste à 103 Mio. Ce test porte sur le Mm et les statuts, tandis que le compteur de slots et le passage WHPX restent à vérifier.
 
-**Verdict NO-GO.** KVM requis sur l'arbre exact, preuve VDSO entre deux cœurs effectivement distincts et des replis, récolte autonome des slots et reproduction des 82 tâches WHPX. Poursuivre les optimisations CPU après ces travaux.
+## Preuve GitHub KVM acquise
+
+Référence qualifiée `8bf4f6eaa49559d6051bbb7883b23a49d20c1d51`. Neuf workflows PR terminés avec succès. Le journal Integration identifie KVM sur SMP1/2/4 et donne les résultats suivants. [Campagne](https://github.com/bcharthur/bouchaud-os/actions/runs/45782160966/job/139780758748)
+
+| Mesure | SMP1 | SMP2 | SMP4 |
+|---|---:|---:|---:|
+| Cycles fork / vide / complet | 905 / 366 / 698 | 903 / 366 / 691 | 894 / 362 / 686 |
+| Échecs sur ces 5 871 cycles | 0 | 0 | 0 |
+| clock_gettime monotone glibc / musl, ns | 38 / 39 | 33 / 33 | 33 / 33 |
+| Transitions noyau sur 200 000 lectures par libc | 0 | 0 | 0 |
+| Réveils en phase calcul / retard max µs | 3 000 / 613 | 3 000 / 75 | 3 000 / 508 |
+
+La cohorte SMP4 passe de 104 à 190 Mio libres avant waitpid. Le vfork forcé passe sur les trois configurations. OOM et témoin de quarantaine passent, le job vérifie la chaîne réserve, attente et rendu pour la même victime. Le workflow Ladybird contenant C22 et l'endurance est vert. Ces conclusions concernent le SHA de référence. [Ladybird](https://github.com/bcharthur/bouchaud-os/actions/runs/45782161156)
+
+## Dernière passe ciblée
+
+- **Sorties et RSS.** Sur le SHA de référence, deux fils du parent attendant le même enfant peuvent bloquer après sa collecte alors que d’autres enfants restent dans la table. Le parent se rendort à cause d’un test de présence trop large. La correction vérifie l’existence du PID demandé avant et après la publication de l’attente. La sonde `rss-course` sur TCG SMP4 passe 20 tours, soit 80 enfants. Quatre frères écrivent sur le même MiB hérité. Chaque enfant garde le même RSS après COW et perd exactement 1 024 Kio après `munmap`. Les données du parent restent intactes. Deux collecteurs attendent le premier enfant à chaque tour, avec un gagnant et un retour ECHILD. Cette preuve porte sur les sorties normales concurrentes et la collecte, tandis que les sorties forcées restent couvertes par les sondes du lot précédent.
+- **VDSO.** L’échange entre processus est intégré au banc SMP2/4 et valide les numéros de CPU par syscall autour des lectures glibc. Il exige des passages sur deux CPU distincts et zéro recul. Le repli getcpu avec RDPID/RDTSCP masqués vérifie les compteurs noyau. Le repli des horloges existe en preuve TCG SMP2 sur le témoin local qui force le mode syscall, deux lectures de chronométrage comprises. Le test des horloges en mode syscall et la détection d’un TSC naturellement inéligible sont des étapes distinctes.
+- **Injection.** Le refus déterministe d’une réservation impossible est vérifié sur la table COW. Les comptes, propriétaires et décisions de libération restent corrects. La matrice d’injection en vrai noyau, incluant PML4, table feuille, réserve de parts et acquisition de références, exige encore des témoins d’échec partiel avec contrôle PTE/TLB et RSS.
+- **Slots et piles.** Le registre a des indices stables, la génération protège la réutilisation, et la destruction attend les lecteurs et la fin de commutation. Une récolte autonome générale implique des trous dans ce registre et la validation des lecteurs d’indices bruts, ou une séparation de la durée de vie du slot et de celle de la pile. Elle reste hors de cette tranche ciblée. Le retrait autonome du Mm reste en place.
+
+**Verdict NO-GO pour fusion immédiate.** Le SHA KVM historique a un défaut de waitpid désormais reproduit. Le correctif et ses contrôles doivent être qualifiés sur la nouvelle tête. L’injection de bout en bout reste ouverte. Le test utilisateur WHPX est indépendant de ces preuves.

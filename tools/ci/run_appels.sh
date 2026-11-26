@@ -20,16 +20,25 @@ musl-gcc -O2 -static-pie -fPIE tools/userland/appels-probe.c -o "$T/appels-musl"
 mkdir -p "$T/scenario/bin"
 cp "$T/appels-glibc" "$T/appels-musl" "$T/scenario/bin/"
 cp "$BOOT" "$T/boot.bin"
+if [ "$SMP" -gt 1 ]; then
+  gcc -O2 -static-pie tools/userland/cpu-fabric-horloge-coeurs.c -o "$T/scenario/bin/horloge-coeurs"
+fi
 cat > "$T/scenario/autorun" <<SCEN
 echo APPELS_PROBE_BANC libc=glibc ; /bin/appels-glibc $N
 echo APPELS_PROBE_BANC libc=musl ; /bin/appels-musl $N
-echo APPELS_PROBE_FIN
 SCEN
+if [ "$SMP" -gt 1 ]; then
+  printf '%s\n' '/bin/horloge-coeurs' >> "$T/scenario/autorun"
+fi
+printf '%s\n' 'echo APPELS_PROBE_FIN' >> "$T/scenario/autorun"
 (cd tools/userland && IMAGE="$T/probe.img" ./mkdisk.sh "$T/scenario" >/dev/null)
 accel=(-accel tcg -cpu max)
 if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
   test -r /dev/kvm && test -w /dev/kvm || { echo 'KVM indisponible' >&2; exit 1; }
   accel=(-accel kvm -cpu host)
+fi
+if [ "${BO_APPELS_REPLI_GETCPU:-0}" = 1 ]; then
+  accel[3]+=',-rdpid,-rdtscp'
 fi
 set +e
 timeout 900 qemu-system-x86_64 \
@@ -59,3 +68,11 @@ if grep -aq 'APPELS_PROBE_FAIL' "$T/emis.log"; then
   exit 1
 fi
 [ "$(grep -acE '(^|[^A-Z_])APPELS_PROBE_OK' "$T/emis.log")" -eq 2 ]
+if [ "$SMP" -gt 1 ]; then
+  grep -aoE 'HORLOGE_COEURS distincts=[1-9][0-9]* reculs=0 .*' "$T/emis.log"
+  [ "$(grep -acF HORLOGE_COEURS_OK "$T/emis.log")" -eq 1 ]
+fi
+if [ "${BO_APPELS_REPLI_GETCPU:-0}" = 1 ]; then
+  grep -aqE 'BOUCHAUD_VDSO publication=.* rdtscp=0 getcpu=0 ' "$T/emis.log"
+  [ "$(grep -acE "APPELS_PROBE_COUT appel=sched_getcpu ns=[0-9]+ noyau=$N n=$N" "$T/emis.log")" -eq 2 ]
+fi
