@@ -59,6 +59,7 @@ jobs:
           ls -l /dev/kvm
       - name: Image de banc -- panne GPU injectee (non livrable)
         run: |
+          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livre.bin
           cargo bootimage --features banc-gpu-composition-panne
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-panne.bin

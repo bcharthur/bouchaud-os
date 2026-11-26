@@ -20,6 +20,8 @@ admissibles sur 8. Au premier bras `off`, le P99 interactif est de
 3 795 µs, contre 3 328 µs en charge normale. Le même analyseur donne 8/8
 sur le candidat avant fusion. Un seul rejeu de ce job mesure la
 variabilité observée et conserve le résultat de la première tentative.
+Le rejeu de ce seul job rapporte 8/8 en SMP1 et SMP4.
+[Rejeu ciblé](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863506/job/140010752399) ·
 [Journal source](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863506/job/139985378606)
 
 ## Première migration
