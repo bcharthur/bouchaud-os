@@ -1,0 +1,148 @@
+name: Bouchaud CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      fabric:
+        description: Périmètre des bancs migrés
+        type: choice
+        default: all
+        options: [all, gpu, security, storage]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bouchaud-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      gpu: ${{ steps.plan.outputs.gpu }}
+      security: ${{ steps.plan.outputs.security }}
+      storage: ${{ steps.plan.outputs.storage }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        name: Établir le plan de qualification
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          TEST_SHA: ${{ github.sha }}
+          MANUAL_FABRIC: ${{ inputs.fabric }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MANUAL_FABRIC" ]; then
+            if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$TEST_SHA"
+            else
+              python3 tools/ci/classify_changes.py --head "$TEST_SHA" --all
+            fi
+          fi
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          manual = os.environ["MANUAL_FABRIC"]
+          domains = {"gpu", "security", "storage"}
+          if manual:
+              selected = sorted(domains if manual == "all" else {manual})
+              if not set(selected) <= domains:
+                  raise ValueError("fabric inconnu")
+              plan = {"domains": selected, "uncategorized": []}
+          else:
+              entry = next(line for line in output.read_text().splitlines() if line.startswith("fabric_plan="))
+              plan = json.loads(entry.removeprefix("fabric_plan="))
+              selected = sorted(domains & set(plan["domains"]))
+          report = {**plan, "profile": "FABRIC", "sha": os.environ["TEST_SHA"], "migrated": selected}
+          Path("fabric-plan.json").write_text(json.dumps(report, indent=2) + "\n")
+          with output.open("a") as stream:
+              for domain in sorted(domains):
+                  print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
+              print(f"any={'true' if selected else 'false'}", file=stream)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fabric-plan
+          path: fabric-plan.json
+          if-no-files-found: error
+
+  kernel:
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    uses: ./.github/workflows/build-kernel.yml
+
+  gpu:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.gpu == 'true'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/gpu-composition.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+
+  security:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.security == 'true'
+    uses: ./.github/workflows/security-runtime.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+
+  storage:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.storage == 'true'
+    uses: ./.github/workflows/unix-fs-reliability.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+
+  verdict:
+    name: Bouchaud Fabric Gate
+    needs: [plan, kernel, gpu, security, storage]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Vérifier les résultats du plan exécuté
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          plan = needs["plan"]
+          results = {}
+          for name in ("plan", "kernel", "gpu", "security", "storage"):
+              result = needs[name]["result"]
+              key = "any" if name == "kernel" else name
+              flag = plan.get("outputs", {}).get(key)
+              if name == "plan" or (plan["result"] == "success" and flag == "true"):
+                  results[name] = {"success": "PASS", "failure": "FAIL", "cancelled": "CANCELLED", "skipped": "NOT_RUN"}[result]
+              elif plan["result"] != "success" or flag not in ("true", "false"):
+                  results[name] = "BLOCKED"
+              elif result == "skipped":
+                  results[name] = "SKIPPED_BY_PLAN"
+              else:
+                  results[name] = "FAIL"
+          report = {"sha": os.environ["GITHUB_SHA"], "results": results}
+          print(json.dumps(report, indent=2))
+          Path("fabric-verdict.json").write_text(json.dumps(report, indent=2) + "\n")
+          raise SystemExit(any(s not in ("PASS", "SKIPPED_BY_PLAN") for s in results.values()))
+          PY
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-verdict
+          path: fabric-verdict.json
+          if-no-files-found: error

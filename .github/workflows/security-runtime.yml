@@ -1,75 +1,16 @@
 name: Security Runtime
 
 on:
-  pull_request:
-    paths:
-      - 'src/kernel/security/**'
-      - 'src/kernel/mod.rs'
-      - 'src/arch/x86_64/usermode.rs'
-      - 'src/kernel/process/exec.rs'
-      - 'src/kernel/process/thread/processus.rs'
-      - 'src/compat/linux/proc.rs'
-      - 'src/compat/linux/file.rs'
-      - 'src/compat/linux/mod.rs'
-      - 'src/fs/ramfs.rs'
-      - 'tools/security/**'
-      - 'tools/ci/run_security_runtime.sh'
-      - '.github/workflows/security-runtime.yml'
-      # BOUCHAUD_CLE_USB_TEST_V1 : tout chemin qui envoie une commande a un
-      # support, la regle, la sonde, le banc et l'image.
-      - 'src/drivers/block/**'
-      - 'src/drivers/api/**'
-      - 'src/drivers/usb/**'
-      - 'src/drivers/mod.rs'
-      - 'src/platform/pc/**'
-      - 'src/main.rs'
-      - 'src/shell/mod.rs'
-      - 'Cargo.toml'
-      - 'tools/securite/**'
-      - 'tools/release/**'
-      - 'tools/platform/test_nvme_suivi.rs'
-      - 'tools/ci/run_cle_usb_test.sh'
-      - 'tools/ci/fabrique-disque-gpt.py'
-      - 'tools/verifie-ecriture-interne.py'
-  push:
-    branches: [main]
-    paths:
-      - 'src/kernel/security/**'
-      - 'src/kernel/mod.rs'
-      - 'src/arch/x86_64/usermode.rs'
-      - 'src/kernel/process/exec.rs'
-      - 'src/kernel/process/thread/processus.rs'
-      - 'src/compat/linux/proc.rs'
-      - 'src/compat/linux/file.rs'
-      - 'src/compat/linux/mod.rs'
-      - 'src/fs/ramfs.rs'
-      - 'tools/security/**'
-      - 'tools/ci/run_security_runtime.sh'
-      - '.github/workflows/security-runtime.yml'
-      # BOUCHAUD_CLE_USB_TEST_V1 : tout chemin qui envoie une commande a un
-      # support, la regle, la sonde, le banc et l'image.
-      - 'src/drivers/block/**'
-      - 'src/drivers/api/**'
-      - 'src/drivers/usb/**'
-      - 'src/drivers/mod.rs'
-      - 'src/platform/pc/**'
-      - 'src/main.rs'
-      - 'src/shell/mod.rs'
-      - 'Cargo.toml'
-      - 'tools/securite/**'
-      - 'tools/release/**'
-      - 'tools/platform/test_nvme_suivi.rs'
-      - 'tools/ci/run_cle_usb_test.sh'
-      - 'tools/ci/fabrique-disque-gpt.py'
-      - 'tools/verifie-ecriture-interne.py'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Image BIOS standard du run
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: security-runtime-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   security-runtime:
@@ -94,8 +35,9 @@ jobs:
           tools/ci/apt-installe.sh \
             qemu-system-x86 build-essential binutils file
 
-      - name: Build Bouchaud OS
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.artifact }}
 
       - name: Security ring3 proof
         run: |
@@ -138,6 +80,7 @@ jobs:
       - name: QEMU
         run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
 
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -149,10 +92,13 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.artifact }}
       - name: Images -- standard, cle-usb-test, temoin
         run: |
           set -euo pipefail
-          tools/ci/build_kernel.sh
+          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
           GUID=$(python3 tools/release/pose_guid_disque_gpt.py --tire)
           echo "GUID=$GUID" >> "$GITHUB_ENV"
           CARGO_TARGET_DIR=target-temoin-ecriture cargo bootimage --features banc-ecriture-interne

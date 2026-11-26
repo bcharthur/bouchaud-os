@@ -7,33 +7,16 @@ name: Unix & Filesystem Reliability
 # Voir tools/ci/unix_fiabilite.py.
 
 on:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'tools/ci/unix_fiabilite.py'
-      - 'tools/ci/reliability/test_unix_fiabilite.py'
-      - 'tools/fs/**'
-      - '.github/workflows/unix-fs-reliability.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'tools/ci/unix_fiabilite.py'
-      - 'tools/ci/reliability/test_unix_fiabilite.py'
-      - 'tools/fs/**'
-      - '.github/workflows/unix-fs-reliability.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Image BIOS standard du run
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: unix-fs-reliability-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   unix-fs:
@@ -55,19 +38,10 @@ jobs:
       - name: QEMU
         run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-          key: unix-fs-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
 
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.artifact }}
 
       - name: Scenarios find et commandes (TCG)
         run: |

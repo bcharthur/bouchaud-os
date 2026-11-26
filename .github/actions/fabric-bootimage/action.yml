@@ -1,0 +1,15 @@
+name: Image noyau Fabric
+description: Télécharge et vérifie l'image BIOS du run courant
+inputs:
+  artifact:
+    description: Nom exact de l'artefact du run courant
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        path: target/fabric-proof
+    - shell: bash
+      run: python3 tools/ci/fabric_bootimage.py install target/fabric-proof

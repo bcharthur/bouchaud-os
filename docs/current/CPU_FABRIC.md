@@ -149,3 +149,70 @@ partage. La matrice d'échecs partiels dans le vrai noyau et l'observation
 du TLB distant à ces frontières restent des limites de couverture. Le
 recyclage autonome des slots et des piles reste suivi dans
 [#385](https://github.com/bcharthur/bouchaud-os/issues/385).
+## Bilan de clôture · tranche 1 · 26 novembre 2026
+
+Candidat qualifié `b7cd529b798620ba8462cde3c64c3b47ef4f0ff0`.
+Les neuf workflows PR sont verts. Native IPC Runtime a réussi au rejeu
+sur ce SHA après un battement manqué d’`updated` au premier passage.
+[Contrôles du candidat](https://github.com/bcharthur/bouchaud-os/commit/b7cd529b798620ba8462cde3c64c3b47ef4f0ff0/checks) ·
+[Rejeu Native IPC](https://github.com/bcharthur/bouchaud-os/actions/runs/45831520939/job/139960422355)
+
+### Clôture du défaut P13
+
+Le retard différentiel se forme dans la vidange de la console asynchrone.
+Les deux rejeux KVM instrumentés donnent +78,9 et +72,4 ms à 1 s, avec un
+retour de `write()` en moins de 0,42 ms depuis la lecture invitée. Dans
+le comparatif KVM SMP4, la première mesure commence 58–63 ms après le
+lancement de la sonde sur la PR, contre 1,27–1,35 s sur `main`. Les deux
+essais asynchrones de la PR donnent +29,6 et +28,3 ms à 1 s, contre +0,9
+et +0,2 ms sur `main`. En synchrone, la PR donne −2,5 et −1,6 ms.
+Le correctif vide la file et bascule la console dans la VM du seul banc
+horaire. Les trois démarrages et les seuils du verdict sont conservés.
+[Reproduction](https://github.com/bcharthur/bouchaud-os/actions/runs/45825903161/job/139929921272) ·
+[Comparatif](https://github.com/bcharthur/bouchaud-os/actions/runs/45829211615/job/139941363923) ·
+[P13 final](https://github.com/bcharthur/bouchaud-os/actions/runs/45831520927/job/139949324229)
+
+| Écart invité − UART sur le candidat | 1 s | 10 s | 60 s |
+|---|---:|---:|---:|
+| TCG SMP4 | −1,1 ms | −3,5 ms | −13,2 ms |
+| KVM SMP4, boot 1 | −3,4 ms | −4,9 ms | −18,5 ms |
+| KVM SMP4, boot 2 | −4,4 ms | −4,3 ms | −19,8 ms |
+
+### Qualification utilisateur WHPX
+
+Les journaux série `20261126-152921-serie.log` (SMP1) et
+`20261126-153441-serie.log` (SMP4) portent la bannière `b7cd529b7986`,
+la signature invitée `MicrosoftHv` et respectivement 1 et 4 cœurs en ligne.
+Ils montrent l’activité réseau et les images Ladybird, puis la séquence
+d’extinction invitée. L’utilisation de WHPX et les deux codes de sortie
+QEMU à 0 sont également attestés par le testeur côté hôte. Le code 16 du
+marqueur invité avant les ports d’arrêt est distinct du code du processus
+QEMU.
+
+| Relevé dans les journaux | SMP1 | SMP4 |
+|---|---:|---:|
+| Pages rendues à la mort | 387 986 | 415 787 |
+| RAM utilisée au dernier relevé | 64 Mio | 64 Mio |
+| Violations LOCKDEP / échecs d’allocation COW / échecs de résolution relevés | 0 / 0 / 0 | 0 / 0 / 0 |
+| Retard maximal de la console série | 13,394 s | 4,134 s |
+| Charge maximale échantillonnée du fil console | 44 % | 87 % |
+| Latence maximale entrée → image | 1 318 ms | 368 ms |
+| Attente interactive maximale de l’ordonnanceur | 0,752 s | 2,448 s |
+| Durée maximale relevée dans `PERSIST-SLOW` | 1,622 s | 1,983 s |
+
+Aucune panique ni double faute n’apparaît dans ces journaux. Sur les
+deux configurations, le bureau a des absences temporaires de heartbeat,
+Ladybird génère de nombreuses fautes de pages, et le démarrage continue
+après un timeout de calibration PIT. Le rendu du bureau est en mode CPU.
+Ces observations restent à suivre. Les deux sessions ne comportent
+aucun témoin WHPX apparié sur `main` permettant de les attribuer à une
+régression CPU Fabric.
+
+**Avis de clôture de la tranche 1.** Les preuves CI et WHPX permettent de
+soumettre le SHA qualifié à la décision de fusion manuelle. Aucun défaut
+bloquant n’a été démontré pour cette tranche. Le suivi #385 reste ouvert
+pour la récolte autonome des slots de tâches et des piles noyau après
+fermeture forcée. Les compteurs WHPX confirment la restitution des pages,
+tandis que la qualification du recyclage des slots et des piles relève
+de ce suivi. [PR #384](https://github.com/bcharthur/bouchaud-os/pull/384) ·
+[Suivi #385](https://github.com/bcharthur/bouchaud-os/issues/385)

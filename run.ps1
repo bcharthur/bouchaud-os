@@ -139,7 +139,9 @@ param(
     # BOUCHAUD_BANC_AVANT_APRES_V1 -- construit le noyau et le disque, puis
     # s'arrete AVANT QEMU (aucune fenetre). Sert a preparer les bootimages et
     # les disques d'un banc (tools\windows\Banc-AvantApres.ps1).
-    [switch]$PreparerSeulement
+    [switch]$PreparerSeulement,
+
+    [switch]$VerifierDepotPropre
 )
 
 $ErrorActionPreference = "Stop"
@@ -180,6 +182,14 @@ function Fail {
     exit 1
 }
 
+
+function Assert-DepotPropre {
+    $etat = @(git -C $RepoRoot status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) { Fail "git status a echoue." }
+    if ($etat.Count) { Fail ("Depot modifie :" + [Environment]::NewLine + ($etat -join [Environment]::NewLine)) }
+}
+
+if ($VerifierDepotPropre) { Assert-DepotPropre }
 
 function ConvertTo-ShellSingleQuoted {
     param(
@@ -428,9 +438,8 @@ if ($LadybirdMode) {
         "ladybird-browser.img"
 
 
-    $ScenarioDir = Join-Path `
-        $RepoRoot `
-        $ScenarioName
+    # Le scenario genere ne doit jamais remplacer scenario-m8/m9 dans les sources.
+    $ScenarioDir = Join-Path (Join-Path $RepoRoot "target\windows-scenarios") $ScenarioName
 
 
     # -------------------------------------------------------------------------
@@ -1550,6 +1559,7 @@ if ($Fullscreen) {
 if ($PreparerSeulement) {
     $disquePrepare = if ($LadybirdMode) { $LadybirdImage } else { "" }
     Write-Host ("PREPARATION_TERMINEE bootimage={0} disque={1}" -f $BootImage, $disquePrepare) -ForegroundColor Green
+    if ($VerifierDepotPropre) { Assert-DepotPropre }
     exit 0
 }
 
@@ -1787,4 +1797,5 @@ Write-Host (
 ) -ForegroundColor DarkGray
 
 
+if ($VerifierDepotPropre) { Assert-DepotPropre }
 exit $QemuExitCode

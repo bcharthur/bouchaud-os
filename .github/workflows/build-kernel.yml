@@ -1,0 +1,40 @@
+name: Build kernel
+on:
+  workflow_call:
+    outputs:
+      artifact:
+        description: Image BIOS standard de la qualification
+        value: ${{ jobs.build.outputs.artifact }}
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: fabric-kernel-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            fabric-kernel-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Construire l'image BIOS standard
+        run: tools/ci/build_kernel.sh
+      - name: Établir l'identité de compilation
+        id: artifact
+        run: |
+          python3 tools/ci/fabric_bootimage.py publish target/fabric-publication
+          echo "name=fabric-bios-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: target/fabric-publication/
+          if-no-files-found: error
+          retention-days: 7
