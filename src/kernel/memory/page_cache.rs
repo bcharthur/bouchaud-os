@@ -304,11 +304,12 @@ pub fn acquire_mesure(key: Key) -> MesureAcquire {
     }
 }
 
-pub fn retain(key: Key) -> bool {
+pub fn retain_frame(key: Key, attendue: u64) -> bool {
     let cache = CACHE.lock();
     let Some(entry) = cache.entrees.get(&key) else { return false; };
     let mut state = entry.state.lock();
     if let State::Present { frame, mappings } = *state {
+        if frame != attendue { return false; }
         *state = State::Present {
             frame,
             mappings: mappings.checked_add(1).expect("clean cache ref overflow"),

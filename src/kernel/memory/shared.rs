@@ -127,6 +127,20 @@ pub fn mappe(node: usize) {
     }
 }
 
+/// Duplique une reference deja detenue par le Mm parent en cours de fork.
+pub fn retient_mappage(node: usize) -> bool {
+    let mut cache = CACHE.lock();
+    let Some(entry) = cache.iter_mut().find(|entry| entry.node == node) else {
+        return false;
+    };
+    if entry.evicting || entry.mappages == 0 {
+        return false;
+    }
+    let Some(mappages) = entry.mappages.checked_add(1) else { return false; };
+    entry.mappages = mappages;
+    true
+}
+
 pub fn demappe(node: usize) {
     {
         let mut cache = CACHE.lock();

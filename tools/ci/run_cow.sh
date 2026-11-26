@@ -4,7 +4,7 @@
 #
 #   tools/ci/run_cow.sh BOOTIMAGE [N_RAFALE] [SMP] [MEMOIRE_MIO] [EPREUVE]
 #
-# Code 0 si COW_OK sans faute noyau. Banc court (TCG). Temoin : une image
+# Code 0 si COW_OK sans faute noyau. BO_QEMU_KVM=1 impose KVM. Temoin : une image
 # dont le fork recopie echoue a l'epreuve `memoire` (fork_recopie).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -21,11 +21,16 @@ cp "$T/cow-probe" "$T/scenario/bin/"
 cp "$BOOT" "$T/boot.bin"
 echo "echo COW_BANC ; /bin/cow-probe $N $EPREUVE ; echo COW_FIN" > "$T/scenario/autorun"
 (cd tools/userland && IMAGE="$T/probe.img" ./mkdisk.sh "$T/scenario" >/dev/null)
+accel=(-accel tcg -cpu max)
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  test -r /dev/kvm && test -w /dev/kvm || { echo 'KVM indisponible' >&2; exit 1; }
+  accel=(-accel kvm -cpu host)
+fi
 set +e
 timeout 900 qemu-system-x86_64 \
   -drive format=raw,file="$T/boot.bin" \
   -drive format=raw,file="$T/probe.img" \
-  -m "$MEMOIRE" -smp "$SMP" -accel tcg -cpu max -display none -no-reboot \
+  -m "$MEMOIRE" -smp "$SMP" "${accel[@]}" -display none -no-reboot \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -serial file:"$T/serie.log"
@@ -42,3 +47,6 @@ if grep -aqE '\*\*\* KERNEL PANIC \*\*\*|DOUBLE FAULT|panicked at' "$T/serie.log
   exit 1
 fi
 grep -aqE '^COW_OK|[^A-Z_]COW_OK' "$T/emis.log"
+if [ "${BO_QEMU_KVM:-0}" = 1 ]; then
+  grep -aqE 'BOUCHAUD_CPU_ISA hyperviseur=KVMKVMKVM([[:space:]]|$)' "$T/emis.log"
+fi

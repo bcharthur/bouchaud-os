@@ -78,50 +78,53 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     // coute, et sur quelles pages.
     let debut_ns = crate::kernel::timer::monotonic_ns();
 
-    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, invalidation, regions_natives) = {
+    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses,
+        clean_pages, invalidation, regions_natives, propres_prises, partages_pris, duree_references_ns) = {
         let mut mm = parent.mm.lock();
-        let (space, compte, invalidation) = match mm.space.duplicate() {
+        let (mut space, compte, invalidation) = match mm.space.duplicate() {
             Some(resultat) => resultat,
             None => return -errno::ENOMEM,
         };
+        // Mm -> cache -> etat de la page. Ces prises n'attendent ni I/O
+        // ni WaitQueue. Le parent tient encore les frames des PTE copiees.
+        let debut_references_ns = crate::kernel::timer::monotonic_ns();
+        let propres_prises = mm.clean_pages.iter().take_while(|mapping| {
+            space.translate(mapping.virt).is_some_and(|frame| {
+                crate::kernel::clean_page_cache::retain_frame(mapping.key, frame)
+            })
+        }).count();
+        let partages_pris = if propres_prises == mm.clean_pages.len() {
+            mm.partages.iter().take_while(|plage| {
+                crate::kernel::partage::retient_mappage(plage.node)
+            }).count()
+        } else {
+            0
+        };
+        let duree_references_ns =
+            crate::kernel::timer::monotonic_ns().saturating_sub(debut_references_ns);
+        // Les regions natives sont detenues par Arc. Les projections globales
+        // (vvar/vDSO, zero, framebuffer) ont une duree de vie hors du Mm.
         (space, compte, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
             mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), invalidation,
-            // Le fils herite des projections natives (memes frames, partagees) :
-            // il doit tenir les regions lui aussi.
-            mm.regions_natives.clone())
+            mm.regions_natives.clone(), propres_prises, partages_pris, duree_references_ns)
     };
-    // BOUCHAUD_COW_V1 : les pages du pere viennent de passer en lecture seule.
-    // Un autre fil du pere peut encore en tenir une traduction inscriptible
-    // sur un autre coeur : elle doit disparaitre AVANT que le fils ne coure,
-    // sinon ses ecritures atterriraient dans une frame desormais partagee.
+    // Le shootdown attend les ACK hors de Mm, meme sur echec de retention.
+    // Aucun fils n'est visible avant cette barriere.
     if let Some(invalidation) = invalidation {
         invalidation.execute();
     }
-    let apres_espace_ns = crate::kernel::timer::monotonic_ns();
-
-    // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
-    // la semantique de `MAP_SHARED` a travers `fork`. Le fils tient donc
-    // reellement ces plages, et doit en prendre les references : sans cela, le
-    // premier `munmap` du pere evincerait des frames que le fils lit encore.
-    let mut retained_clean = Vec::new();
-    for mapping in &clean_pages {
-        if !crate::kernel::clean_page_cache::retain(mapping.key) {
-            for key in retained_clean {
-                crate::kernel::clean_page_cache::release(key);
-            }
-            drop(space);
-            return -errno::ENOMEM;
-        }
-        retained_clean.push(mapping.key);
-    }
-    for plage in &partages {
-        crate::kernel::partage::mappe(plage.node);
-    }
-    // Une prise de reference par page propre, chacune sous le verrou GLOBAL du
-    // cache. Sur un navigateur dont le texte partage fait des centaines de
-    // mebioctets, ce n'est pas le meme cout que la recopie et il ne se corrige
-    // pas au meme endroit : il est donc borne a part.
     let apres_references_ns = crate::kernel::timer::monotonic_ns();
+    let apres_espace_ns = apres_references_ns.saturating_sub(duree_references_ns);
+    if propres_prises != clean_pages.len() || partages_pris != partages.len() {
+        drop(space);
+        for mapping in &clean_pages[..propres_prises] {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+        for plage in &partages[..partages_pris] {
+            crate::kernel::partage::demappe(plage.node);
+        }
+        return -errno::ENOMEM;
+    }
 
     let mm = Arc::new(Mm::new(MmState { space, regions_natives, brk_start, brk, mmap_next,
         partages, limite_as, promesses, clean_pages }));

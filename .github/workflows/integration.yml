@@ -421,6 +421,10 @@ jobs:
             BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-smp${smp}.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie-force vfork-force" "$smp" 1024
           done
           BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-cohorte.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin cohorte-force 4 1024
+      - name: CPU Fabric, COW et projections sous KVM SMP4
+        run: |
+          python3 tools/verifie-fork-references.py
+          BO_QEMU_KVM=1 COW_JOURNAL="$PWD/fork-references-kvm.log" tools/ci/run_cow.sh image/bootimage-bouchaud-os.bin 20 4
       - name: CPU Fabric, RSS concurrent, waitpid et repli getcpu KVM
         run: |
           set -e
@@ -449,6 +453,7 @@ jobs:
             tempete-exec-kvm-smp*/serie.log*
             appels-kvm-*.log
             rss-course-kvm.log
+            fork-references-kvm.log
             latence-kvm-smp*.log
             memoire-force-kvm-*.log
             memoire-mort-kvm.log
