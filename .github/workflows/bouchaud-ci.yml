@@ -5,6 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      profile:
+        description: Profil des preuves à valider
+        type: choice
+        default: FABRIC
+        options: [FAST, FABRIC, FULL, CERTIFICATION]
       fabric:
         description: Périmètre des bancs migrés
         type: choice
@@ -40,6 +45,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           TEST_SHA: ${{ github.sha }}
           MANUAL_FABRIC: ${{ inputs.fabric }}
+          MANUAL_PROFILE: ${{ inputs.profile }}
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$TEST_SHA" ]
@@ -60,7 +66,13 @@ jobs:
           output = Path(os.environ["GITHUB_OUTPUT"])
           manual = os.environ["MANUAL_FABRIC"]
           domains = MIGRATED
-          if manual:
+          profile = os.environ["MANUAL_PROFILE"]
+          if profile in {"FULL", "CERTIFICATION"} and manual != "all":
+              raise ValueError("le profil exige le périmètre Fabric complet")
+          if profile == "FAST":
+              selected = []
+              plan = {"domains": [], "uncategorized": []}
+          elif manual:
               selected = sorted(domains if manual == "all" else {manual})
               if not set(selected) <= domains:
                   raise ValueError("fabric inconnu")
@@ -153,4 +165,32 @@ jobs:
         with:
           name: fabric-verdict
           path: fabric-verdict.json
+          if-no-files-found: error
+
+
+  qualification:
+    name: ${{ (inputs.profile == 'FULL' || inputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all') }}
+    needs: verdict
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Exiger les preuves du profil sur le SHA exact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE: ${{ inputs.profile }}
+          FABRIC_INPUT: ${{ inputs.fabric }}
+          FABRIC_RESULT: ${{ needs.verdict.result }}
+        run: python3 tools/ci/fabric_merge_gate.py "$PROFILE"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-merge-verdict
+          path: fabric-merge-verdict.json
           if-no-files-found: error

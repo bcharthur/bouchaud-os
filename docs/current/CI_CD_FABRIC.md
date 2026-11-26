@@ -259,3 +259,20 @@ résolution de provenance du navigateur. Les consommateurs vérifient
 l’image du run puis la provenance Ladybird selon le contrat existant.
 La production seule de l’artefact natif et les constructions des bras
 instrumentés conservent leurs chemins.
+
+## Profils de preuves sur un SHA
+
+Le lancement manuel de Bouchaud CI accepte quatre profils. FAST contrôle
+les jobs CI Fast exhaustifs et le contrôle de non-régression. FABRIC
+exécute le périmètre commun complet. FULL exige en plus les campagnes
+indépendantes Integration, Reliability V3, Ladybird strict, Nightly,
+endurance, Userland et Windows. CERTIFICATION exige également le verdict
+P13 final sur le même commit, avec ses runners dédiés.
+
+Pour FULL et CERTIFICATION, le job Bouchaud Merge Gate exige
+`fabric=all`. Il vérifie les campagnes indépendantes déjà lancées
+manuellement sur la même branche et le même SHA. Il rapporte l’identifiant
+et la tentative vérifiés. Un run absent, en attente, en échec, ou un job
+obligatoire sauté ou ambigu, rend la campagne rouge. La qualification
+Windows couverte à ce stade est celle de la préparation du scénario.
+Les contrôles de branche existants restent en vigueur.
