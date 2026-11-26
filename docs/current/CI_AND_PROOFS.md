@@ -47,7 +47,7 @@ Les quatre checks requis sont `fast-gate`, `integration-gate`, `reliability-gate
 - **`fast-gate`** est publié sur la tête de la PR par le run `push` de CI Fast. Son workflow se déclenche sur toutes les branches, sans filtre (`tools/ci/declencheurs.py`).
 - **Les trois autres** sont publiés par les runs `pull_request`.
 
-> **`main` n'est pas protégé sur GitHub** : `tools/verifie-protection-main.py` le constate. Ces quatre checks ne sont exigés que par la procédure. Pour les rendre exécutoires, un administrateur lance `tools/ci/configure-protection.sh`, qui pose aussi `strict: true` (branche à jour avec `main`).
+> **`main` est protégé sur GitHub.** La lecture de la branche le 26 novembre 2026 confirme les quatre contextes ci-dessus. L’accès au détail administratif nécessite les permissions du dépôt. Le [bilan de migration CI/CD Fabric](CI_CD_FABRIC.md) décrit les contrôles à préserver.
 
 Une **PR ouverte depuis un fork** ne reçoit pas `fast-gate`, puisque le push a lieu dans le fork. Elle reste donc bloquée : c'est un refus, pas un faux vert. Le dépôt n'a qu'un contributeur. Pour qu'une telle PR soit testée, sa branche est poussée dans ce dépôt, comme le fait déjà la production Ladybird, qui refuse les forks.
 

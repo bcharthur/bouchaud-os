@@ -24,6 +24,37 @@ Le rejeu de ce seul job rapporte 8/8 en SMP1 et SMP4.
 [Rejeu ciblé](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863506/job/140010752399) ·
 [Journal source](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863506/job/139985378606)
 
+## Cartographie des 26 workflows de référence
+
+| Workflow de référence | Événements | Jobs YAML | Destination ou rôle |
+|---|---|---:|---|
+| `ci.yml` | push, workflow_dispatch | 8 | FAST / gardes hôte et fast-gate |
+| `doom-port-windows.yml` | workflow_dispatch, pull_request | 1 | plateforme Windows / port DOOM |
+| `endurance.yml` | schedule, workflow_dispatch | 3 | FULL / endurance périodique |
+| `governance-audit.yml` | workflow_dispatch | 1 | gouvernance / audit manuel |
+| `gpu-composition.yml` | pull_request, push, workflow_dispatch | 3 | GPU / migré dans Bouchaud CI |
+| `integration.yml` | pull_request, push, workflow_dispatch | 23 | système / integration-gate |
+| `ladybird-native-browser.yml` | pull_request, push, workflow_dispatch | 31 | produit Ladybird et producteur canonique |
+| `ladybird-run-selector-v7.yml` | pull_request | 3 | plateforme Windows / sélection et préparation |
+| `ladybird-sync.yml` | pull_request, push, schedule, workflow_dispatch | 2 | épinglage amont Ladybird |
+| `ladybird-vulkan-experimental.yml` | push | 2 | produit / Vulkan expérimental |
+| `native-ipc-runtime.yml` | pull_request, push, workflow_dispatch | 4 | IPC / agrège System Update pendant la transition |
+| `nightly.yml` | schedule, workflow_dispatch | 7 | FULL / qualification nocturne |
+| `non-regression.yml` | pull_request, push, workflow_dispatch | 1 | gouvernance / non-regression-gate |
+| `os-primitives.yml` | workflow_dispatch, workflow_call | 4 | CPU, mémoire, GPU, I/O / redistribuer sans changer les preuves |
+| `p13-cible-kvm.yml` | workflow_dispatch | 5 | CPU / témoins de qualification |
+| `p13-final-candidate.yml` | workflow_dispatch | 4 | CERTIFICATION / KVM dédié |
+| `p13-primitives-noyau.yml` | pull_request, push, workflow_dispatch | 3 | CPU et mémoire / déclencheur historique |
+| `release-evidence.yml` | workflow_dispatch, schedule, pull_request | 1 | gouvernance / publication de preuves |
+| `release-trigkey.yml` | workflow_dispatch | 6 | livraison Trigkey |
+| `release.yml` | push, workflow_dispatch | 1 | livraison noyau attestée |
+| `reliability-v3.yml` | pull_request, push, schedule, workflow_dispatch | 6 | système / reliability-gate et FULL |
+| `security-runtime.yml` | pull_request, push, workflow_dispatch | 2 | sécurité / migré dans Bouchaud CI |
+| `soak.yml` | workflow_dispatch | 1 | endurance longue dédiée |
+| `trigkey-ab-preflight.yml` | pull_request, workflow_dispatch | 1 | plateforme Trigkey / préflight |
+| `unix-fs-reliability.yml` | pull_request, push, workflow_dispatch | 1 | stockage / migré dans Bouchaud CI |
+| `userland.yml` | push, workflow_dispatch | 2 | produit historique encore consommé |
+
 ## Première migration
 
 `bouchaud-ci.yml` établit le plan des bancs GPU, sécurité et Unix/FS sur
@@ -67,6 +98,38 @@ Native IPC reste le point d’entrée de compatibilité et agrège son résultat
 avec les tests IPC. Le workflow historique de production userland reste
 consommé par le chemin Windows `-Legacy`.
 
+## Première mesure sur GitHub Actions
+
+Trois anciens runs de `main` (GPU, sécurité et Unix/FS) sont comparés au
+run Bouchaud CI de `f5e5fcfaf1d0e3e70eed2ac35d1c0a9c6540efc9`.
+Les sources noyau et les recettes d'essai sont identiques. Le SHA embarqué,
+le type d'événement, l'attente des runners et les caches diffèrent.
+Tous les bancs du nouveau périmètre ont réussi.
+[Run Bouchaud CI](https://github.com/bcharthur/bouchaud-os/actions/runs/45850990090) ·
+[GPU de référence](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863303) ·
+[Sécurité de référence](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863316) ·
+[Unix/FS de référence](https://github.com/bcharthur/bouchaud-os/actions/runs/45841863438)
+
+| Indicateur | Référence | Bouchaud CI |
+|---|---:|---:|
+| Campagnes indépendantes | 3 | 1 |
+| Jobs | 7 | 10 |
+| Constructions BIOS standard | 6 | 1 |
+| Minutes de jobs observées | 42,12 | 37,02 |
+| Durée du run le plus long, attente comprise | 12,18 min | 16,73 min |
+| Artefacts | 6 | 9 |
+| Octets listés par l’API | 6 585 302 | 12 440 439 |
+
+La durée cumulée des jobs baisse de 12 %, tandis que l’attente et les
+dépendances du nouveau run allongent le délai observé. L'image commune
+et la publication du plan et du verdict augmentent le volume archivé.
+Une répétition appariée est nécessaire pour isoler le coût du graphe de
+l'effet de la file d'attente. CI Fast a par ailleurs détecté que son
+garde des verdicts négatifs référençait encore l'emplacement initial
+du rapport facultatif A/B. Son entrée a suivi le rapport dans
+`system-update.yml`, avec la même règle.
+[Détection CI Fast](https://github.com/bcharthur/bouchaud-os/actions/runs/45850980263/job/140017211974)
+
 ## Windows
 
 `run.ps1` prépare le scénario sous `target/windows-scenarios/`.
@@ -76,7 +139,9 @@ qui la consomment. Depuis un checkout propre, exécuter
 pour contrôler construction et préparation, ou retirer
 `-PreparerSeulement` pour contrôler un cycle avec QEMU.
 Le contrôle échoue si Git relève une modification à l’entrée ou à la fin.
-Le cycle complet nécessite Windows, QEMU et l’artefact Ladybird.
+Le job Windows qui vérifie le vrai artefact exécute aussi la préparation
+complète avec ce contrôle. Le cycle avec démarrage et arrêt QEMU
+nécessite un hôte de test Windows.
 
 ## Protection et retour arrière
 

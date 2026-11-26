@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fabric_bootimage
+from fabric_verdict import verdict
 from fabric_plan import COMPAT, CONSUMERS, MIGRATED, plan
 
 
@@ -29,6 +30,24 @@ class FabricPlan(unittest.TestCase):
         for path in ["nouveau_build.py", ".github/actions/fabric-bootimage/action.yml", "tools/ci/fabric_plan.py"]:
             self.assertEqual(set(plan([path])["domains"]), set(CONSUMERS))
         self.assertEqual(set(plan(["README.md"], exhaustive=True)["domains"]), set(CONSUMERS))
+
+    def test_verdict_fait_echouer_une_preuve_manquante(self):
+        needs = {
+            "plan": {"result": "success", "outputs": {
+                "gpu": "true", "security": "false", "storage": "false", "any": "true",
+            }},
+            "kernel": {"result": "success"},
+            "gpu": {"result": "skipped"},
+            "security": {"result": "skipped"},
+            "storage": {"result": "skipped"},
+        }
+        self.assertEqual(verdict(needs)["gpu"], "NOT_RUN")
+        self.assertEqual(verdict(needs)["storage"], "SKIPPED_BY_PLAN")
+        needs["gpu"]["result"] = "cancelled"
+        self.assertEqual(verdict(needs)["gpu"], "CANCELLED")
+        needs["plan"]["outputs"]["any"] = "false"
+        self.assertEqual(verdict(needs)["plan"], "FAIL")
+        self.assertEqual(verdict(needs)["kernel"], "BLOCKED")
 
     def test_artefact_mutants(self):
         with tempfile.TemporaryDirectory() as root, patch.object(fabric_bootimage, "identity", return_value={

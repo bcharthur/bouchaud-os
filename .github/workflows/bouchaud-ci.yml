@@ -40,6 +40,7 @@ jobs:
           MANUAL_FABRIC: ${{ inputs.fabric }}
         run: |
           set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$TEST_SHA" ]
           if [ -z "$MANUAL_FABRIC" ]; then
             if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
               python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$TEST_SHA"
@@ -48,12 +49,15 @@ jobs:
             fi
           fi
           python3 - <<'PY'
-          import json, os
+          import json, os, sys
           from pathlib import Path
+
+          sys.path.insert(0, "tools/ci")
+          from fabric_plan import MIGRATED
 
           output = Path(os.environ["GITHUB_OUTPUT"])
           manual = os.environ["MANUAL_FABRIC"]
-          domains = {"gpu", "security", "storage"}
+          domains = MIGRATED
           if manual:
               selected = sorted(domains if manual == "all" else {manual})
               if not set(selected) <= domains:
@@ -112,34 +116,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Vérifier les résultats du plan exécuté
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          plan = needs["plan"]
-          results = {}
-          for name in ("plan", "kernel", "gpu", "security", "storage"):
-              result = needs[name]["result"]
-              key = "any" if name == "kernel" else name
-              flag = plan.get("outputs", {}).get(key)
-              if name == "plan" or (plan["result"] == "success" and flag == "true"):
-                  results[name] = {"success": "PASS", "failure": "FAIL", "cancelled": "CANCELLED", "skipped": "NOT_RUN"}[result]
-              elif plan["result"] != "success" or flag not in ("true", "false"):
-                  results[name] = "BLOCKED"
-              elif result == "skipped":
-                  results[name] = "SKIPPED_BY_PLAN"
-              else:
-                  results[name] = "FAIL"
-          report = {"sha": os.environ["GITHUB_SHA"], "results": results}
-          print(json.dumps(report, indent=2))
-          Path("fabric-verdict.json").write_text(json.dumps(report, indent=2) + "\n")
-          raise SystemExit(any(s not in ("PASS", "SKIPPED_BY_PLAN") for s in results.values()))
-          PY
+        run: python3 tools/ci/fabric_verdict.py
       - if: always()
         uses: actions/upload-artifact@v4
         with:
