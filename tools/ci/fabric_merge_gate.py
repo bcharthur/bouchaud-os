@@ -50,7 +50,11 @@ def evidence(repo, sha, branch, workflow, required, artifacts=()):
         for template in artifacts:
             name = template.format(sha=sha)
             candidates = [item for item in listed if item["name"] == name]
-            if len(candidates) != 1 or not valid_artifact(candidates[0], run):
+            if (
+                len(candidates) != 1
+                or not valid_artifact(candidates[0], run)
+                or not verify_download(repo, candidates[0])
+            ):
                 missing_artifacts.append(name)
     return {
         **proof, "status": "FAIL" if missing or missing_artifacts else "PASS",
@@ -66,6 +70,13 @@ def valid_artifact(artifact, run):
         and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or "") is not None
         and artifact["created_at"] >= run["run_started_at"]
     )
+
+
+def verify_download(repo, artifact):
+    path = f"repos/{repo}/actions/artifacts/{artifact['id']}/zip"
+    with subprocess.Popen(["gh", "api", path], stdout=subprocess.PIPE) as download:
+        digest = hashlib.file_digest(download.stdout, "sha256").hexdigest()
+        return download.wait() == 0 and artifact["digest"] == f"sha256:{digest}"
 
 
 def main():

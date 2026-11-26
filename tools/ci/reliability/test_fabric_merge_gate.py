@@ -33,3 +33,20 @@ class MergeGate(unittest.TestCase):
                     "owner/repo", "candidate", "topic", "integration.yml", ["integration-gate"],
                 )
                 self.assertEqual(report["status"], expected)
+
+    def test_artifact_metadata_requires_the_run_attempt_and_digest(self):
+        run = {"id": 12, "head_sha": "candidate", "run_started_at": "2026-11-26T18:00:00Z"}
+        artifact = {
+            "expired": False, "size_in_bytes": 20,
+            "workflow_run": {"id": 12, "head_sha": "candidate"},
+            "created_at": "2026-11-26T18:00:01Z", "digest": "sha256:" + "a" * 64,
+        }
+        self.assertTrue(fabric_merge_gate.valid_artifact(artifact, run))
+        for change in (
+            {"expired": True}, {"size_in_bytes": 0}, {"digest": None},
+            {"workflow_run": {"id": 11, "head_sha": "candidate"}},
+            {"workflow_run": {"id": 12, "head_sha": "stale"}},
+            {"created_at": "2026-11-26T17:59:00Z"},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(fabric_merge_gate.valid_artifact({**artifact, **change}, run))

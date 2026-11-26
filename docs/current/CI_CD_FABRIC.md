@@ -308,3 +308,18 @@ FULL et CERTIFICATION appellent le sélecteur Windows dans leur propre
 run. Le même workflow garde son déclencheur PR autonome. Ce mode
 contrôle la provenance de Ladybird et la préparation du scénario avec
 Git propre. La preuve d'un démarrage et arrêt réels reste distincte.
+
+### Verdict automatique de la PR
+
+`fabric_contracts.json` versionne les contrats et les exigences des
+quatre profils. Le check supplémentaire Bouchaud Merge Gate refuse
+une PR sans rapport FULL issu du tag de sa tête exacte. Il vérifie
+l'identité de l'arbre, la tentative, l'empreinte du registre et le
+contenu du rapport après vérification SHA-256 de l'archive GitHub.
+Une relance du workflow PR après la fin de FULL réévalue ce check.
+Les quatre checks historiques restent requis par les protections.
+
+Les preuves des campagnes indépendantes doivent provenir du run et
+du SHA retenus. Le vérificateur rejette les archives obligatoires
+absentes, expirées, ambiguës ou dont le SHA-256 téléchargé diffère
+de celui publié par GitHub Actions.

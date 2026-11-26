@@ -776,10 +776,18 @@
       },
       "endurance.yml": {
         "jobs": [
-          "endurance-gate"
+          "endurance-gate",
+          "endurance / tranche 1 / SMP1",
+          "endurance / tranche 2 / SMP2",
+          "endurance / tranche 3 / SMP4",
+          "endurance / tranche 4 / SMP8"
         ],
         "artifacts": [
-          "endurance-bootimage"
+          "endurance-bootimage",
+          "endurance-tranche-1",
+          "endurance-tranche-2",
+          "endurance-tranche-3",
+          "endurance-tranche-4"
         ]
       },
       "doom-port-windows.yml": {
