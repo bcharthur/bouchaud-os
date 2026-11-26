@@ -78,50 +78,53 @@ pub fn sys_fork_demande(frame: &TrapFrame, demande: DemandeClone) -> i64 {
     // coute, et sur quelles pages.
     let debut_ns = crate::kernel::timer::monotonic_ns();
 
-    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses, clean_pages, invalidation, regions_natives) = {
+    let (space, compte, brk_start, brk, mmap_next, partages, limite_as, promesses,
+        clean_pages, invalidation, regions_natives, propres_prises, partages_pris, duree_references_ns) = {
         let mut mm = parent.mm.lock();
-        let (space, compte, invalidation) = match mm.space.duplicate() {
+        let (mut space, compte, invalidation) = match mm.space.duplicate() {
             Some(resultat) => resultat,
             None => return -errno::ENOMEM,
         };
+        // Mm -> cache -> etat de la page. Ces prises n'attendent ni I/O
+        // ni WaitQueue. Le parent tient encore les frames des PTE copiees.
+        let debut_references_ns = crate::kernel::timer::monotonic_ns();
+        let propres_prises = mm.clean_pages.iter().take_while(|mapping| {
+            space.translate(mapping.virt).is_some_and(|frame| {
+                crate::kernel::clean_page_cache::retain_frame(mapping.key, frame)
+            })
+        }).count();
+        let partages_pris = if propres_prises == mm.clean_pages.len() {
+            mm.partages.iter().take_while(|plage| {
+                crate::kernel::partage::retient_mappage(plage.node)
+            }).count()
+        } else {
+            0
+        };
+        let duree_references_ns =
+            crate::kernel::timer::monotonic_ns().saturating_sub(debut_references_ns);
+        // Les regions natives sont detenues par Arc. Les projections globales
+        // (vvar/vDSO, zero, framebuffer) ont une duree de vie hors du Mm.
         (space, compte, mm.brk_start, mm.brk, mm.mmap_next, mm.partages.clone(),
             mm.limite_as, mm.promesses.clone(), mm.clean_pages.clone(), invalidation,
-            // Le fils herite des projections natives (memes frames, partagees) :
-            // il doit tenir les regions lui aussi.
-            mm.regions_natives.clone())
+            mm.regions_natives.clone(), propres_prises, partages_pris, duree_references_ns)
     };
-    // BOUCHAUD_COW_V1 : les pages du pere viennent de passer en lecture seule.
-    // Un autre fil du pere peut encore en tenir une traduction inscriptible
-    // sur un autre coeur : elle doit disparaitre AVANT que le fils ne coure,
-    // sinon ses ecritures atterriraient dans une frame desormais partagee.
+    // Le shootdown attend les ACK hors de Mm, meme sur echec de retention.
+    // Aucun fils n'est visible avant cette barriere.
     if let Some(invalidation) = invalidation {
         invalidation.execute();
     }
-    let apres_espace_ns = crate::kernel::timer::monotonic_ns();
-
-    // `duplicate` a re-mappe les pages empruntees sur les memes frames — c'est
-    // la semantique de `MAP_SHARED` a travers `fork`. Le fils tient donc
-    // reellement ces plages, et doit en prendre les references : sans cela, le
-    // premier `munmap` du pere evincerait des frames que le fils lit encore.
-    let mut retained_clean = Vec::new();
-    for mapping in &clean_pages {
-        if !crate::kernel::clean_page_cache::retain(mapping.key) {
-            for key in retained_clean {
-                crate::kernel::clean_page_cache::release(key);
-            }
-            drop(space);
-            return -errno::ENOMEM;
-        }
-        retained_clean.push(mapping.key);
-    }
-    for plage in &partages {
-        crate::kernel::partage::mappe(plage.node);
-    }
-    // Une prise de reference par page propre, chacune sous le verrou GLOBAL du
-    // cache. Sur un navigateur dont le texte partage fait des centaines de
-    // mebioctets, ce n'est pas le meme cout que la recopie et il ne se corrige
-    // pas au meme endroit : il est donc borne a part.
     let apres_references_ns = crate::kernel::timer::monotonic_ns();
+    let apres_espace_ns = apres_references_ns.saturating_sub(duree_references_ns);
+    if propres_prises != clean_pages.len() || partages_pris != partages.len() {
+        drop(space);
+        for mapping in &clean_pages[..propres_prises] {
+            crate::kernel::clean_page_cache::release(mapping.key);
+        }
+        for plage in &partages[..partages_pris] {
+            crate::kernel::partage::demappe(plage.node);
+        }
+        return -errno::ENOMEM;
+    }
 
     let mm = Arc::new(Mm::new(MmState { space, regions_natives, brk_start, brk, mmap_next,
         partages, limite_as, promesses, clean_pages }));
@@ -252,7 +255,7 @@ fn construit_fils(
     // dans une page que le pere a deja touchee, donc copiee).
     if demande.flags & CLONE_CHILD_SETTID != 0 && demande.child_tid != 0 {
         let tid = child_task.tid as u32;
-        child.mm.lock().space.write(demande.child_tid, &tid.to_le_bytes());
+        child.mm.lock().space.write_utilisateur(demande.child_tid, &tid.to_le_bytes());
     }
     // BOUCHAUD_SIGMASQUE_PAR_FIL_V1 : le fils herite du masque du fil qui
     // appelle `fork` (posix_spawn de la glibc : tout bloque, le fils le
@@ -679,6 +682,9 @@ pub fn statut_wait(code: i32, par_signal: bool) -> u32 {
 pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 {
     const WNOHANG: u32 = 1;
     let parent_pid = task::current_process().pid;
+    // Apres une recolte concurrente, les autres fils ne peuvent pas
+    // satisfaire une attente qui designe un PID precis.
+    let enfant = (pid > 0).then_some(pid as u32);
 
     loop {
         let zombies = task::zombie_children(parent_pid);
@@ -704,7 +710,7 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
             return child_pid as i64;
         }
 
-        if !task::has_children(parent_pid) {
+        if !task::has_children(parent_pid, enfant) {
             return -errno::ECHILD;
         }
         if options & WNOHANG != 0 {
@@ -739,7 +745,7 @@ pub fn sys_wait4(pid: i64, status_addr: u64, options: u32, _rusage: u64) -> i64 
         let deja_la = task::zombie_children(parent_pid)
             .iter()
             .any(|(child, _, _)| pid <= 0 || *child == pid as u32);
-        if deja_la || !task::has_children(parent_pid) {
+        if deja_la || !task::has_children(parent_pid, enfant) {
             // Annule le parking. Si le fils a gagne le CAS entre-temps, il
             // nous remet pret lui-meme ; dans les deux cas on reboucle.
             let _ = task::current().waiting_for_child.compare_exchange(true, false);
@@ -851,6 +857,9 @@ pub fn sys_rt_sigreturn(frame: &mut TrapFrame) -> i64 {
 }
 
 /// Envoie un signal a un processus (`kill`) ou a un thread (`tkill`).
+/// SIGKILL poses par condamnation immediate (BOUCHAUD_SIGKILL_CALCUL_PUR_V1).
+pub static SIGKILL_IMMEDIATS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 pub fn send_signal(pid: u32, signal: u32) -> i64 {
     if signal == 0 {
         // Signal 0 : simple test d'existence du processus.
@@ -864,6 +873,24 @@ pub fn send_signal(pid: u32, signal: u32) -> i64 {
         return -errno::EINVAL;
     }
     match task::process_by_pid(pid) {
+        // BOUCHAUD_SIGKILL_CALCUL_PUR_V1 -- SIGKILL n'attend pas un appel
+        // systeme. Un signal pose n'etait LIVRE qu'en fin d'appel systeme
+        // (`deliver_pending`) : un processus en calcul pur n'en fait aucun, et
+        // `kill -9` ne le tuait JAMAIS -- son pere restait bloque dans
+        // `waitpid` pour toujours (TCG SMP1 : deux boucles tuees, 0 mort en
+        // 150 s). SIGKILL n'est ni interceptable ni masquable : la mort est
+        // certaine, on la pose tout de suite par la CONDAMNATION de tous ses
+        // fils (`tue_processus`, le chemin de fermeture des clients du
+        // bureau) -- un fil parque meurt sur place, un fil qui calcule a sa
+        // prochaine frontiere d'IRQ en espace utilisateur (un tic). Vers
+        // soi-meme : la livraison en fin de CET appel suffit.
+        Some(process) if signal == signal::SIGKILL && pid != task::current_process().pid => {
+            if !process.lifecycle.lock().zombie {
+                SIGKILL_IMMEDIATS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                task::tue_processus(pid, 128 + signal::SIGKILL as i32);
+            }
+            0
+        }
         Some(process) => {
             process.signals.lock().raise(signal);
             // Un signal doit reveiller une tache endormie, sinon un `SIGTERM`

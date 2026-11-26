@@ -239,8 +239,16 @@ pub fn monotonic_ns() -> u64 {
     let candidate = if hz != 0 {
         let cycles = cpu::read_tsc_ordered(HAS_RDTSCP.load(Ordering::Relaxed))
             .wrapping_sub(BOOT_TSC.load(Ordering::Acquire));
-        ((cycles as u128).saturating_mul(1_000_000_000) / hz as u128)
-            .min(u64::MAX as u128) as u64
+        let ns = tsc_vers_ns(cycles, hz);
+        // BOUCHAUD_TSC_SYNCHRONE_V1 : TSC prouve synchrone entre les coeurs
+        // (`smp::verifie_tsc_synchrone`) -- une lecture ordonnee ne peut pas
+        // reculer d'un coeur a l'autre, et le `fetch_max` sur une ligne
+        // globale, ecrite par CHAQUE lecture d'horloge de CHAQUE coeur, n'a
+        // plus rien a corriger. C'est aussi ce que lit le vDSO.
+        if TSC_SYNCHRONE.load(Ordering::Relaxed) {
+            return ns;
+        }
+        ns
     } else if let Some(hpet_ns) = hpet_monotonic_ns() {
         hpet_ns
     } else {
@@ -250,6 +258,53 @@ pub fn monotonic_ns() -> u64 {
     // Preserve la monotonie entre CPU meme si leur TSC presente un leger
     // decalage. fetch_max renvoie l'ancienne valeur, d'ou le max final.
     candidate.max(LAST_MONOTONIC_NS.fetch_max(candidate, Ordering::AcqRel))
+}
+
+/// BOUCHAUD_VDSO_V1 -- `floor(cycles * 1e9 / hz)`, sans division 128 bits.
+///
+/// `cycles = s*hz + r` (r < hz) : `floor((s*hz + r)*1e9/hz) = s*1e9 +
+/// floor(r*1e9/hz)`, au nanoseconde pres la valeur que donnait la division
+/// sur 128 bits. Le vDSO (`src/arch/x86_64/vdso/vdso.c`) fait le MEME calcul :
+/// un appel systeme et une lecture en anneau 3 au meme TSC rendent le meme
+/// nombre. `r*1e9` tient sur 64 bits tant que hz <= 1,8e10 (la calibration
+/// borne hz a 1e10).
+#[inline]
+pub fn tsc_vers_ns(cycles: u64, hz: u64) -> u64 {
+    let secondes = cycles / hz;
+    let reste = cycles % hz;
+    secondes
+        .saturating_mul(1_000_000_000)
+        .saturating_add(reste * 1_000_000_000 / hz)
+}
+
+/// BOUCHAUD_TSC_SYNCHRONE_V1 : le TSC a passe le test de derive entre coeurs.
+static TSC_SYNCHRONE: AtomicBool = AtomicBool::new(false);
+
+/// Declare le TSC synchrone (ou non) entre tous les coeurs en ligne.
+pub fn declare_tsc_synchrone(synchrone: bool) {
+    TSC_SYNCHRONE.store(synchrone, Ordering::Release);
+}
+
+/// Le TSC est-il prouve synchrone entre les coeurs ?
+pub fn tsc_synchrone() -> bool {
+    TSC_SYNCHRONE.load(Ordering::Acquire)
+}
+
+/// Lecture ordonnee du TSC (rdtscp, ou lfence + rdtsc), comme l'horloge.
+#[inline]
+pub fn lecture_tsc_ordonnee() -> u64 {
+    cpu::read_tsc_ordered(HAS_RDTSCP.load(Ordering::Relaxed))
+}
+
+/// (TSC au demarrage, frequence en Hz, rdtscp disponible, TSC invariant) :
+/// ce que publie le vDSO.
+pub fn parametres_tsc() -> (u64, u64, bool, bool) {
+    (
+        BOOT_TSC.load(Ordering::Acquire),
+        TSC_HZ.load(Ordering::Acquire),
+        HAS_RDTSCP.load(Ordering::Relaxed),
+        INVARIANT_TSC.load(Ordering::Relaxed),
+    )
 }
 
 /// Frequence du TSC annoncee par CPUID (architecturale, ou publiee par

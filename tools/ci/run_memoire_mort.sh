@@ -15,7 +15,7 @@ SMP=${3:-2}
 MEMOIRE=${4:-1024}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-gcc -O2 -static-pie -fPIE -Wl,-z,noexecstack tools/userland/memoire-mort-probe.c -o "$T/memoire-mort-probe"
+gcc -O2 -pthread -static-pie -fPIE -Wl,-z,noexecstack tools/userland/memoire-mort-probe.c -o "$T/memoire-mort-probe"
 mkdir -p "$T/scenario/bin"
 cp "$T/memoire-mort-probe" "$T/scenario/bin/"
 cp "$BOOT" "$T/boot.bin"

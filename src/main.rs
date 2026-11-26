@@ -317,6 +317,9 @@ fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
     // en long mode, peuvent maintenant entrer dans la runqueue SMP. Tant
     // qu'aucune tache n'est enregistree ils restent en HLT et ne touchent
     // ni le tas ni les structures historiques.
+    // BOUCHAUD_VDSO_V1 : apres le test de synchronisation du TSC (SMP) et la
+    // calibration, avant le premier exec.
+    kernel::vdso::init();
     arch::x86_64::smp::enable_scheduler();
 
     // LA PERSISTANCE NE DEPEND PAS DU BUREAU GRAPHIQUE.

@@ -862,6 +862,21 @@ fn peuple_page_loader(
                 FaultOutcome::IoError
             }
         }
+        PromesseBacking::Vdso { phys_base, mapping_start } => {
+            // BOUCHAUD_VDSO_V1 : pages communes a tous les processus --
+            // jamais inscriptibles, quels que soient les drapeaux demandes.
+            let phys = phys_base.saturating_add(page.saturating_sub(mapping_start));
+            if p.space.map_foreign_accounted(
+                page,
+                phys,
+                effective.drapeaux & !crate::kernel::vmm::PTE_WRITE,
+                crate::kernel::vmm::ResidentKind::Shared,
+            ) {
+                FaultOutcome::Resolved
+            } else {
+                FaultOutcome::IoError
+            }
+        }
         PromesseBacking::Framebuffer { phys_base, mapping_start, phys_offset } => {
             let phys = phys_base.saturating_add(phys_offset)
                 .saturating_add(page.saturating_sub(mapping_start));

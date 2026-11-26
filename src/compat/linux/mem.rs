@@ -645,6 +645,17 @@ pub fn sys_mprotect(addr: u64, length: u64, prot: u32) -> i64 {
     }) {
         return -errno::EACCES;
     }
+    // BOUCHAUD_VDSO_V1 : vvar et vDSO sont communs a TOUS les processus.
+    // Les rendre inscriptibles ici donnerait a un processus le code d'horloge
+    // de tous les autres.
+    if process.promesses.iter().any(|vma| {
+        vma.debut < fin && vma.fin > addr
+            && matches!(vma.backing, Backing::Vdso { mapping_start, .. }
+                if prot & PROT_WRITE != 0
+                    || (prot & PROT_EXEC != 0 && mapping_start == crate::kernel::vdso::adresse_vvar()))
+    }) {
+        return -errno::EACCES;
+    }
 
     if !vma::protege(
         &mut process.promesses,

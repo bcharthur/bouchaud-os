@@ -72,7 +72,7 @@ pub fn write(addr: u64, bytes: &[u8]) -> Result<()> {
     if bytes.is_empty() { return Ok(()); }
     if !resident_range(addr, bytes.len(), true) { return Err(Error::Fault); }
     let process = crate::kernel::task::current_process();
-    if process.mm.lock().space.write(addr, bytes) {
+    if process.mm.lock().space.write_utilisateur(addr, bytes) {
         Ok(())
     } else {
         Err(Error::Fault)

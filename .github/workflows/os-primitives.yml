@@ -126,14 +126,28 @@ jobs:
           exit "$r"
       - name: Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_HORLOGE_AUDIT_V1 : chaque ligne serie horodatee a son
-        # arrivee par l'hote ; la duree vue par l'invite doit coller a la
-        # sienne (1 s : 50 ms ; 10 et 60 s : 1 %).
+        # Console synchrone pour aligner les mesures de la sonde avec
+        # l'UART QEMU (1 s : 50 ms ; 10 et 60 s : 1 %). Conserver aussi
+        # les timestamps du lecteur.
+        # Deux boots KVM indépendants doivent tous deux passer.
         run: |
-          tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60
-          cp serie-horloge.log serie-horloge-tcg.log
-          BO_QEMU_KVM=1 tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60
-          cp serie-horloge.log serie-horloge-kvm.log
+          rc=0
+          for mode in tcg kvm kvm-2; do
+            kvm=0
+            if [[ "$mode" == kvm* ]]; then kvm=1; fi
+            echo "HORLOGE_PASSAGE $mode"
+            BO_QEMU_KVM="$kvm" tools/ci/run_horloge.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 60 || rc=1
+            if [ -f serie-horloge.log ]; then
+              cp serie-horloge.log "serie-horloge-${mode}.log"
+            fi
+            if [ -f horloge-horodatage.tsv ]; then
+              cp horloge-horodatage.tsv "horloge-horodatage-${mode}.tsv"
+            fi
+            if [ -f horloge-uart.log ]; then
+              cp horloge-uart.log "horloge-uart-${mode}.log"
+            fi
+          done
+          exit "$rc"
       - name: ATA -- integrite du chemin DMA et repli PIO sur erreur injectee (TCG puis KVM)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_ATA_INTEGRITE_V1 : 2 048 secteurs ecrits, vides, relus et
@@ -479,6 +493,8 @@ jobs:
             serie-primitives-kvm-*.log
             serie-persist-cache-*.log
             serie-horloge-*.log
+            horloge-horodatage-*.tsv
+            horloge-uart-*.log
             serie-ata-integrite-*.log
             serie-virtio-*.log
             scanout-virtio*/serie-*.log

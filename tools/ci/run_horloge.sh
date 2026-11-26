@@ -6,10 +6,12 @@
 #
 # horloge-probe juge dans l'invite ce qu'il peut juger seul (sommeil jamais
 # plus court, REALTIME qui suit MONOTONIC, MONOTONIC qui ne recule pas). Le
-# juge exterieur est ici : la sortie serie passe par un tube et chaque ligne
-# est horodatee A SON ARRIVEE par l'horloge monotone de l'hote. Pour chaque
-# duree d, la duree vue par l'invite (mono_us) contre celle vue par l'hote
-# entre HORLOGE_DEBUT et HORLOGE_FIN :
+# juge exterieur mesure le temps de l'hote entre les marqueurs DEBUT et FIN
+# a l'ecriture de leur fin de ligne dans l'UART de QEMU. Le lecteur du tube
+# conserve aussi ses timestamps pour diagnostiquer les retards en aval.
+# La vidange asynchrone peut retarder DEBUT et FIN differemment, surtout
+# derriere le journal de demarrage. Ce banc dedie vide l'anneau et bascule
+# la console en synchrone avant la sonde pour comparer les memes intervalles.
 #
 #   HORLOGE_AUDIT d= invite_ms= hote_ms= ecart_ms= ecart_pct= reel_decalage_ms=
 #
@@ -31,13 +33,15 @@ SCENARIO=scenario-horloge
 IMAGE=horloge.img
 LOG=serie-horloge.log
 STAMPS=horloge-horodatage.tsv
-rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$STAMPS"
+TRACE=horloge-uart.log
+rm -rf "$SCENARIO" "$IMAGE" "$LOG" "$STAMPS" "$TRACE"
 OUT=out-horloge
 rm -rf "tools/userland/$OUT"
 (cd tools/userland && OUT=$OUT ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp "tools/userland/$OUT/horloge-probe" "$SCENARIO/bin/"
 cat > "$SCENARIO/autorun" <<AUTORUN
+console-async off
 /bin/horloge-probe $PLAFOND
 echo HORLOGE_FIN_BANC
 AUTORUN
@@ -69,7 +73,8 @@ qemu-system-x86_64 $ACCEL \
   -drive format=raw,file="$BOOT" \
   -drive format=raw,file="$IMAGE" \
   -m 2048 -smp 4 -display none -no-reboot \
-  -serial stdio < /dev/null 2>/dev/null | python3 horodateur.py "$LOG" "$STAMPS" &
+  -serial stdio -msg timestamp=on -trace enable=serial_write \
+  < /dev/null 2>"$TRACE" | python3 horodateur.py "$LOG" "$STAMPS" &
 TUBE=$!
 trap 'pkill -f "file=$IMAGE" 2>/dev/null || true' EXIT
 LIMITE=$((SECONDS + PLAFOND * 2 + 240))
@@ -83,29 +88,67 @@ pkill -f "file=$IMAGE" 2>/dev/null || true
 wait "$TUBE" 2>/dev/null || true
 echo "HORLOGE_BANC $etat"
 
-sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | grep -aE '^  .*(ok|ECHEC) \(|HORLOGE_(INVITE|DEBUT|FIN)' || true
+sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | grep -aE '^  .*(ok|ECHEC) \(|HORLOGE_(INVITE|DEBUT|FIN|CHEMIN)' || true
 
 rc_hote=0
-python3 - "$STAMPS" "$PLAFOND" <<'PY' || rc_hote=$?
+python3 - "$STAMPS" "$PLAFOND" "$TRACE" <<'PY' || rc_hote=$?
 import re, sys
-debut, echecs, vus, mesurees = {}, 0, 0, set()
-for ligne in open(sys.argv[1], encoding="utf-8"):
-    t_mono, t_mur, texte = ligne.rstrip("\n").split("\t", 2)
+
+def marqueur(texte):
     texte = re.sub(r"\x1b\[[0-9;]*m", "", texte)
+    return re.search(r"HORLOGE_(?:DEBUT|FIN) d=\d+.*", texte)
+
+lectures = []
+with open(sys.argv[1], encoding="utf-8") as stamps:
+    for ligne in stamps:
+        t_mono, t_mur, texte = ligne.rstrip("\n").split("\t", 2)
+        if m := marqueur(texte):
+            lectures.append((m[0], int(t_mono), int(t_mur)))
+
+uart = []
+tampon = bytearray()
+evenement = re.compile(r"^\d+@(\d+)\.(\d{6}):serial_write write addr 0x00 val (0x[0-9a-f]+)")
+with open(sys.argv[3], encoding="utf-8", errors="replace") as trace:
+    for ligne in trace:
+        if not (m := evenement.match(ligne)):
+            continue
+        octet = int(m[3], 16)
+        if octet != 10:
+            tampon.append(octet)
+            continue
+        if repere := marqueur(tampon.decode("utf-8", "replace").rstrip("\r")):
+            t_uart = int(m[1]) * 10**9 + int(m[2]) * 1000
+            uart.append((repere[0], t_uart))
+        tampon.clear()
+
+if not lectures or [m for m, _, _ in lectures] != [m for m, _ in uart]:
+    sys.exit("HORLOGE_ECHEC marqueurs UART manquants ou differents de la serie")
+# QEMU trace avec gettimeofday. Une variation mesurable entre les deux
+# horloges de l'hote invalide la campagne, y compris si son verdict serait vert.
+ecarts_hote = [mur - mono for _, mono, mur in lectures]
+if max(ecarts_hote) - min(ecarts_hote) > 1_000_000:
+    sys.exit("HORLOGE_ECHEC ecart entre horloges monotone et murale de l'hote instable")
+
+debut, echecs, vus, mesurees = {}, 0, 0, set()
+for (texte, t_uart), (_, t_mono, t_mur) in zip(uart, lectures):
+    retard_lecteur = (t_mur - t_uart) / 1e6
+    repere = " ".join(texte.split(" ", 2)[:2])
+    print(f"HORLOGE_TRANSPORT {repere} "
+          f"uart_ns={t_uart} lecteur_mono_ns={t_mono} retard_lecteur_ms={retard_lecteur:.3f}")
     if m := re.search(r"HORLOGE_DEBUT d=(\d+)", texte):
-        debut[int(m[1])] = int(t_mono)
+        debut[int(m[1])] = t_uart
     elif m := re.search(r"HORLOGE_FIN d=(\d+) mono_us=(-?\d+) reel_us=(-?\d+) excedent_us=(-?\d+) reel_ms=(\d+)", texte):
         d = int(m[1])
         if d not in debut:
             continue
         vus += 1
         mesurees.add(d)
-        hote_ms = (int(t_mono) - debut[d]) / 1e6
+        hote_ms = (t_uart - debut[d]) / 1e6
         invite_ms = int(m[2]) / 1e3
         ecart = invite_ms - hote_ms
         pct = 100.0 * ecart / hote_ms if hote_ms else 0.0
-        decalage = int(m[5]) - int(t_mur) // 1_000_000
-        ok_duree = abs(ecart) <= 50 if d < 10 else abs(pct) <= 1.0
+        decalage = int(m[5]) - t_uart // 1_000_000
+        ok_duree = hote_ms > 0 and (abs(ecart) <= 50 if d < 10 else abs(pct) <= 1.0)
         ok_reel = abs(decalage) <= 2100
         echecs += (not ok_duree) + (not ok_reel)
         print(f"HORLOGE_AUDIT d={d} invite_ms={invite_ms:.1f} hote_ms={hote_ms:.1f} ecart_ms={ecart:+.1f} "
@@ -125,6 +168,11 @@ sys.exit(1 if echecs else 0)
 PY
 rm -f horodateur.py
 if [ "$etat" != fini ]; then echo "HORLOGE_ECHEC banc=$etat" >&2; exit 1; fi
+# Le bilan de la bascule doit preceder la premiere mesure.
+awk '/HORLOGE_DEBUT d=1[[:space:]]/ { exit }
+     /BOUCHAUD_CONSOLE_BILAN active=/ { synchrone = /active=0 repli_securite=0 / }
+     END { exit !synchrone }' "$LOG" ||
+    { echo "HORLOGE_ECHEC console synchrone non confirmee" >&2; exit 1; }
 grep -aq HORLOGE_INVITE_OK "$LOG" || { echo "HORLOGE_ECHEC verifications de l'invite" >&2; exit 1; }
 [ "$rc_hote" -eq 0 ] || { echo "HORLOGE_ECHEC duree vue par l'invite contre l'hote" >&2; exit 1; }
 echo HORLOGE_AUDIT_OK

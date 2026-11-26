@@ -1,0 +1,151 @@
+# CPU Fabric · audit de #384
+
+Base `fdef86bef300852a37584eefdb86b0dc27f71082`, qui fusionne #383. Tête Claude `dc280eabf904c52ca1af0ee16264351b30ee66d8`, neuf commits sans divergence. [Brouillon #384](https://github.com/bcharthur/bouchaud-os/pull/384)
+
+| Commit | Changement relu |
+|---|---|
+| `04f0456c` | Historique des élections par CPU et rapport des retards HID. Paramétrage du banc BrowserHost pour simuler un coût par octet et changer le nombre de vCPU. La simulation série n'établit pas une qualification WHPX. |
+| `5ee70edb` | Saut des sous-arbres absents dans le démontage de plages. Destruction des feuilles présentes, maintien du shootdown et du rendu séparé des frames. |
+| `454ff152` | Filtre du banc sans arrêt prématuré du lecteur sous pipefail. |
+| `4a70c913` | Sonde de trous, protections, réemploi, fichiers et bilan de mémoire, avec mutant. |
+| `a0063503` | Rattache le contrat documentaire à `prepare_unmap`. |
+| `d3700bb0` | Profil par appel côté noyau et sonde glibc/musl côté utilisateur. |
+| `6b949ab6` | Ajoute ELF vDSO, page vvar, auxv, publication séquencée du TSC, `getcpu`, repli syscall et protections des écritures utilisateur. |
+| `325b4920` | SIGKILL distant via condamnation de groupe, y compris un fil en calcul pur rattrapé à une frontière IRQ. Ajoute un banc de latence par charge. |
+| `dc280eab` | Parcours des feuilles en une passe, constitution du fils par blocs, comptabilité RSS à la pose de chaque PTE et regroupement des invalidations. Table COW à adressage ouvert sous verrou global. |
+
+## Invariants et corrections
+
+- **Fork et TLB.** Un premier fork peut relâcher le verrou Mm avant la fin du shootdown. Un second fork peut alors voir uniquement des PTE déjà marquées COW. Un fork partiellement échoué peut également laisser des PTE rétrogradées. Le candidat invalide aussi dans le cas des PTE COW précédemment inscriptibles, localement et sur les cœurs actifs du parent avant publication du fils. Le chemin distant conserve l'attente des ACK hors du verrou Mm. Un fils incomplet reste invisible.
+- **COW et RSS.** Une part par frame distincte, même avec des alias. Les pages empruntées gardent leur propriétaire et les PTE gardent la classe RSS. Chaque PTE installée compte une fois pour le RSS du fils. La table réserve la place du lot avant tout changement de compte. Un échec de croissance ne publie aucun compte partiel. Le fils incomplet est détruit après retrait des frames simplement recensées. Allocation des vecteurs de travail et extension du suivi des tables deviennent faillibles. L'ordre Mm → COW reste inchangé. Le coût d'un redimensionnement sous le verrou global, les autres allocations du syscall, une injection de panne à chaque site et le bilan RSS sous contention demandent des essais ciblés.
+- **VDSO.** Le chemin statique vérifie ELF, symboles, absence de relocations, permissions initiales et protections d'écriture. Le candidat refuse aussi de rendre vvar exécutable par `mprotect`. Les sondes glibc et musl vérifient auxv non nul, les horloges et la protection. Sous TCG SMP2 avec RDPID et RDTSCP masqués, glibc et musl repassent chacune par le noyau pour les 5 000 lectures de CPU, tandis que le TSC reste utilisable pour les horloges. Le repli complet des horloges quand le TSC est inéligible reste à provoquer. `sched_setaffinity` est encore un retour de compatibilité dans ce noyau. La sonde d'échange n'établit donc pas à elle seule que les deux participants ont réellement tourné sur deux cœurs distincts. Certifier les CPU observés, la comparaison vDSO/syscall et les replis avec CPU/horloges non éligibles avant GO.
+- **SIGKILL et récolte.** La sonde vérifie maintenant `WIFSIGNALED` et `WTERMSIG == SIGKILL` pour chaque perturbateur. L'état zombie du processus, le dernier fil effectivement sorti de son contexte et le recyclage du slot de tâche restent trois événements distincts.
+
+## Mesures indépendantes
+
+TCG SMP1, 1 Gio, ABBA, deux boots par bras, 20 forks par boot, 64 Mio privés touchés avec un accès volatile par page. Temps du parent autour de `fork`. Chaque enfant doit observer sa page et rendre son statut. Même binaire et même disque de sonde en snapshot. Base `fdef86be` contre la première tranche corrigée. Médianes par boot A1 **60,526 ms**, B2 **8,946 ms**, B3 **8,910 ms**, A4 **61,852 ms**. Étendues A 59,537–72,072 ms et B 8,094–21,290 ms. Les journaux locaux, le code de sonde et les SHA d'images sont archivés sous `/workspace/scratch/cpu-fabric-results/`. Ces mesures reproduisent l'ordre de grandeur du gain de fork sous TCG. Une deuxième série ABBA, même hôte et même sonde de latence en phase fork de trois secondes, a mesuré les P50 **15,056 / 1,803 / 2,224 / 15,244 ms**, avec **83 / 19 / 22 / 81** réveils au-delà de 10 ms et **129 / 747 / 682 / 127** échantillons. P95 **60,496 / 9,194 / 9,026 / 61,629 ms**. Le gain sur la latence est reproduit. Le compte brut exact de Claude (77 à 7) varie avec le nombre de réveils. Ces deux séries précèdent le commit de récolte.
+
+Le banc versionné `tools/ci/run_cpu_fabric_fork64.sh BOOT_A BOOT_B NOUVELLE_SORTIE 1` rejoue la mesure. Sur le lot de retrait, ce banc donne 66,443 / 9,353 / 9,194 / 63,677 ms (médianes ABBA, 20 mesures par passage). Pour la latence, lancer `tools/ci/run_latence.sh BOOT 1 3 fork` dans le même ordre ABBA, avec `GARDE_JOURNAL` différent par passage. Archiver les empreintes et ne comparer que des essais complets à paramètres identiques.
+
+Sonde glibc et musl et mort SIGKILL des deux perturbateurs en calcul pur observées sous TCG SMP1/2/4. Modèle COW de 200 000 opérations et nouveau test de croissance par lots, 8/8. Garde vDSO positive et mutants réussis. Les 1 593/1 573 cycles, 154 suites hôte et 217 gardes publiés par Claude restent des résultats de sa session. La CI Integration lance la tempête KVM SMP1/2/4 déjà issue de #383 et ajoute vDSO et SIGKILL en mode strict avec journaux.
+
+## Retrait différé des espaces d’adressage
+
+Le mode `zombie-force` de la sonde de #383 reproduit la rétention sous TCG SMP2 sans rouvrir d'application. Mémoire libre 143 Mio vivant, 143 Mio après le délai et 143 Mio immédiatement après `waitpid`. La sonde reçoit le statut SIGKILL et échoue sur la restitution. Elle ne reproduit pas le décompte des 82 tâches WHPX. Le travail non poussé de Claude n'apparaît pas dans la branche.
+
+Le second lot ajoute une file tenant les processus condamnés jusqu'au traitement depuis un fil noyau. Il attend l'état Zombie et l'absence de CPU et de commutation pour tous les fils de la victime. Pour un Mm indépendant, il bloque les activations, installe le Mm vide réservé par #383, puis attend la barrière CR3 avant de permettre la destruction. Pour un enfant vfork, il détache la référence du fils et libère ensuite le lien sans prendre sa retraite sur le CR3 commun. Les parents qui ont encore prêté leur Mm restent différés. La sortie tardive d'un fil ne remplace plus le statut déjà publié. Le statut reste disponible pour waitpid. La sonde vfork-force fait tuer un emprunteur en calcul par un troisième processus, puis vérifie le retour du prêteur et son waitpid. Elle passe en TCG SMP1/2/4.
+
+Sur l'image avec ce correctif, la sonde avant waitpid repasse au vert TCG SMP1/2/4 sur sortie normale et forcée. Après mort forcée, libre de 143 à 191, 191 et 185 Mio en 14, 18 et 12 ms dans ces passages. Aucun lancement d'application n'intervient entre le signal et la mesure. Les références résiduelles du Mm sont rendues à sa destruction. Les slots de tâches stables et les piles noyau gardent encore le recyclage existant. Leur récolte autonome et les sorties concurrentes restent à qualifier. Sous TCG SMP4, la cohorte de 82 victimes restitue 77 Mio avant waitpid (103 → 180 Mio) avec 82 statuts SIGKILL. Le témoin sur le lot précédent reste à 103 Mio. Ce test porte sur le Mm et les statuts, tandis que le compteur de slots et le passage WHPX restent à vérifier.
+
+## Preuve GitHub KVM acquise
+
+Référence qualifiée `8bf4f6eaa49559d6051bbb7883b23a49d20c1d51`. Neuf workflows PR terminés avec succès. Le journal Integration identifie KVM sur SMP1/2/4 et donne les résultats suivants. [Campagne](https://github.com/bcharthur/bouchaud-os/actions/runs/45782160966/job/139780758748)
+
+| Mesure | SMP1 | SMP2 | SMP4 |
+|---|---:|---:|---:|
+| Cycles fork / vide / complet | 905 / 366 / 698 | 903 / 366 / 691 | 894 / 362 / 686 |
+| Échecs sur ces 5 871 cycles | 0 | 0 | 0 |
+| clock_gettime monotone glibc / musl, ns | 38 / 39 | 33 / 33 | 33 / 33 |
+| Transitions noyau sur 200 000 lectures par libc | 0 | 0 | 0 |
+| Réveils en phase calcul / retard max µs | 3 000 / 613 | 3 000 / 75 | 3 000 / 508 |
+
+La cohorte SMP4 passe de 104 à 190 Mio libres avant waitpid. Le vfork forcé passe sur les trois configurations. OOM et témoin de quarantaine passent, le job vérifie la chaîne réserve, attente et rendu pour la même victime. Le workflow Ladybird contenant C22 et l'endurance est vert. Ces conclusions concernent le SHA de référence. [Ladybird](https://github.com/bcharthur/bouchaud-os/actions/runs/45782161156)
+
+## Dernière passe ciblée
+
+- **Sorties et RSS.** Sur le SHA de référence, deux fils du parent attendant le même enfant peuvent bloquer après sa collecte alors que d’autres enfants restent dans la table. Le parent se rendort à cause d’un test de présence trop large. La correction vérifie l’existence du PID demandé avant et après la publication de l’attente. La sonde `rss-course` sur TCG SMP4 passe 20 tours, soit 80 enfants. Quatre frères écrivent sur le même MiB hérité. Chaque enfant garde le même RSS après COW et perd exactement 1 024 Kio après `munmap`. Les données du parent restent intactes. Deux collecteurs attendent le premier enfant à chaque tour, avec un gagnant et un retour ECHILD. Cette preuve porte sur les sorties normales concurrentes et la collecte, tandis que les sorties forcées restent couvertes par les sondes du lot précédent.
+- **VDSO.** L’échange entre processus est intégré au banc SMP2/4 et valide les numéros de CPU par syscall autour des lectures glibc. Il exige des passages sur deux CPU distincts et zéro recul. Le repli getcpu avec RDPID/RDTSCP masqués vérifie les compteurs noyau. Le repli des horloges existe en preuve TCG SMP2 sur le témoin local qui force le mode syscall, deux lectures de chronométrage comprises. Le test des horloges en mode syscall et la détection d’un TSC naturellement inéligible sont des étapes distinctes.
+- **Injection.** Le refus déterministe d’une réservation impossible est vérifié sur la table COW. Les comptes, propriétaires et décisions de libération restent corrects. La matrice d’injection en vrai noyau, incluant PML4, table feuille, réserve de parts et acquisition de références, exige encore des témoins d’échec partiel avec contrôle PTE/TLB et RSS.
+- **Slots et piles.** Le registre a des indices stables, la génération protège la réutilisation, et la destruction attend les lecteurs et la fin de commutation. Une récolte autonome générale implique des trous dans ce registre et la validation des lecteurs d’indices bruts, ou une séparation de la durée de vie du slot et de celle de la pile. Elle reste hors de cette tranche ciblée. Le retrait autonome du Mm reste en place.
+
+## Durée de vie des projections du fork
+
+Le fork copie les PTE puis prend les références avant de libérer le garde du Mm parent. Le cache propre compare la frame de la PTE du fils avec celle de l'entrée, sous les verrous du registre puis de l'état de la page. MAP_SHARED ne duplique qu'une référence de mapping déjà vivante. Le registre refuse les nœuds absents, sans mapping ou en éviction. La référence du parent empêche l'éviction des pages du nœud jusqu'à la prise de celle du fils. Les régions natives et les baux GPU sont conservés sous Arc. Les pages zéro, vvar/vDSO et les surfaces globales conservent leur propriétaire global.
+
+Acquisition sous Mm → cache, puis état de page pour le cache propre. Les routines d'acquisition du fork ne font ni I/O ni attente sur WaitQueue. Les chemins de faute relâchent les verrous du cache avant de reprendre le Mm. Après libération du Mm, le shootdown attend les ACK. Sur échec, l'espace non publié est détruit et seules les références du préfixe acquis sont rendues. Les rendus susceptibles de déclencher une éviction ou un writeback ont lieu hors de Mm.
+
+Le témoin hôte compile les routines de production contre un cache contrôlé. Une même clé est réinsérée sur une autre frame entre instantané et prise. Le mutant qui accepte la clé seule échoue. Le correctif refuse la substitution à la deuxième référence. Le témoin contrôle le préfixe à restituer, puis exerce le succès sur la nouvelle frame et les refus du registre partagé. L'ordre des appels dans le vrai fork est vérifié séparément. Ce témoin détermine la course sans dépendre du hasard d'ordonnancement.
+
+TCG SMP4, sonde COW passée avec écritures père/fils/noyau, MAP_SHARED, sorties, futex et pression mémoire. Fork 64 Mio ABBA, 20 mesures par boot. Médianes 9,144 et 8,915 ms sur le lot de retrait de référence, 8,145 et 9,690 ms sur le correctif. Les distributions se recouvrent. La qualification KVM de la nouvelle tête et le test utilisateur WHPX sont des preuves distinctes. [Recyclage différé #385](https://github.com/bcharthur/bouchaud-os/issues/385)
+
+## Échec P13 à la tête 086e1dfa
+
+GitHub confirme huit workflows sur neuf réussis au SHA
+`086e1dfa25ccb7487752c630a8c102912a97a456`. À ce SHA, la tempête Integration
+sous KVM passe en SMP1/2/4, de même que Ladybird C22, l'endurance et
+Non-regression Gate. Le verdict P13 reste rouge.
+[Integration KVM](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113324/job/139865885448) ·
+[Ladybird](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113523) ·
+[Non-regression Gate](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113327)
+
+| Écart MONOTONIC invité − hôte | 1 s | 10 s | 60 s |
+|---|---:|---:|---:|
+| TCG SMP4 | −0,5 ms | −0,1 ms | +0,6 ms |
+| KVM SMP4 | **+64,5 ms** | +2,9 ms | −9,3 ms |
+| KVM SMP4 à `8bf4f6ea` | +4,3 ms | −0,1 ms | −7,0 ms |
+
+En KVM avec `-cpu host`, l'invité a mesuré 1 000,438 ms contre 935,9 ms
+sur l'hôte. La limite est de 50 ms. REALTIME suit MONOTONIC à 1 µs près
+sur cet intervalle et l'écart absolu REALTIME avec l'hôte reste admis.
+Le code du banc est identique à celui de main `fdef86be`. Le banc, le
+vDSO, le vvar, le code SMP et le minuteur sont identiques à ceux de la
+référence verte `8bf4f6ea`. Les mesures ne montrent pas de dérive
+soutenue et ne suffisent pas à attribuer le point de 1 s.
+[Campagne en échec](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113333/job/139858275863) ·
+[Campagne verte](https://github.com/bcharthur/bouchaud-os/actions/runs/45782160808/job/139780121616)
+
+Le banc horodate les lignes quand le lecteur Python les traite. Un
+retard différentiel du marqueur de départ se soustrait donc à la durée
+hôte. Le juge d'origine, alimenté avec le même intervalle invité et un
+départ hôte décalé de 64,5 ms, reproduit 935,9 ms et l'échec à +6,89 %.
+Le cas sans décalage passe. Cette injection reproduit le symptôme du
+juge. L'origine du retard dans la campagne réelle reste indéterminée.
+L'artefact historique contient la série TCG. Le retour non nul KVM sous
+`bash -e` interrompait l'étape avant la copie de sa série et les
+horodatages bruts étaient absents de la collecte.
+
+Le changement de collecte conserve la série et les horodatages pour
+chaque accélérateur, y compris après un échec, et conserve un verdict
+rouge dès qu'un des deux bancs échoue. La relance du SHA historique a
+été annulée avant les horloges lors de l'ouverture de la campagne
+`de786e80`. [Relance historique](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113333/attempts/2) ·
+[Campagne de collecte](https://github.com/bcharthur/bouchaud-os/actions/runs/45814192621)
+
+### Horodatage UART du banc
+
+Le juge date désormais les fins de ligne à l'écriture dans l'UART de
+QEMU. Il exige les mêmes marqueurs, dans le même ordre, sur la trace
+UART et la série. Il refuse une variation supérieure à 1 ms de l'écart
+entre horloges hôte monotone et murale. Les durées requises et les
+limites de 50 ms, 1 % et 2 100 ms restent identiques. La série, les
+horodatages du lecteur et la trace UART restent disponibles pour
+localiser un écart. P13 exige le succès sur un démarrage TCG et sur
+deux démarrages KVM distincts. Le noyau et la sonde invitée sont
+inchangés. [Vérifications de la tête](https://github.com/bcharthur/bouchaud-os/pull/384/checks)
+
+Témoin local sur le noyau `de786e80`, QEMU TCG SMP4. Les deux juges
+ont reçu les mêmes traces brutes pour chaque essai.
+
+| Essai à 1 s | Invité | Hôte lu par Python | Hôte à l'UART | Ancien / nouveau |
+|---|---:|---:|---:|---|
+| Sans injection | 1 002,5 ms | 1 002,7 ms | 1 002,6 ms | OK / OK |
+| Retard injecté sur la lecture du départ | 1 002,9 ms | 937,1 ms | 1 003,0 ms | ÉCHEC / OK |
+
+Sur la trace sans injection, un mutant qui rapporte 1 067,5 ms dans
+l'invité pour 1 002,6 ms à l'UART reste rouge à +64,9 ms. Une divergence
+des marqueurs entre les deux traces reste rouge. Le mécanisme de mesure
+défectueux est reproduit et corrigé. Les données de la campagne
+historique restent insuffisantes pour l'attribuer rétrospectivement à
+ce mécanisme.
+
+Le banc complet TCG SMP4 passe à 1, 10 et 60 s sur les deux noyaux
+compilés localement. Les écarts invité moins UART sont de −0,5,
+−3,8 et −19,0 ms pour `fdef86be` et de −3,2, −5,1 et −12,4 ms pour
+`de786e80`, avec la même sonde et le même juge.
+
+Le témoin hôte des références du fork passe avec rejet du mutant. Il
+couvre l'identité de frame, le préfixe des références acquises et le
+partage. La matrice d'échecs partiels dans le vrai noyau et l'observation
+du TLB distant à ces frontières restent des limites de couverture. Le
+recyclage autonome des slots et des piles reste suivi dans
+[#385](https://github.com/bcharthur/bouchaud-os/issues/385).

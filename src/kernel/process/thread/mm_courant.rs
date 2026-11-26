@@ -254,9 +254,8 @@ pub fn ppid_visible(parent: u32) -> u32 {
 // Ce qui n'est PAS rendu ici :
 //   * le `Mm` d'un fils vfork mort sans `execve` : c'est celui du pere ;
 //   * un `Mm` qu'un fils vfork emprunte encore : le fils s'execute dessus ;
-//   * les processus tues de force par `tue_processus`, qui ne passent pas
-//     par la sortie de leur dernier fil : leur espace part a la recolte,
-//     comme avant.
+// Les morts imposees suivent la file de retraite ci-dessous. Elles n'ont
+// pas de dernier fil charge de quitter lui-meme le CR3.
 static MM_MORT: SpinLock<Option<Arc<Mm>>> = SpinLock::new(None);
 static ESPACES_RENDUS_A_LA_MORT: AtomicU64 = AtomicU64::new(0);
 static PAGES_RENDUES_A_LA_MORT: AtomicU64 = AtomicU64::new(0);
@@ -412,6 +411,70 @@ fn rend_espace_a_la_mort_effectif(emprunteur: bool) {
         crate::kernel::timer::monotonic_ns().saturating_sub(debut_ns) / 1_000,
     ));
     drop(process);
+}
+
+// La file tient les morts imposees independamment du registre des taches
+// et de waitpid. Le diagnostic la sert en contexte de fil, en dehors des IRQ.
+static RETRAITS_FORCES: SpinLock<alloc::collections::VecDeque<Arc<Process>>> =
+    SpinLock::new(alloc::collections::VecDeque::new());
+
+fn differe_retrait_force(process: Arc<Process>) {
+    RETRAITS_FORCES.lock().push_back(process);
+}
+
+fn sert_retraits_forces() {
+    let budget = RETRAITS_FORCES.lock().len().min(8);
+    for _ in 0..budget {
+        let Some(process) = RETRAITS_FORCES.lock().pop_front() else { break; };
+        if !retire_mm_force(&process) {
+            differe_retrait_force(process);
+        }
+    }
+}
+
+fn retire_mm_force(process: &Arc<Process>) -> bool {
+    // Un fil peut etre condamne et encore revenir d'une E/S noyau, ou
+    // etre zombie et commuter sur sa pile. Aucun de ces deux cas ne
+    // permet de detacher son espace. Relacher la lecture du registre
+    // avant tout verrou du Mm ou toute attente d'IPI.
+    if tasks().iter().any(|task| {
+        task.process.pid == process.pid
+            && (task.state != TaskState::Zombie
+                || task.on_cpu >= 0
+                || task.switching_out.charge())
+    }) {
+        return false;
+    }
+    let Some(mort) = mm_des_morts() else { return false; };
+    let ancien = process.mm.get();
+    if Arc::ptr_eq(&ancien, &mort) {
+        return true;
+    }
+    if process.emprunte_mm() {
+        // Le pere peut toujours executer cette identite. Detacher la
+        // reference du fils et rendre l'emprunt, sans retrait du CR3 commun.
+        drop(process.mm.remplace(mort));
+        process.libere_vfork(FinEmprunt::Sortie);
+        return true;
+    }
+    if ancien.est_emprunte() {
+        return false;
+    }
+    let (identity, pml4, pages) = {
+        let mm = ancien.lock();
+        (mm.space.identity(), mm.space.pml4(), mm.space.mapped_pages())
+    };
+    if identity.active_cpus() != 0 || crate::kernel::vmm::current_pml4() == pml4 {
+        return false;
+    }
+    identity.begin_retire();
+    drop(process.mm.remplace(mort));
+    identity.barriere_cr3();
+    ancien.publie_rendu_a_la_destruction(Arc::clone(process));
+    drop(ancien);
+    ESPACES_RENDUS_A_LA_MORT.fetch_add(1, Ordering::Relaxed);
+    PAGES_RENDUES_A_LA_MORT.fetch_add(pages as u64, Ordering::Relaxed);
+    true
 }
 
 /// Espaces de morts dont un coeur tenait encore le CR3 a l'echeance.

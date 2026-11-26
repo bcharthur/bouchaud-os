@@ -90,7 +90,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < n && durees[i] <= plafond; i++) {
         int d = durees[i];
         int64_t m0 = ns(CLOCK_MONOTONIC), r0 = ns(CLOCK_REALTIME);
-        ligne("HORLOGE_DEBUT d=%d\n", d);
+        ligne("HORLOGE_DEBUT d=%d mono_ns=%lld reel_ns=%lld\n",
+               d, (long long)m0, (long long)r0);
+        int64_t apres_debut = ns(CLOCK_MONOTONIC);
         struct timespec demande = { d, 0 }, reste;
         while (nanosleep(&demande, &reste) != 0 && errno == EINTR)
             demande = reste;
@@ -99,6 +101,10 @@ int main(int argc, char **argv)
         long long excedent_us = mono_us - (long long)d * 1000000LL;
         ligne("HORLOGE_FIN d=%d mono_us=%lld reel_us=%lld excedent_us=%lld reel_ms=%lld\n",
                d, mono_us, reel_us, excedent_us, (long long)(r1 / 1000000));
+        int64_t apres_fin = ns(CLOCK_MONOTONIC);
+        ligne("HORLOGE_CHEMIN d=%d mono_fin_ns=%lld reel_fin_ns=%lld debut_jusqua_retour_ns=%lld fin_jusqua_retour_ns=%lld\n",
+               d, (long long)m1, (long long)r1,
+               (long long)(apres_debut - m0), (long long)(apres_fin - m1));
         char quoi[96];
         snprintf(quoi, sizeof quoi, "d=%d s : le sommeil n'est pas plus court, excedent us", d);
         verifie(quoi, excedent_us >= 0, excedent_us);

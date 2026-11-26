@@ -36,7 +36,7 @@ fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
             // tourner, et l'invalidation les vise.
             let _ = casse_cow_courant(clear);
             let process = task.process.clone();
-            process.mm.lock().space.write(clear, &0u32.to_le_bytes());
+            process.mm.lock().space.write_utilisateur(clear, &0u32.to_le_bytes());
             futex_wake(clear, 1);
         }
         let process = task.process.clone();
@@ -53,8 +53,10 @@ fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
         if lifecycle.threads > 0 {
             lifecycle.threads -= 1;
         }
-        lifecycle.exit_code = code;
-        lifecycle.par_signal = par_signal;
+        if !lifecycle.zombie {
+            lifecycle.exit_code = code;
+            lifecycle.par_signal = par_signal;
+        }
         // BOUCHAUD_GROUPE_RECLAME_V1 : UNE seule transition vers le dernier fil.
         // `exit_group` remet `threads` a 1 ; un fil deja compte sorti pouvait
         // alors retrouver `threads == 0` et demonter le processus une seconde
@@ -488,9 +490,11 @@ pub fn zombie_children(parent_pid: u32) -> Vec<(u32, i32, bool)> {
     out
 }
 
-/// Ce pid a-t-il encore des fils (zombies ou vivants) ?
-pub fn has_children(parent_pid: u32) -> bool {
-    processes().iter().any(|p| p.parent == parent_pid)
+/// Le parent a-t-il encore un fils qui correspond a l'attente ?
+pub fn has_children(parent_pid: u32, enfant: Option<u32>) -> bool {
+    PROCESSES.lock().iter().any(|p| {
+        p.parent == parent_pid && enfant.is_none_or(|pid| p.pid == pid)
+    })
 }
 
 /// Retire un fils zombie (il a ete recolte). Rend `true` si CET appel l'a retire.
@@ -1181,12 +1185,13 @@ pub fn tue_processus(pid: u32, code: i32) {
                 "PROCESS_EXIT t={} pid={} ppid={} code={} reason=force",
                 crate::kernel::timer::monotonic_ms(), pid, process.parent, code,
             ));
-            // BOUCHAUD_VFORK_REEL_V1 : meme regle qu'une sortie volontaire.
-            process.libere_vfork(FinEmprunt::Sortie);
+            // Le pere d'un fils vfork condamne ne peut reprendre que
+            // lorsque le fil de retraite a constate l'extinction du fils.
             // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : meme regle qu'une sortie
             // volontaire -- fermer avant de prevenir le parent.
             ferme_descripteurs(&process);
             libere_natif_a_la_mort(pid, code);
+            differe_retrait_force(Arc::clone(&process));
             notify_parent_of_exit_for(process.parent);
         }
     }

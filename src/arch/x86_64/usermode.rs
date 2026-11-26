@@ -171,7 +171,7 @@ pub fn per_cpu() -> &'static mut PerCpu {
 // haut) : un TSC_AUX laisse par le micrologiciel, ou celui d'un coeur pas
 // encore verifie, ne ressemble a rien de valide et retombe sur le chemin GS.
 const MSR_TSC_AUX: u32 = 0xC000_0103;
-const TSC_AUX_ETIQUETTE: u32 = 0xB0C0_0000;
+pub const TSC_AUX_ETIQUETTE: u32 = 0xB0C0_0000;
 /// 0 : inconnu ou indisponible ; 1 : rdtscp ; 2 : rdpid.
 static MODE_TSC_AUX: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
@@ -214,6 +214,11 @@ fn pose_tsc_aux(index: usize) {
         return;
     }
     unsafe { write_msr(MSR_TSC_AUX, (TSC_AUX_ETIQUETTE | (index as u32 + 1)) as u64) };
+}
+
+/// 0 : TSC_AUX inutilisable ; 1 : rdtscp ; 2 : rdpid (publie au vDSO).
+pub fn mode_tsc_aux() -> u8 {
+    MODE_TSC_AUX.load(Ordering::Acquire)
 }
 
 /// Source de l'identite du coeur, pour le journal.

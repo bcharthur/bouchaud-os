@@ -107,3 +107,29 @@ fn eagain_suit_son_entree_et_ne_glisse_pas_de_place() {
         .collect();
     assert_eq!(vu, vec![(20, 50, 49), (30, 20, 0), (10, 5, 1)]);
 }
+
+// BOUCHAUD_COUT_APPELS_V1 : le classement par COUT.
+fn cout(numero: usize, cycles: u64) -> profil::Cout {
+    profil::Cout { numero, purs: 1, cycles, pire: cycles, bloques: 0 }
+}
+
+#[test]
+fn le_classement_de_cout_est_decroissant_et_borne() {
+    let mut t = [cout(0, 0); 3];
+    let mut n = 0;
+    for (num, c) in [(1, 50), (2, 900), (3, 10), (4, 400), (5, 1000), (6, 5)] {
+        n = profil::insere_cout(&mut t, n, cout(num, c));
+    }
+    assert_eq!(n, 3);
+    assert_eq!(t.iter().map(|c| c.numero).collect::<Vec<_>>(), vec![5, 2, 4]);
+}
+
+#[test]
+fn un_appel_commute_n_ajoute_pas_sa_duree() {
+    profil::note_duree(300, 1_000_000, true);
+    profil::note_duree(300, 500, false);
+    let mut t = [cout(0, 0); 64];
+    let n = profil::plus_couteux(&mut t);
+    let c = t[..n].iter().find(|c| c.numero == 300).expect("appel 300 classe");
+    assert_eq!((c.purs, c.cycles, c.bloques, c.pire), (1, 500, 1, 500));
+}

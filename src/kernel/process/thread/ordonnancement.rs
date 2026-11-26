@@ -587,8 +587,18 @@ fn switch_to(from: usize, to: usize) {
         // PAS de on_cpu=-1, PAS d'enqueue ici. Cette pile est encore active.
         finalise_task_running(&mut *to_ptr, cpu_id);
 
+        let appel_sortant = crate::kernel::task::stall_probe_context_pour(cpu_id).1;
         set_current_index(to);
         install(&mut *to_ptr);
+        // BOUCHAUD_ELECTIONS_RECENTES_V1 : qui tient ce coeur, depuis quand.
+        crate::kernel::scheduler::elections::note_avec_temps(
+            cpu_id,
+            ((*from_ptr).user_cpu_ns.charge(), (*from_ptr).kernel_cpu_ns.charge()),
+            appel_sortant,
+            (*to_ptr).tid, (&(*to_ptr).process).pid, (*to_ptr).noyau,
+            ((*to_ptr).user_cpu_ns.charge(), (*to_ptr).kernel_cpu_ns.charge()),
+            crate::kernel::timer::monotonic_ns(),
+        );
         (from_ptr, to_ptr)
     };
 
@@ -637,6 +647,8 @@ fn abandonne_la_tache_courante(cpu_id: usize, cur: usize) -> *mut Task {
         ptr
     };
     set_current_index(NO_TASK);
+    // BOUCHAUD_ELECTIONS_RECENTES_V1 : le coeur passe au repos (0/0).
+    crate::kernel::scheduler::elections::note(cpu_id, 0, 0, false, crate::kernel::timer::monotonic_ns());
     clear_current_process_local();
     set_current_is_kernel(false);
     efface_current_profil();

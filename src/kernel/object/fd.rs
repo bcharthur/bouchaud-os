@@ -874,6 +874,8 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
             "uptime" => proc_uptime(),
             "mounts" | "self/mounts" => proc_mounts(),
             "bouchaud/memoire" => proc_memoire_bouchaud(),
+            // BOUCHAUD_COUT_APPELS_V1 : le CPU noyau par appel systeme.
+            "bouchaud/appels" => proc_appels(),
             // BOUCHAUD_JOURNAL_RING3_V1 : l'anneau de trace, tel qu'au moment
             // de l'ouverture, pour l'application Journal (anneau 3) ; reserve
             // a `DEBUG` (`security::filesystem::kernel_trace`). Et le total
@@ -918,7 +920,7 @@ impl crate::fs::vfs::SystemeFichiers<FdKind> for ProcFs {
             "self" => ["stat", "status", "maps", "smaps", "mounts", "reveil", "fil"]
                 .iter().map(|n| Entree::fichier(n)).collect(),
             "bouchaud" => alloc::vec![
-                Entree::fichier("memoire"), Entree::fichier("ota"),
+                Entree::fichier("memoire"), Entree::fichier("ota"), Entree::fichier("appels"),
                 Entree::fichier("journal"), Entree::fichier("journal_octets"),
             ],
             pid if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
@@ -951,6 +953,26 @@ fn proc_mounts() -> Vec<u8> {
     let mut texte = alloc::string::String::from("ramfs / ramfs rw 0 0\n");
     for (point, nom) in montages().montages() {
         texte.push_str(&alloc::format!("{} {} {} rw 0 0\n", nom, point, nom));
+    }
+    texte.into_bytes()
+}
+
+/// `/proc/bouchaud/appels` : les 40 appels systeme au plus fort CPU noyau
+/// cumule depuis le demarrage (BOUCHAUD_COUT_APPELS_V1). Colonnes : nom,
+/// appels non commutes, ns cumules, ns moyens, ns pire, appels commutes.
+fn proc_appels() -> Vec<u8> {
+    use crate::kernel::abi::profil::{plus_couteux, Cout};
+    let mut table = [Cout { numero: 0, purs: 0, cycles: 0, pire: 0, bloques: 0 }; 40];
+    let n = plus_couteux(&mut table);
+    let par_ms = crate::kernel::timer::cycles_par_ms().max(1);
+    let ns = |c: u64| (c as u128 * 1_000_000 / par_ms as u128) as u64;
+    let mut texte = alloc::string::String::from("# appel purs ns_total ns_moyen ns_pire commutes\n");
+    for c in &table[..n] {
+        let moyen = if c.purs == 0 { 0 } else { c.cycles / c.purs as u64 };
+        texte.push_str(&alloc::format!(
+            "{} {} {} {} {} {}\n",
+            crate::kernel::abi::nr::name(c.numero as u64), c.purs, ns(c.cycles), ns(moyen), ns(c.pire), c.bloques,
+        ));
     }
     texte.into_bytes()
 }

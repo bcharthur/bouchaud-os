@@ -14,7 +14,7 @@
 use core::arch::{asm, x86_64::__cpuid};
 use core::hint::spin_loop;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::{cpu_local, gdt, idt, interrupts, usermode};
 use crate::kernel::{dmesg, memory, vmm};
@@ -1725,6 +1725,8 @@ pub fn init_probe() {
     if exposed <= 1 {
         dmesg::log("SMP4_AP_STARTED count=0 reason=single-vcpu");
         dmesg::log("SMP4_SCHEDULER online=1 mode=UP");
+        // Un seul coeur : rien ne peut reculer d'un coeur a l'autre.
+        verifie_tsc_synchrone();
         return;
     }
 
@@ -1733,6 +1735,7 @@ pub fn init_probe() {
         || !vmm::identity_map_kernel_page(BOOT_PML4_PHYS)
     {
         dmesg::log("SMP4_AP_STARTED count=0 reason=bootstrap-identity-map-failed");
+        verifie_tsc_synchrone();
         return;
     }
 
@@ -1843,6 +1846,102 @@ pub fn init_probe() {
         );
     }
     log_cpu_topology();
+    verifie_tsc_synchrone();
+}
+
+// ─── BOUCHAUD_TSC_SYNCHRONE_V1 ──────────────────────────────────────────────
+//
+// Le vDSO lit l'horloge en anneau 3 au TSC, sans le `fetch_max` global par
+// lequel le noyau protegeait la monotonie entre coeurs. Ce n'est permis que si
+// une lecture ordonnee du TSC ne peut pas reculer d'un coeur a l'autre. Le
+// test est celui de Linux (`check_tsc_warp`) : tous les coeurs en ligne, en
+// meme temps, sous un verrou, lisent le TSC et le comparent a la derniere
+// lecture publiee, quel que soit le coeur qui l'a faite. Un seul recul et le
+// TSC est declare NON synchrone : le noyau garde son `fetch_max`, le vDSO
+// retombe sur l'appel systeme. Un AP qui n'a pas participe (en ligne trop
+// tard) vaut un echec : on ne declare rien qu'on n'a pas mesure.
+
+/// 0 : ferme ; 1 : en cours ; 2 : termine (les retardataires ne participent pas).
+static TEST_TSC_PHASE: AtomicU8 = AtomicU8::new(0);
+static TEST_TSC_VERROU: AtomicBool = AtomicBool::new(false);
+static TEST_TSC_DERNIER: AtomicU64 = AtomicU64::new(0);
+static TEST_TSC_RECULS: AtomicU64 = AtomicU64::new(0);
+static TEST_TSC_PIRE_RECUL: AtomicU64 = AtomicU64::new(0);
+static TEST_TSC_PARTICIPANTS: AtomicUsize = AtomicUsize::new(0);
+static TEST_TSC_FINIS: AtomicUsize = AtomicUsize::new(0);
+const TEST_TSC_TOURS: usize = 20_000;
+
+fn boucle_test_tsc() {
+    for _ in 0..TEST_TSC_TOURS {
+        while TEST_TSC_VERROU
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        let maintenant = crate::kernel::timer::lecture_tsc_ordonnee();
+        let dernier = TEST_TSC_DERNIER.load(Ordering::Relaxed);
+        if maintenant < dernier {
+            TEST_TSC_RECULS.fetch_add(1, Ordering::Relaxed);
+            TEST_TSC_PIRE_RECUL.fetch_max(dernier - maintenant, Ordering::Relaxed);
+        }
+        TEST_TSC_DERNIER.store(maintenant, Ordering::Relaxed);
+        TEST_TSC_VERROU.store(false, Ordering::Release);
+    }
+}
+
+/// Cote AP : attend l'ouverture du test (borne), y participe une fois.
+fn participe_test_tsc() {
+    let mut attente = 0u64;
+    loop {
+        match TEST_TSC_PHASE.load(Ordering::Acquire) {
+            1 => break,
+            2 => return,
+            _ => {}
+        }
+        attente += 1;
+        // Borne large : le BSP attend lui-meme les AP (30 M tours) avant
+        // d'ouvrir. Au-dela, il a renonce ; on ne bloque pas l'AP.
+        if attente > 200_000_000 {
+            return;
+        }
+        spin_loop();
+    }
+    TEST_TSC_PARTICIPANTS.fetch_add(1, Ordering::AcqRel);
+    boucle_test_tsc();
+    TEST_TSC_FINIS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Cote BSP, apres le demarrage des AP : ouvre le test, y participe, attend
+/// les autres, conclut. Publie le verdict dans l'horloge du noyau.
+fn verifie_tsc_synchrone() {
+    let attendus = started_aps();
+    TEST_TSC_DERNIER.store(crate::kernel::timer::lecture_tsc_ordonnee(), Ordering::Relaxed);
+    TEST_TSC_PHASE.store(1, Ordering::Release);
+    boucle_test_tsc();
+    let mut tours = 0u64;
+    while TEST_TSC_FINIS.load(Ordering::Acquire) < attendus && tours < 100_000_000 {
+        tours += 1;
+        spin_loop();
+    }
+    TEST_TSC_PHASE.store(2, Ordering::Release);
+    let participants = TEST_TSC_PARTICIPANTS.load(Ordering::Acquire);
+    let finis = TEST_TSC_FINIS.load(Ordering::Acquire);
+    let reculs = TEST_TSC_RECULS.load(Ordering::Relaxed);
+    let (_, hz, _, invariant) = crate::kernel::timer::parametres_tsc();
+    let synchrone = reculs == 0 && finis == attendus && participants == attendus && hz != 0;
+    crate::kernel::timer::declare_tsc_synchrone(synchrone);
+    crate::serial_println!(
+        "BOUCHAUD_TSC_SYNCHRONE verdict={} coeurs={} participants={} reculs={} pire_recul_cycles={} tours={} invariant={} hz={}",
+        if synchrone { "synchrone" } else { "non-synchrone" },
+        attendus + 1,
+        participants + 1,
+        reculs,
+        TEST_TSC_PIRE_RECUL.load(Ordering::Relaxed),
+        TEST_TSC_TOURS,
+        invariant as u8,
+        hz,
+    );
 }
 
 fn log_cpu_topology() {
@@ -1895,6 +1994,10 @@ pub extern "C" fn bouchaud_ap_entry() -> ! {
         ONLINE_CPUS.fetch_add(1, Ordering::AcqRel);
     }
     cpu_local::mark_online(cpu_id, true);
+
+    // BOUCHAUD_TSC_SYNCHRONE_V1 : le BSP ouvre le test de derive une fois
+    // tous les AP en ligne ; celui-ci y participe, IRQ coupees.
+    participe_test_tsc();
 
     interrupts::enable_ap();
 

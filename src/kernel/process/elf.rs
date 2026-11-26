@@ -643,6 +643,8 @@ pub fn build_stack(
         platform_addr
     };
 
+    let vdso_ehdr = crate::kernel::vdso::projette(space, promesses);
+
     // 2. Le vecteur auxiliaire.
     let mut auxv: Vec<(u64, u64)> = Vec::new();
     auxv.push((AT_PHDR, layout.image.phdr_addr));
@@ -665,8 +667,9 @@ pub fn build_stack(
     auxv.push((AT_RANDOM, random_addr));
     auxv.push((AT_PLATFORM, platform_addr));
     auxv.push((AT_EXECFN, execfn_addr));
-    // Pas de vDSO : la libc doit passer par l'instruction `syscall`.
-    auxv.push((AT_SYSINFO_EHDR, 0));
+    // BOUCHAUD_VDSO_V1 : l'en-tete ELF du vDSO (0 s'il est absent : la libc
+    // passe alors par l'instruction `syscall`).
+    auxv.push((AT_SYSINFO_EHDR, vdso_ehdr));
     auxv.push((AT_NULL, 0));
 
     // BOUCHAUD_C25_FENETRE_DE_PILE : la liste auxv ne depasse pas son budget.
