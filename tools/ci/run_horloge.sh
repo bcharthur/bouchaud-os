@@ -37,10 +37,16 @@ rm -rf "tools/userland/$OUT"
 (cd tools/userland && OUT=$OUT ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp "tools/userland/$OUT/horloge-probe" "$SCENARIO/bin/"
-cat > "$SCENARIO/autorun" <<AUTORUN
+{
+  if [ "${BO_HORLOGE_CONSOLE_SYNC:-0}" = 1 ]; then
+    echo "console-async off"
+    echo "console-async etat"
+  fi
+  cat <<AUTORUN
 /bin/horloge-probe $PLAFOND
 echo HORLOGE_FIN_BANC
 AUTORUN
+} > "$SCENARIO/autorun"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 ACCEL="-cpu max"
@@ -84,7 +90,7 @@ pkill -f "file=$IMAGE" 2>/dev/null || true
 wait "$TUBE" 2>/dev/null || true
 echo "HORLOGE_BANC $etat"
 
-sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | grep -aE '^  .*(ok|ECHEC) \(|HORLOGE_(INVITE|DEBUT|FIN)' || true
+sed -E 's/\x1b\[[0-9;]*m//g; s/^\[[^]]*\]\[[^]]*\]\[FPS:[^]]*\] //' "$LOG" | grep -aE '^  .*(ok|ECHEC) \(|HORLOGE_(INVITE|DEBUT|FIN|CHEMIN)' || true
 
 rc_hote=0
 python3 - "$STAMPS" "$PLAFOND" "$TRACE" <<'PY' || rc_hote=$?
