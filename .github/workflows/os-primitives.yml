@@ -10,6 +10,9 @@ on:
         default: false
   workflow_call:
     inputs:
+      bootimage_artifact:
+        type: string
+        default: ''
       p13_strict:
         type: boolean
         required: false
@@ -47,9 +50,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Primitives sur Bouchaud OS
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
@@ -175,19 +188,6 @@ jobs:
           # l'est dans le job `gpu-tampon`.
           SCANOUT_SORTIE=$PWD/scanout-virtio SCANOUT_TAMPON=copie SCANOUT_TRAME=off tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           SCANOUT_SORTIE=$PWD/scanout-virtio-kvm SCANOUT_TAMPON=copie SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-      - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
-        # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
-        # survit et le processus meurt. SMP1 met tout sur le coeur zero : un
-        # fil de calcul pur doit y etre preempte, et y mourir condamne.
-        run: |
-          BO_SMP=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
-          cp serie-faute-multifil.log serie-faute-multifil-smp1.log
-          BO_SMP=8 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
-          cp serie-faute-multifil.log serie-faute-multifil-smp8.log
-          BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
-          cp serie-faute-multifil.log serie-faute-multifil-kvm.log
       - name: Futex -- un reveil compte n'est jamais perdu (attendant temporise, condvar glibc), SMP1 et SMP4 (TCG)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 (#376) : un attendant temporise choisi
@@ -456,7 +456,6 @@ jobs:
             serie-virtio-*.log
             scanout-virtio*/serie-*.log
             scanout-virtio*/capture-*.ppm
-            serie-faute-multifil-*.log
             serie-compta-injection-*.log
             compta-utilisateur-kvm-smp*/serie.log
             serie-extinction-contention-*.log
@@ -492,9 +491,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -561,9 +570,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -628,9 +647,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -751,4 +780,63 @@ jobs:
             virtio-dma-panne*/serie.log
             virtio-reponse-etrangere*/serie.log
             virtio-irq-pannes*/serie.log
+          if-no-files-found: warn
+
+  memory-fault:
+    name: memory / faute ring 3 multifil
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU + musl
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: primitives-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            primitives-debug-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
+      - name: Bootimage
+        id: bootimage
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - name: Acces a /dev/kvm
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
+        # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
+        # survit et le processus meurt. SMP1 met tout sur le coeur zero : un
+        # fil de calcul pur doit y etre preempte, et y mourir condamne.
+        run: |
+          BO_SMP=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
+          cp serie-faute-multifil.log serie-faute-multifil-smp1.log
+          BO_SMP=8 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
+          cp serie-faute-multifil.log serie-faute-multifil-smp8.log
+          BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
+          cp serie-faute-multifil.log serie-faute-multifil-kvm.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-primitives-memory-fault
+          path: serie-faute-multifil-*.log
           if-no-files-found: warn

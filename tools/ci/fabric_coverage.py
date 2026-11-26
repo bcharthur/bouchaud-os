@@ -14,10 +14,13 @@ def p13_errors(workflow, compatibility, primitives, required=()):
         errors.append("P13: déclencheurs automatiques PR et main non couverts")
     jobs = config["jobs"]
     expected = {
-        "needs": "plan",
+        "needs": ["plan", "kernel"],
         "if": "needs.plan.outputs.p13 == 'true'",
         "uses": "./.github/workflows/os-primitives.yml",
-        "with": {"p13_strict": "false"},
+        "with": {
+            "p13_strict": "false",
+            "bootimage_artifact": "${{ needs.kernel.outputs.artifact }}",
+        },
     }
     if jobs.get("p13") != expected or "p13" not in jobs["verdict"]["needs"]:
         errors.append("P13: suite ou dépendance de verdict absente")

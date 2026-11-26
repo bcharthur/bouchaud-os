@@ -24,7 +24,7 @@ def verdict(needs):
     flags = {name: outputs.get(name) for name in MIGRATED}
     coherent = all(flag in ("true", "false") for flag in flags.values())
     if coherent:
-        coherent = outputs.get("any") == str(any(flags[name] == "true" for name in ("gpu", "security", "storage"))).lower()
+        coherent = outputs.get("any") == str(any(flags[name] == "true" for name in ("gpu", "security", "storage", "p13"))).lower()
     if plan_result == "success" and not coherent:
         report["plan"] = "FAIL"
 

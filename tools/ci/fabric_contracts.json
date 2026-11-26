@@ -311,7 +311,7 @@
     "owner": "p13",
     "layer": "L4",
     "workflow": ".github/workflows/os-primitives.yml",
-    "job": "probes",
+    "job": "memory-fault",
     "steps": [
       "Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)"
     ],
@@ -324,7 +324,7 @@
     ],
     "criteria": "Confinement de la faute multithread",
     "evidence": [
-      "journal et artefacts du job"
+      "os-primitives-memory-fault"
     ]
   },
   "IPC.L5.RING3_ABI": {

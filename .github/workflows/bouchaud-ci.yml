@@ -76,7 +76,7 @@ jobs:
           with output.open("a") as stream:
               for domain in sorted(domains):
                   print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
-              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage'} else 'false'}", file=stream)
+              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage', 'p13'} else 'false'}", file=stream)
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -122,11 +122,12 @@ jobs:
       artifact: ${{ needs.kernel.outputs.artifact }}
 
   p13:
-    needs: plan
+    needs: [plan, kernel]
     if: needs.plan.outputs.p13 == 'true'
     uses: ./.github/workflows/os-primitives.yml
     with:
       p13_strict: false
+      bootimage_artifact: ${{ needs.kernel.outputs.artifact }}
 
   ipc:
     needs: plan
