@@ -523,5 +523,115 @@
     "evidence": [
       "journal et preuves du workflow"
     ]
+  },
+  "ATELIER.L6.RESPONSIVENESS": {
+    "owner": "atelier",
+    "layer": "L6",
+    "workflow": ".github/workflows/fabric-atelier.yml",
+    "job": "atelier-reactivite",
+    "steps": [
+      "Atelier sous KVM, SMP2",
+      "Atelier sous TCG, SMP2"
+    ],
+    "dependencies": [
+      "integration-bootimage"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "KVM SMP2",
+      "TCG SMP2"
+    ],
+    "criteria": "Trames mesurées dans chaque phase, aucune panique et aucun accès PCI pendant les trames",
+    "evidence": [
+      "integration-atelier-reactivite"
+    ]
+  },
+  "USERLAND.L7.LEGACY_PRODUCT": {
+    "owner": "userland",
+    "layer": "L7",
+    "workflow": ".github/workflows/userland.yml",
+    "job": "product",
+    "steps": [
+      "Preparer scenario",
+      "Demarrer Bouchaud OS",
+      "Verdict M5 + produit"
+    ],
+    "dependencies": [
+      "userland"
+    ],
+    "criticality": "required",
+    "profile": "FULL",
+    "configurations": [
+      "TCG"
+    ],
+    "criteria": "Démarrage et contrôle produit M5 sur le disque publié",
+    "evidence": [
+      "serie-produit-legacy"
+    ]
+  },
+  "WINDOWS.L5.CLEAN_PREPARATION": {
+    "owner": "windows",
+    "layer": "L5",
+    "workflow": ".github/workflows/ladybird-run-selector-v7.yml",
+    "job": "windows-real-download",
+    "steps": [
+      "Download, unpack and verify genuine Ladybird build",
+      "Construire et preparer le lancement sans modifier Git"
+    ],
+    "dependencies": [
+      "bouchaud-ladybird-native-browser"
+    ],
+    "criticality": "required",
+    "profile": "FULL",
+    "configurations": [
+      "Windows PowerShell 5.1"
+    ],
+    "criteria": "Provenance validée et dépôt propre après construction du scénario",
+    "evidence": [
+      "LADYBIRD_PREPARATION_DEPOT_PROPRE_OK"
+    ]
+  },
+  "SYSTEM.L2.OTA_HOST": {
+    "owner": "update",
+    "layer": "L2",
+    "workflow": ".github/workflows/ci.yml",
+    "job": "host-tests",
+    "steps": [
+      "Agent OTA anneau 3 (tests, TLS strict sur l'hote)",
+      "Mise a jour A/B (preuve hote)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FAST",
+    "configurations": [
+      "Linux hôte"
+    ],
+    "criteria": "Tests OTA, TLS strict et preuve de mise à jour A/B",
+    "evidence": [
+      "journal du job"
+    ]
+  },
+  "SYSTEM.L7.HOSTED_ENDURANCE": {
+    "owner": "reliability",
+    "layer": "L7",
+    "workflow": ".github/workflows/endurance.yml",
+    "job": "tranche",
+    "steps": [
+      "Campagne",
+      "Verdict (campagne / budgets / metriques absentes / noyau)"
+    ],
+    "dependencies": [
+      "endurance-bootimage"
+    ],
+    "criticality": "required",
+    "profile": "FULL",
+    "configurations": [
+      "Matrice historique de tranches SMP"
+    ],
+    "criteria": "Scénario complet, marqueurs et budgets d’endurance conformes",
+    "evidence": [
+      "endurance-tranche-${{ matrix.tranche }}"
+    ]
   }
 }
