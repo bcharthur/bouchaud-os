@@ -370,8 +370,8 @@ def negatifs(t: dict) -> list:
         ("chemin noyau oublié", "p13_paths",
          '    "src/kernel/navigateur/**",\n    "src/kernel/process/**",\n',
          '    "src/kernel/navigateur/**",\n'),
-        ("P13 retiré du verdict", "p13", "gpu, security, storage, p13, ipc]\n    if: always()",
-         "gpu, security, storage, ipc]\n    if: always()"),
+        ("P13 retiré du verdict", "p13", "gpu, security, storage, p13, memory, ipc]\n    if: always()",
+         "gpu, security, storage, memory, ipc]\n    if: always()"),
         ("audit double", "p13", "branches: [main]",
          "branches: [main, 'audit/p13-console-sync-ci-20261024']"),
     ]
