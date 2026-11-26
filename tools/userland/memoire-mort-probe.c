@@ -18,6 +18,7 @@
  *     MEMOIRE_MORT_OK mode=...       MEMOIRE_MORT_FAIL mode=... raison=...
  */
 #define _GNU_SOURCE
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,6 +132,56 @@ static int zombie(int force)
     return 0;
 }
 
+static int emprunteur(void *opaque)
+{
+    int tube = *(int *)opaque;
+    pid_t pid = getpid();
+    if (write(tube, &pid, sizeof pid) != sizeof pid)
+        return 2;
+    volatile unsigned travail = 0;
+    for (;;)
+        travail++;
+}
+
+static int vfork_force(void)
+{
+    const char *mode = "vfork-force";
+    int tube[2];
+    if (pipe(tube) != 0)
+        return echec(mode, "pipe", 0);
+    pid_t preteur = fork();
+    if (preteur < 0)
+        return echec(mode, "fork", 0);
+    if (preteur == 0) {
+        close(tube[0]);
+        const size_t taille = 64 * 1024;
+        char *pile = malloc(taille);
+        if (!pile)
+            _exit(2);
+        pid_t fils = clone(emprunteur, pile + taille,
+                           CLONE_VM | CLONE_VFORK | SIGCHLD, &tube[1]);
+        int statut;
+        if (fils < 0 || waitpid(fils, &statut, 0) != fils
+            || !WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL)
+            _exit(3);
+        free(pile);
+        _exit(0);
+    }
+    close(tube[1]);
+    pid_t fils = 0;
+    if (read(tube[0], &fils, sizeof fils) != sizeof fils || fils <= 0)
+        return echec(mode, "pret", fils);
+    close(tube[0]);
+    if (kill(fils, SIGKILL) != 0)
+        return echec(mode, "kill", fils);
+    int statut = 0;
+    if (waitpid(preteur, &statut, 0) != preteur || !WIFEXITED(statut)
+        || WEXITSTATUS(statut))
+        return echec(mode, "statut_preteur", statut);
+    printf("MEMOIRE_MORT_OK mode=%s\n", mode);
+    return 0;
+}
+
 static int oom(void)
 {
     const unsigned long marge_mio = 24;
@@ -191,6 +242,8 @@ int main(int argc, char **argv)
         return zombie(0);
     if (strcmp(mode, "zombie-force") == 0)
         return zombie(1);
+    if (strcmp(mode, "vfork-force") == 0)
+        return vfork_force();
     if (strcmp(mode, "oom") == 0)
         return oom();
     return echec(mode, "mode_inconnu", 0);

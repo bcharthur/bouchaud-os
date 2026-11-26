@@ -733,6 +733,7 @@ pub fn demarre_fil_diagnostic() -> bool {
 fn fil_diagnostic() -> ! {
     loop {
         sleep_ticks_noyau(20);
+        sert_retraits_forces();
         sert_diagnostic();
     }
 }

@@ -53,8 +53,10 @@ fn sortie_du_fil(code: i32, par_signal: bool) -> ! {
         if lifecycle.threads > 0 {
             lifecycle.threads -= 1;
         }
-        lifecycle.exit_code = code;
-        lifecycle.par_signal = par_signal;
+        if !lifecycle.zombie {
+            lifecycle.exit_code = code;
+            lifecycle.par_signal = par_signal;
+        }
         // BOUCHAUD_GROUPE_RECLAME_V1 : UNE seule transition vers le dernier fil.
         // `exit_group` remet `threads` a 1 ; un fil deja compte sorti pouvait
         // alors retrouver `threads == 0` et demonter le processus une seconde
@@ -1181,12 +1183,13 @@ pub fn tue_processus(pid: u32, code: i32) {
                 "PROCESS_EXIT t={} pid={} ppid={} code={} reason=force",
                 crate::kernel::timer::monotonic_ms(), pid, process.parent, code,
             ));
-            // BOUCHAUD_VFORK_REEL_V1 : meme regle qu'une sortie volontaire.
-            process.libere_vfork(FinEmprunt::Sortie);
+            // Le pere d'un fils vfork condamne ne peut reprendre que
+            // lorsque le fil de retraite a constate l'extinction du fils.
             // BOUCHAUD_DESCRIPTEURS_A_LA_MORT_V1 : meme regle qu'une sortie
             // volontaire -- fermer avant de prevenir le parent.
             ferme_descripteurs(&process);
             libere_natif_a_la_mort(pid, code);
+            differe_retrait_force(Arc::clone(&process));
             notify_parent_of_exit_for(process.parent);
         }
     }
