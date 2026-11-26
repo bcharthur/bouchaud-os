@@ -40,11 +40,14 @@ rm -rf "tools/userland/$OUT"
 (cd tools/userland && OUT=$OUT ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp "tools/userland/$OUT/horloge-probe" "$SCENARIO/bin/"
-cat > "$SCENARIO/autorun" <<AUTORUN
-console-async off
+CONSOLE_SYNC=${BO_HORLOGE_CONSOLE_SYNC:-1}
+{
+  if [ "$CONSOLE_SYNC" = 1 ]; then echo "console-async off"; fi
+  cat <<AUTORUN
 /bin/horloge-probe $PLAFOND
 echo HORLOGE_FIN_BANC
 AUTORUN
+} > "$SCENARIO/autorun"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 ACCEL="-cpu max"
@@ -169,10 +172,12 @@ PY
 rm -f horodateur.py
 if [ "$etat" != fini ]; then echo "HORLOGE_ECHEC banc=$etat" >&2; exit 1; fi
 # Le bilan de la bascule doit preceder la premiere mesure.
-awk '/HORLOGE_DEBUT d=1[[:space:]]/ { exit }
+if [ "$CONSOLE_SYNC" = 1 ]; then
+  awk '/HORLOGE_DEBUT d=1[[:space:]]/ { exit }
      /BOUCHAUD_CONSOLE_BILAN active=/ { synchrone = /active=0 repli_securite=0 / }
      END { exit !synchrone }' "$LOG" ||
     { echo "HORLOGE_ECHEC console synchrone non confirmee" >&2; exit 1; }
+fi
 grep -aq HORLOGE_INVITE_OK "$LOG" || { echo "HORLOGE_ECHEC verifications de l'invite" >&2; exit 1; }
 [ "$rc_hote" -eq 0 ] || { echo "HORLOGE_ECHEC duree vue par l'invite contre l'hote" >&2; exit 1; }
 echo HORLOGE_AUDIT_OK
