@@ -54,5 +54,8 @@ if [ "${BO_APPELS_REQUIRE_VDSO:-0}" = 1 ]; then
   [ "$(grep -acE 'APPELS_PROBE_VDSO base=0x[1-9a-f][0-9a-f]*' "$T/emis.log")" -eq 2 ]
   [ "$(grep -acF 'APPELS_PROBE_ETAPE protection=ok' "$T/emis.log")" -eq 2 ]
 fi
-! grep -aq 'APPELS_PROBE_FAIL' "$T/emis.log"
+if grep -aq 'APPELS_PROBE_FAIL' "$T/emis.log"; then
+  echo 'Une sonde appels a echoue' >&2
+  exit 1
+fi
 [ "$(grep -acE '(^|[^A-Z_])APPELS_PROBE_OK' "$T/emis.log")" -eq 2 ]

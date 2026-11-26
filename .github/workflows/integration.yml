@@ -420,6 +420,7 @@ jobs:
             BO_QEMU_KVM=1 GARDE_JOURNAL="$PWD/latence-kvm-smp${smp}.log" tools/ci/run_latence.sh image/bootimage-bouchaud-os.bin "$smp" 3 calcul
             BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-smp${smp}.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie-force vfork-force" "$smp" 1024
           done
+          BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-force-kvm-cohorte.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin cohorte-force 4 1024
       - name: Retrait de memoire et OOM, KVM SMP2
         run: BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-mort-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie oom" 2 1024
       - name: Victime OOM en quarantaine, KVM SMP2
@@ -443,7 +444,7 @@ jobs:
             tempete-exec-kvm-smp*/serie.log*
             appels-kvm-smp*.log
             latence-kvm-smp*.log
-            memoire-force-kvm-smp*.log
+            memoire-force-kvm-*.log
             memoire-mort-kvm.log
             memoire-quarantaine-kvm.log
           if-no-files-found: warn

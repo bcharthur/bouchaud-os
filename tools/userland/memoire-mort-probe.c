@@ -182,6 +182,66 @@ static int vfork_force(void)
     return 0;
 }
 
+static int cohorte_force(void)
+{
+    const char *mode = "cohorte-force";
+    enum { NB = 82 };
+    pid_t enfants[NB];
+    int tube[2];
+    if (pipe(tube) != 0)
+        return echec(mode, "pipe", 0);
+    for (int i = 0; i < NB; ++i) {
+        pid_t fils = fork();
+        if (fils < 0)
+            return echec(mode, "fork", i);
+        if (fils == 0) {
+            close(tube[0]);
+            volatile unsigned char *p = malloc(MIO);
+            if (!p)
+                _exit(2);
+            for (size_t n = 0; n < MIO; n += 4096)
+                p[n] = 1;
+            if (write(tube[1], "p", 1) != 1)
+                _exit(3);
+            for (;;)
+                pause();
+        }
+        enfants[i] = fils;
+    }
+    close(tube[1]);
+    for (int i = 0; i < NB; ++i) {
+        char c;
+        if (read(tube[0], &c, 1) != 1 || c != 'p')
+            return echec(mode, "pret", i);
+    }
+    close(tube[0]);
+    const unsigned long vivant = libre_mio();
+    for (int i = 0; i < NB; ++i)
+        if (kill(enfants[i], SIGKILL) != 0)
+            return echec(mode, "kill", i);
+    const long t0 = ms();
+    unsigned long apres = vivant;
+    while (ms() - t0 < 5000) {
+        apres = libre_mio();
+        if (apres >= vivant + 76)
+            break;
+        usleep(10000);
+    }
+    for (int i = 0; i < NB; ++i) {
+        int statut;
+        if (waitpid(enfants[i], &statut, 0) != enfants[i]
+            || !WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL)
+            return echec(mode, "statut", i);
+    }
+    printf("MEMOIRE_MORT_COHORTE enfants=%d libre_vivant_mio=%lu "
+           "libre_mort_mio=%lu libre_recolte_mio=%lu\n",
+           NB, vivant, apres, libre_mio());
+    if (apres < vivant + 76)
+        return echec(mode, "memoire_gardee", (long)apres - (long)vivant);
+    printf("MEMOIRE_MORT_OK mode=%s\n", mode);
+    return 0;
+}
+
 static int oom(void)
 {
     const unsigned long marge_mio = 24;
@@ -244,6 +304,8 @@ int main(int argc, char **argv)
         return zombie(1);
     if (strcmp(mode, "vfork-force") == 0)
         return vfork_force();
+    if (strcmp(mode, "cohorte-force") == 0)
+        return cohorte_force();
     if (strcmp(mode, "oom") == 0)
         return oom();
     return echec(mode, "mode_inconnu", 0);
