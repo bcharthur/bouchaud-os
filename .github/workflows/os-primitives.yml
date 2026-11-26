@@ -50,6 +50,11 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      # Le BIOS mutualisé ne transporte pas le sous-programme Cargo.
+      # Ce job compile aussi ses propres images instrumentées.
+      - name: Préparer cargo-bootimage pour les constructions indépendantes
+        if: inputs.bootimage_artifact != ''
+        run: command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
       - if: inputs.bootimage_artifact != ''
         uses: ./.github/actions/fabric-bootimage
         with:
@@ -647,6 +652,11 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      # Le BIOS mutualisé ne transporte pas le sous-programme Cargo.
+      # Ce job compile aussi ses propres images instrumentées.
+      - name: Préparer cargo-bootimage pour les constructions indépendantes
+        if: inputs.bootimage_artifact != ''
+        run: command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
       - if: inputs.bootimage_artifact != ''
         uses: ./.github/actions/fabric-bootimage
         with:
