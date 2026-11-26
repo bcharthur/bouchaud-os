@@ -232,3 +232,23 @@ des sondes CPU. Elles gardent leurs compilations distinctes et leurs
 bras TCG/KVM. Leurs journaux passent de l'archive
 `os-primitives-debug` à `os-primitives-gpu-tampon`. Les chemins de
 preuve CPU utilisés par le rapport P13 restent dans l'archive d'origine.
+
+
+## BIOS partagé et preuve Memory Fabric
+
+Dans Bouchaud CI, P13 utilise l’image BIOS standard attestée du run.
+Le job Memory Fabric de faute multithread exécute les bras historiques
+TCG SMP1/8 et KVM SMP4 en parallèle des sondes CPU. Ses journaux sont
+publiés dans `os-primitives-memory-fault`. Les appels autonomes qui ne
+fournissent pas d’image continuent à compiler localement. Les témoins
+et toutes les constructions instrumentées conservent leur identité.
+La dépendance au producteur BIOS ajoute une attente au démarrage de
+P13. Il faut la mesurer avec le temps économisé sur les compilations.
+
+Depuis un clone qui contient la référence main, la commande
+`python3 tools/ci/audit_fabric_workflows.py` compare les étapes shell
+historiques avec leur environnement et leurs conditions de pas. Elle
+signale chaque différence documentée et échoue sur une étape manquante
+hors des remplacements déclarés. Ce contrôle structurel doit être
+complété par les preuves de déclenchement, de matrice, de provenance
+et d’exécution sur GitHub.
