@@ -323,3 +323,10 @@ Les preuves des campagnes indépendantes doivent provenir du run et
 du SHA retenus. Le vérificateur rejette les archives obligatoires
 absentes, expirées, ambiguës ou dont le SHA-256 téléchargé diffère
 de celui publié par GitHub Actions.
+
+Un tag FULL ou CERTIFICATION demande aussi les campagnes indépendantes
+manquantes via le jeton Actions du run, limité à ce job et à ce
+déclencheur. Il vérifie d'abord la tête distante. Si une campagne est
+encore en cours, le verdict refuse la qualification et peut être
+rejoué après la fin des preuves. Pour CERTIFICATION, une relance après
+Ladybird strict et Nightly permet de lancer le P13 dédié.

@@ -717,7 +717,10 @@
           "integration-mm-ng6",
           "integration-atelier-reactivite",
           "integration-os-primitives"
-        ]
+        ],
+        "dispatch_inputs": {
+          "suite": "all"
+        }
       },
       "reliability-v3.yml": {
         "jobs": [
@@ -736,7 +739,8 @@
           "reliability-smp2",
           "reliability-smp4",
           "reliability-smp8"
-        ]
+        ],
+        "dispatch_inputs": {}
       },
       "ladybird-native-browser.yml": {
         "jobs": [
@@ -761,7 +765,10 @@
           "ladybird-endurance-kvm",
           "ladybird-endurance-longue",
           "trigkey-livraison-preuves"
-        ]
+        ],
+        "dispatch_inputs": {
+          "palier": "qualification"
+        }
       },
       "nightly.yml": {
         "jobs": [
@@ -772,7 +779,8 @@
         "artifacts": [
           "nightly-dns-log",
           "nightly-ladybird-logs"
-        ]
+        ],
+        "dispatch_inputs": {}
       },
       "endurance.yml": {
         "jobs": [
@@ -788,13 +796,17 @@
           "endurance-tranche-2",
           "endurance-tranche-3",
           "endurance-tranche-4"
-        ]
+        ],
+        "dispatch_inputs": {
+          "minutes_par_tranche": "90"
+        }
       },
       "doom-port-windows.yml": {
         "jobs": [
           "doom-windows"
         ],
-        "artifacts": []
+        "artifacts": [],
+        "dispatch_inputs": {}
       },
       "p13-final-candidate.yml": {
         "jobs": [
@@ -803,6 +815,14 @@
         "artifacts": [
           "p13-three-campaigns-{sha}",
           "p13-smp8-{sha}"
+        ],
+        "dispatch_inputs": {
+          "perimetre": "complet",
+          "soak_minutes": "30"
+        },
+        "after": [
+          "ladybird-native-browser.yml",
+          "nightly.yml"
         ]
       }
     }

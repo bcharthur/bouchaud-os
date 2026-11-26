@@ -234,10 +234,29 @@ jobs:
     with:
       campaign: true
 
+  request-proofs:
+    needs: plan
+    if: ${{ startsWith(github.ref, 'refs/tags/ci-fabric/') && (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') }}
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Demander les campagnes indépendantes absentes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          FABRIC_PROOF_BRANCH: ${{ needs.plan.outputs.proof_branch }}
+        run: python3 tools/ci/fabric_request_proofs.py "$PROFILE"
+
   qualification:
     name: ${{ (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
     if: ${{ always() && (startsWith(github.ref, 'refs/tags/ci-fabric/') || (github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all'))) }}
-    needs: [plan, verdict, fast, non-regression, userland, windows-selector]
+    needs: [plan, verdict, fast, non-regression, userland, windows-selector, request-proofs]
     permissions:
       contents: read
       actions: read

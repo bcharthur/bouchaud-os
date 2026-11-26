@@ -22,7 +22,7 @@ def api(path, field):
     return [item for page in json.loads(output) for item in page[field]]
 
 
-def evidence(repo, sha, branch, workflow, required, artifacts=()):
+def latest_run(repo, sha, branch, workflow):
     path = f"repos/{repo}/actions/workflows/{workflow}/runs"
     runs = api(f"{path}?head_sha={sha}&event=workflow_dispatch&per_page=100", "workflow_runs")
     matches = [
@@ -31,9 +31,13 @@ def evidence(repo, sha, branch, workflow, required, artifacts=()):
         and run["event"] == "workflow_dispatch"
         and run["path"] == f".github/workflows/{workflow}"
     ]
-    if not matches:
+    return max(matches, key=lambda item: item["run_number"], default=None)
+
+
+def evidence(repo, sha, branch, workflow, required, artifacts=()):
+    run = latest_run(repo, sha, branch, workflow)
+    if run is None:
         return {"status": "MISSING"}
-    run = max(matches, key=lambda item: item["run_number"])
     proof = {"run": run["id"], "attempt": run["run_attempt"], "status": "FAIL"}
     if run["status"] != "completed" or run["conclusion"] != "success":
         return {**proof, "conclusion": run["conclusion"], "run_status": run["status"]}
