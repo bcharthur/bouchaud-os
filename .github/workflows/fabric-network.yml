@@ -1,0 +1,119 @@
+name: Network Fabric
+on:
+  workflow_call:
+    inputs:
+      lane:
+        description: Banc réseau sélectionné par Integration
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dns-udp:
+    name: qemu / dns udp ring3
+    if: inputs.lane == 'dns'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86
+      - name: Cache Cargo de la sonde specialisee
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: dns-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            dns-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: DNS depuis ring3
+        run: tools/net/verifie-dns.sh
+      # BOUCHAUD_TCP_SOCKETS_FIABLES_V1 : meme noyau, meme couche (sockets
+      # d'anneau 3). Un segment de donnees qui ne part pas -- ARP expire apres
+      # 65 s de silence -- doit etre renvoye ; avant, la connexion restait
+      # figee jusqu'a l'echeance du serveur (consentement YouTube, 4 min).
+      - name: TCP depuis ring3 - segment non parti renvoye
+        if: always()
+        run: tools/net/verifie-tcp-perte.sh
+      # BOUCHAUD_LECTURE_EXACTE_V1 / BOUCHAUD_COPIE_BORNEE_V1 : meme noyau.
+      # Un gros `read`/`write` paniquait le noyau ; `read`/`pread` rendaient
+      # des lectures courtes au milieu d'un fichier (classes de la JVM
+      # tronquees).
+      - name: Fichiers ring3 - lectures exactes, copies bornees
+        if: always()
+        run: tools/ci/run_lecture_fichiers.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      # BOUCHAUD_REVEIL_CIBLE_V1 : meme noyau. Un message IPC ne reveille que
+      # son destinataire : 12 processus en poll(-1) sur leurs propres canaux
+      # ne consomment rien pendant 20 000 allers-retours IPC entre deux
+      # autres (main : 18,1 s de CPU pour les inactifs).
+      - name: IPC ring3 - un message ne reveille que son destinataire
+        if: always()
+        run: tools/ci/run_reveil_cible.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-dns-udp
+          path: |
+            target/verifie-dns/serie.log
+            target/verifie-tcp-perte/serie.log
+            target/verifie-tcp-perte/serveur.log
+            target/lecture-fichiers/serie.log
+            target/reveil-cible/serie.log
+          if-no-files-found: warn
+
+  dhcp-recuperation:
+    name: qemu / dhcp + reprise rx
+    if: inputs.lane == 'dhcp'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe.sh qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      # Diagnostic : l OFFRE est-elle sur le fil ? Tranche CAS A / CAS B.
+      - name: L offre DHCP sur le fil
+        run: BANC_TRAVAIL=banc-fil tools/ci/run_dhcp_wire.sh image/bootimage-bouchaud-os.bin
+      # La question qui engage : sans aucune commande tapee, la machine
+      # finit-elle par obtenir un VRAI bail ?
+      - name: Recuperation, SLIRP par defaut
+        run: BANC_TRAVAIL=banc-defaut tools/ci/run_dhcp_recuperation.sh image/bootimage-bouchaud-os.bin 45
+      # ET HORS DU SOUS-RESEAU D USINE.
+      #
+      # Sur 10.0.2.x, le repli compile devine juste par accident : une
+      # configuration inventee et un bail reel donnent la meme adresse. Seul
+      # un autre sous-reseau distingue les deux.
+      # B3 : les DEUX issues d une reparation RX, sur une vraie panne
+      # materielle. Un banc qui n atteindrait qu une seule issue ne
+      # mesurerait rien.
+      - name: Reprise RX effective et inefficace
+        run: BANC_TRAVAIL=banc-rx tools/ci/run_rx_recuperation.sh image/bootimage-bouchaud-os.bin
+      # B4 : les scenarios deterministes. Chaque panne est ARMEE et COMPTEE,
+      # et un scenario dont l injection n a pas ete APPLIQUEE echoue.
+      - name: Scenarios DHCP deterministes
+        run: BANC_TRAVAIL=banc-scenarios tools/ci/run_dhcp_scenarios.sh image/bootimage-bouchaud-os.bin
+      - name: Recuperation, SLIRP hors 10.0.2.x
+        env:
+          BANC_NETDEV: user,id=net0,net=192.168.76.0/24,host=192.168.76.2,dhcpstart=192.168.76.15,dns=192.168.76.3
+        run: BANC_TRAVAIL=banc-autre tools/ci/run_dhcp_recuperation.sh image/bootimage-bouchaud-os.bin 45
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-dhcp-recuperation
+          path: |
+            banc-fil/
+            banc-defaut/
+            banc-autre/
+            banc-rx/
+            banc-scenarios/
+          if-no-files-found: warn

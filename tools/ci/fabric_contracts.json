@@ -383,5 +383,52 @@
     "evidence": [
       "journal et artefacts du job"
     ]
+  },
+  "NETWORK.L5.DNS_TCP_RING3": {
+    "owner": "network",
+    "layer": "L5",
+    "workflow": ".github/workflows/fabric-network.yml",
+    "job": "dns-udp",
+    "steps": [
+      "DNS depuis ring3",
+      "TCP depuis ring3 - segment non parti renvoye"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG",
+      "SLIRP"
+    ],
+    "criteria": "Les assertions des bancs et injections réseau réussissent",
+    "evidence": [
+      "journaux et artefacts Integration"
+    ]
+  },
+  "NETWORK.L6.DHCP_RX": {
+    "owner": "network",
+    "layer": "L6",
+    "workflow": ".github/workflows/fabric-network.yml",
+    "job": "dhcp-recuperation",
+    "steps": [
+      "L offre DHCP sur le fil",
+      "Recuperation, SLIRP par defaut",
+      "Reprise RX effective et inefficace",
+      "Scenarios DHCP deterministes",
+      "Recuperation, SLIRP hors 10.0.2.x"
+    ],
+    "dependencies": [
+      "integration-bootimage"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG",
+      "SLIRP"
+    ],
+    "criteria": "Les assertions des bancs et injections réseau réussissent",
+    "evidence": [
+      "journaux et artefacts Integration"
+    ]
   }
 }

@@ -217,3 +217,11 @@ transmis, le coût par octet et les gains interactifs restent à mesurer
 séparément. Le banc à injection, les mesures ABBA et le diagnostic des
 tenues HID sont réutilisables pour la future PR console, après intégration
 de CI/CD Fabric. [PR #375](https://github.com/bcharthur/bouchaud-os/pull/375)
+
+`fabric-network.yml` porte désormais les bancs DNS, retransmission TCP,
+DHCP et reprise RX. Integration garde l'éligibilité et le verdict
+protégé. Le groupe DNS garde la construction instrumentée et démarre
+sans attendre l'image BIOS d'Integration. Le groupe DHCP consomme cette
+dernière. Les recettes des deux groupes ont été comparées au SHA validé
+`018a5287`, étapes et paramètres compris. La convergence des profils
+et l'agrégation des preuves des workflows indépendants restent à établir.
