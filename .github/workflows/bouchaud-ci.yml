@@ -217,6 +217,14 @@ jobs:
     if: needs.plan.outputs.profile == 'FAST' || needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
     uses: ./.github/workflows/non-regression.yml
 
+  windows-selector:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ladybird-run-selector-v7.yml
+
   userland:
     needs: plan
     if: needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
@@ -229,7 +237,7 @@ jobs:
   qualification:
     name: ${{ (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
     if: ${{ always() && (startsWith(github.ref, 'refs/tags/ci-fabric/') || (github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all'))) }}
-    needs: [plan, verdict, fast, non-regression, userland]
+    needs: [plan, verdict, fast, non-regression, userland, windows-selector]
     permissions:
       contents: read
       actions: read
@@ -247,6 +255,7 @@ jobs:
           FABRIC_INPUT: ${{ needs.plan.outputs.proof_fabric }}
           FABRIC_RESULT: ${{ needs.verdict.result }}
           USERLAND_RESULT: ${{ needs.userland.result }}
+          WINDOWS_SELECTOR_RESULT: ${{ needs.windows-selector.result }}
           FAST_RESULT: ${{ needs.fast.result }}
           NON_REGRESSION_RESULT: ${{ needs.non-regression.result }}
         run: python3 tools/ci/fabric_merge_gate.py "$PROFILE"

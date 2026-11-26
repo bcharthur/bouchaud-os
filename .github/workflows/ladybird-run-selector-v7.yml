@@ -1,6 +1,7 @@
 name: Ladybird launcher selector V7
 on:
   workflow_dispatch:
+  workflow_call:
   # Le declencheur push visait fix/ladybird-run-artifact-validated-20261108,
   # branche fusionnee (#274) et supprimee : declencheur mort, retire.
   pull_request:

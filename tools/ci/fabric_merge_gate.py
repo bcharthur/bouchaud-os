@@ -38,9 +38,6 @@ FULL = {
     ),
     "nightly.yml": ("nightly-gate", "nightly / Ladybird product", "nightly / dns ring3"),
     "endurance.yml": ("endurance-gate",),
-    "ladybird-run-selector-v7.yml": (
-        "windows-powershell-51", "live-github-selection", "windows-real-download",
-    ),
     "doom-port-windows.yml": ("doom-windows",),
 }
 PROFILES = {
@@ -105,9 +102,11 @@ def main():
                 "status": "PASS" if os.environ.get(variable) == "success" else "FAIL",
             }
     if args.profile in {"FULL", "CERTIFICATION"}:
-        results["userland-current-run"] = {
-            "status": "PASS" if os.environ.get("USERLAND_RESULT") == "success" else "FAIL",
-        }
+        for name, variable in (
+                ("userland", "USERLAND_RESULT"), ("windows-selector", "WINDOWS_SELECTOR_RESULT")):
+            results[f"{name}-current-run"] = {
+                "status": "PASS" if os.environ.get(variable) == "success" else "FAIL",
+            }
     for workflow, jobs in PROFILES[args.profile].items():
         try:
             results[workflow] = evidence(repo, sha, branch, workflow, jobs)

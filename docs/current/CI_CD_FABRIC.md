@@ -303,3 +303,8 @@ de non-régression dans le même run. FULL et CERTIFICATION exécutent
 aussi Userland dans leur run. Il produit le même disque et joue le
 même scénario QEMU. La publication de la release Userland reste sur
 les déclencheurs autonomes historiques.
+
+FULL et CERTIFICATION appellent le sélecteur Windows dans leur propre
+run. Le même workflow garde son déclencheur PR autonome. Ce mode
+contrôle la provenance de Ladybird et la préparation du scénario avec
+Git propre. La preuve d'un démarrage et arrêt réels reste distincte.
