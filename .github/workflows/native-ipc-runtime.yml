@@ -154,7 +154,6 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      actions: read
     steps:
       - name: Verdict des preuves IPC et mise à jour
         env:
