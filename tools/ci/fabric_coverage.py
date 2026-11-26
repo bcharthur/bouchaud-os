@@ -22,11 +22,20 @@ def p13_errors(workflow, compatibility, primitives, required=()):
         "uses": "./.github/workflows/os-primitives.yml",
         "with": {
             "p13_strict": "false",
+            "cpu_only": "true",
             "bootimage_artifact": "${{ needs.kernel.outputs.artifact }}",
         },
     }
     if jobs.get("p13") != expected or "p13" not in jobs["verdict"]["needs"]:
         errors.append("P13: suite ou dépendance de verdict absente")
+    memory = {
+        "needs": ["plan", "kernel"],
+        "if": "needs.plan.outputs.memory == 'true'",
+        "uses": "./.github/workflows/fabric-memory.yml",
+        "with": {"bootimage_artifact": "${{ needs.kernel.outputs.artifact }}"},
+    }
+    if jobs.get("memory") != memory or "memory" not in jobs["verdict"]["needs"]:
+        errors.append("Memory Fabric: suite ou dépendance de verdict absente")
     missing = set(required) - paths
     if missing:
         errors.append(f"P13: chemins historiques non couverts {sorted(missing)}")

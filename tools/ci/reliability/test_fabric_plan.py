@@ -50,7 +50,7 @@ class FabricPlan(unittest.TestCase):
     def test_verdict_fait_echouer_une_preuve_manquante(self):
         needs = {
             "plan": {"result": "success", "outputs": {
-                "gpu": "true", "security": "false", "storage": "false", "p13": "false", "ipc": "false", "any": "true",
+                "gpu": "true", "security": "false", "storage": "false", "p13": "false", "memory": "false", "ipc": "false", "any": "true",
             }},
             "kernel": {"result": "success"},
             "gpu-witness": {"result": "success"},

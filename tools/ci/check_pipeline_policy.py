@@ -155,7 +155,12 @@ for name in ("ladybird-native-browser.yml",):
 # un temoin TCG rouge a fait sauter « Acces a /dev/kvm », et toute l'attribution
 # P13 KVM (SMP1/2/4/8) est tombee en « /dev/kvm inaccessible » -- zero preuve.
 # Le job reste rouge ; seules les preuves independantes sont conservees.
-for _job, _bloc in jobs_de((root / "os-primitives.yml").read_text(encoding="utf-8")).items():
+_primitives_jobs = jobs_de((root / "os-primitives.yml").read_text(encoding="utf-8"))
+_memory_call = _primitives_jobs.pop("memory-fault", [])
+if not any(line.strip() == "uses: ./.github/workflows/fabric-memory.yml" for line in _memory_call):
+    errors.append("os-primitives.yml: appel Memory Fabric absent")
+_primitives_jobs.update(jobs_de((root / "fabric-memory.yml").read_text(encoding="utf-8")))
+for _job, _bloc in _primitives_jobs.items():
     _etapes, _courante = [], None
     for _l in _bloc:
         _m = re.match(r"^      - (?:name: (.*)|uses: .*|run: .*)$", _l)

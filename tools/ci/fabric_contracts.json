@@ -308,9 +308,9 @@
     ]
   },
   "MEMORY.L4.MULTITHREAD_FAULT": {
-    "owner": "p13",
+    "owner": "memory",
     "layer": "L4",
-    "workflow": ".github/workflows/os-primitives.yml",
+    "workflow": ".github/workflows/fabric-memory.yml",
     "job": "memory-fault",
     "steps": [
       "Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)"

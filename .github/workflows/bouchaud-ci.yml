@@ -15,7 +15,7 @@ on:
         description: Périmètre des bancs migrés
         type: choice
         default: all
-        options: [all, gpu, security, storage, p13, ipc]
+        options: [all, gpu, security, storage, p13, memory, ipc]
 
 permissions:
   contents: read
@@ -34,6 +34,7 @@ jobs:
       storage: ${{ steps.plan.outputs.storage }}
       p13: ${{ steps.plan.outputs.p13 }}
       ipc: ${{ steps.plan.outputs.ipc }}
+      memory: ${{ steps.plan.outputs.memory }}
       any: ${{ steps.plan.outputs.any }}
       profile: ${{ steps.plan.outputs.profile }}
       proof_branch: ${{ steps.plan.outputs.proof_branch }}
@@ -99,6 +100,8 @@ jobs:
               selected = sorted(domains if manual == "all" else {manual})
               if not set(selected) <= domains:
                   raise ValueError("fabric inconnu")
+              if "p13" in selected:
+                  selected = sorted(set(selected) | {"memory"})
               plan = {"domains": selected, "uncategorized": []}
           else:
               entry = next(line for line in output.read_text().splitlines() if line.startswith("fabric_plan="))
@@ -114,7 +117,7 @@ jobs:
               print(f"proof_fabric={manual}", file=stream)
               for domain in sorted(domains):
                   print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
-              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage', 'p13'} else 'false'}", file=stream)
+              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage', 'p13', 'memory'} else 'false'}", file=stream)
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -165,6 +168,14 @@ jobs:
     uses: ./.github/workflows/os-primitives.yml
     with:
       p13_strict: false
+      cpu_only: true
+      bootimage_artifact: ${{ needs.kernel.outputs.artifact }}
+
+  memory:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.memory == 'true'
+    uses: ./.github/workflows/fabric-memory.yml
+    with:
       bootimage_artifact: ${{ needs.kernel.outputs.artifact }}
 
   ipc:
@@ -174,7 +185,7 @@ jobs:
 
   verdict:
     name: Bouchaud Fabric (périmètre migré)
-    needs: [plan, kernel, gpu-witness, gpu, security, storage, p13, ipc]
+    needs: [plan, kernel, gpu-witness, gpu, security, storage, p13, memory, ipc]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

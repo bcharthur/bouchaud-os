@@ -20,7 +20,7 @@ CONSUMERS = {
     "ladybird": {"integration"},
     "reliability": set(),
     "windows": set(),
-    "p13": set(),
+    "p13": {"memory"},
 }
 
 OWNERS = {
@@ -37,7 +37,7 @@ OWNERS = {
     "windows": ("tools/windows/", "run.ps1"),
 }
 
-MIGRATED = frozenset(("gpu", "security", "storage", "p13", "ipc"))
+MIGRATED = frozenset(("gpu", "security", "storage", "p13", "memory", "ipc"))
 COMPAT = json.loads((Path(__file__).parent / "fabric_compat_paths.json").read_text())
 CONFIG = (".github/", "tools/ci/", "targets/", ".cargo/")
 
