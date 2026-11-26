@@ -106,10 +106,42 @@ horodatages bruts étaient absents de la collecte.
 
 Le changement de collecte conserve la série et les horodatages pour
 chaque accélérateur, y compris après un échec, et conserve un verdict
-rouge dès qu'un des deux bancs échoue. Les seuils et la sonde sont
-identiques. Ce changement traite la perte de preuves. Les mesures
-avant/après en VM et le correctif de l'échec temporel restent ouverts.
-**NO-GO** sur `086e1dfa`.
+rouge dès qu'un des deux bancs échoue. La relance du SHA historique a
+été annulée avant les horloges lors de l'ouverture de la campagne
+`de786e80`. [Relance historique](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113333/attempts/2) ·
+[Campagne de collecte](https://github.com/bcharthur/bouchaud-os/actions/runs/45814192621)
+
+### Horodatage UART du banc
+
+Le juge date désormais les fins de ligne à l'écriture dans l'UART de
+QEMU. Il exige les mêmes marqueurs, dans le même ordre, sur la trace
+UART et la série. Il refuse une variation supérieure à 1 ms de l'écart
+entre horloges hôte monotone et murale. Les durées requises et les
+limites de 50 ms, 1 % et 2 100 ms restent identiques. La série, les
+horodatages du lecteur et la trace UART restent disponibles pour
+localiser un écart. P13 exige le succès sur un démarrage TCG et sur
+deux démarrages KVM distincts. Le noyau et la sonde invitée sont
+inchangés. [Vérifications de la tête](https://github.com/bcharthur/bouchaud-os/pull/384/checks)
+
+Témoin local sur le noyau `de786e80`, QEMU TCG SMP4. Les deux juges
+ont reçu les mêmes traces brutes pour chaque essai.
+
+| Essai à 1 s | Invité | Hôte lu par Python | Hôte à l'UART | Ancien / nouveau |
+|---|---:|---:|---:|---|
+| Sans injection | 1 002,5 ms | 1 002,7 ms | 1 002,6 ms | OK / OK |
+| Retard injecté sur la lecture du départ | 1 002,9 ms | 937,1 ms | 1 003,0 ms | ÉCHEC / OK |
+
+Sur la trace sans injection, un mutant qui rapporte 1 067,5 ms dans
+l'invité pour 1 002,6 ms à l'UART reste rouge à +64,9 ms. Une divergence
+des marqueurs entre les deux traces reste rouge. Le mécanisme de mesure
+défectueux est reproduit et corrigé. Les données de la campagne
+historique restent insuffisantes pour l'attribuer rétrospectivement à
+ce mécanisme.
+
+Le banc complet TCG SMP4 passe à 1, 10 et 60 s sur les deux noyaux
+compilés localement. Les écarts invité moins UART sont de −0,5,
+−3,8 et −19,0 ms pour `fdef86be` et de −3,2, −5,1 et −12,4 ms pour
+`de786e80`, avec la même sonde et le même juge.
 
 Le témoin hôte des références du fork passe avec rejet du mutant. Il
 couvre l'identité de frame, le préfixe des références acquises et le
