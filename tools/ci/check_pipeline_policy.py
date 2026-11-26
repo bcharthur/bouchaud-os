@@ -5,6 +5,7 @@ The checker intentionally validates properties, not exact line-for-line YAML.
 It prevents a green pipeline from silently becoming a skipped pipeline again.
 """
 from pathlib import Path
+from fabric_coverage import p13_errors
 import re
 import sys
 
@@ -114,7 +115,7 @@ def jobs_de(texte: str) -> dict[str, list[str]]:
 for name in ("ci.yml", "integration.yml", "reliability-v3.yml"):
     if "dedoublonne" in (root / name).read_text(encoding="utf-8"):
         errors.append(f"{name}: porte un gate requis -- pas de dedoublonnage push/PR")
-for name in ("ladybird-native-browser.yml", "native-ipc-runtime.yml"):
+for name in ("ladybird-native-browser.yml",):
     texte = (root / name).read_text(encoding="utf-8")
     blocs = jobs_de(texte)
     if "dedoublonne" not in blocs or "python3 tools/ci/dedoublonne_pr.py" not in "\n".join(blocs["dedoublonne"]) \
@@ -199,25 +200,31 @@ for required in (
     if not required.is_file():
         errors.append(f"{required}: composant reliability absent")
 
-# BOUCHAUD_P13_COUVERTURE_PR_V1 : une PR qui modifie le banc P13 ne peut pas
-# etre verte sans executer P13. p13-primitives-noyau.yml se declenche en
-# pull_request ET en push sur les MEMES chemins, et ces chemins couvrent chaque
-# outil que joue os-primitives.yml, plus le banc SIGCHLD cible et sa sonde.
-_p13 = need(root / "p13-primitives-noyau.yml", ("p13-primitives / verdict", "dedoublonne_pr.py attend"))
-def _chemins(texte, evenement):
-    m = re.search(rf"\n  {evenement}:\n(?:    branches:[^\n]*\n)?    paths:\n((?:      - '[^']+'\n)+)", texte)
-    return re.findall(r"      - '([^']+)'", m.group(1)) if m else None
-_pr, _push = _chemins(_p13, "pull_request"), _chemins(_p13, "push")
-if _pr is None:
-    errors.append("p13-primitives-noyau.yml: pas de declencheur pull_request filtre")
-elif _push is None or sorted(_pr) != sorted(_push):
-    errors.append("p13-primitives-noyau.yml: chemins pull_request et push differents")
-else:
-    _attendus = set(re.findall(r"tools/[A-Za-z0-9_./-]+", (root / "os-primitives.yml").read_text(encoding="utf-8")))
-    _attendus |= {"tools/ci/run_os_primitives.sh", "tools/ci/run_sigchld_repetition.sh",
-                  "tools/userland/sigchld-multifil-probe.c", ".github/workflows/os-primitives.yml"}
-    for _c in sorted(_attendus - set(_pr)):
-        errors.append(f"p13-primitives-noyau.yml: {_c} ne declenche pas P13")
+# La couverture historique reste le plancher du plan central.
+_primitive = (root / "os-primitives.yml").read_text()
+_attendus = set(re.findall(r"tools/[A-Za-z0-9_./-]+", _primitive))
+_attendus.update(("tools/ci/run_os_primitives.sh", "tools/ci/run_sigchld_repetition.sh",
+                  "tools/userland/sigchld-multifil-probe.c", ".github/workflows/os-primitives.yml"))
+errors.extend(p13_errors((root / "bouchaud-ci.yml").read_text(),
+                        Path("tools/ci/fabric_compat_paths.json").read_text(),
+                        _primitive, _attendus))
+
+# IPC: les deux suites doivent réussir même quand une dépendance est sautée.
+import yaml as _fabric_yaml
+_ipc = _fabric_yaml.load((root / "native-ipc-runtime.yml").read_text(), Loader=_fabric_yaml.BaseLoader)
+_central = _fabric_yaml.load((root / "bouchaud-ci.yml").read_text(), Loader=_fabric_yaml.BaseLoader)["jobs"]
+_ij = _ipc["jobs"]
+_iv = _ij["native-ipc-verdict"]
+_ir = "\n".join(step.get("run", "") for step in _iv["steps"])
+if (_ipc["on"] != {"workflow_call": ""}
+        or _central.get("ipc") != {"needs": "plan", "if": "needs.plan.outputs.ipc == 'true'",
+                                  "uses": "./.github/workflows/native-ipc-runtime.yml"}
+        or "ipc" not in _central["verdict"]["needs"]
+        or _ij.get("ab-rollback") != {"uses": "./.github/workflows/system-update.yml"}
+        or set(_iv["needs"]) != {"native-ipc-runtime", "ab-rollback"}
+        or _iv["if"] != "always()"
+        or '[ "$R_RUNTIME" = success ] && [ "$R_AB" = success ] || exit 1' not in _ir):
+    errors.append("IPC: les preuves runtime et A/B doivent toutes deux alimenter le verdict")
 
 # BOUCHAUD_RUNNER_EPINGLE_V1 : aucun job Linux sur une etiquette MOUVANTE.
 # Stabilisation TEMPORAIRE : voir docs/ci/RUNNER_EPINGLE_UBUNTU_2404.md (preuve,

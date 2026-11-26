@@ -24,7 +24,7 @@ def verdict(needs):
     flags = {name: outputs.get(name) for name in MIGRATED}
     coherent = all(flag in ("true", "false") for flag in flags.values())
     if coherent:
-        coherent = outputs.get("any") == str("true" in flags.values()).lower()
+        coherent = outputs.get("any") == str(any(flags[name] == "true" for name in ("gpu", "security", "storage"))).lower()
     if plan_result == "success" and not coherent:
         report["plan"] = "FAIL"
 
@@ -50,7 +50,8 @@ def main():
         "sha": os.environ["GITHUB_SHA"],
         "profile": "FABRIC",
         "run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-        "decision": "GO" if go else "NO-GO",
+        "decision": "PASS_SCOPE" if go else "NO-GO",
+        "global_qualification": "NOT_RUN",
         "results": results,
     }
     output = json.dumps(report, indent=2)

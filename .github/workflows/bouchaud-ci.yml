@@ -9,7 +9,7 @@ on:
         description: Périmètre des bancs migrés
         type: choice
         default: all
-        options: [all, gpu, security, storage]
+        options: [all, gpu, security, storage, p13, ipc]
 
 permissions:
   contents: read
@@ -26,6 +26,8 @@ jobs:
       gpu: ${{ steps.plan.outputs.gpu }}
       security: ${{ steps.plan.outputs.security }}
       storage: ${{ steps.plan.outputs.storage }}
+      p13: ${{ steps.plan.outputs.p13 }}
+      ipc: ${{ steps.plan.outputs.ipc }}
       any: ${{ steps.plan.outputs.any }}
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +76,7 @@ jobs:
           with output.open("a") as stream:
               for domain in sorted(domains):
                   print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
-              print(f"any={'true' if selected else 'false'}", file=stream)
+              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage'} else 'false'}", file=stream)
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -119,9 +121,21 @@ jobs:
     with:
       artifact: ${{ needs.kernel.outputs.artifact }}
 
+  p13:
+    needs: plan
+    if: needs.plan.outputs.p13 == 'true'
+    uses: ./.github/workflows/os-primitives.yml
+    with:
+      p13_strict: false
+
+  ipc:
+    needs: plan
+    if: needs.plan.outputs.ipc == 'true'
+    uses: ./.github/workflows/native-ipc-runtime.yml
+
   verdict:
-    name: Bouchaud Fabric Gate
-    needs: [plan, kernel, gpu-witness, gpu, security, storage]
+    name: Bouchaud Fabric (périmètre migré)
+    needs: [plan, kernel, gpu-witness, gpu, security, storage, p13, ipc]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

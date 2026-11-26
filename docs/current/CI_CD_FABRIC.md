@@ -172,3 +172,48 @@ CERTIFICATION et la mesure avant/après exhaustive restent à qualifier.
 La PR #375 touche déjà la console et #379 dépend de sa branche.
 Les PR #369 et #366 touchent le lanceur Windows. La récolte autonome des
 slots et piles noyau reste traitée par [#385](https://github.com/bcharthur/bouchaud-os/issues/385).
+
+## Migration P13 et IPC
+
+`bouchaud-ci.yml` appelle directement les quatre jobs historiques de
+`os-primitives.yml`. Les déclencheurs P13 de l'ancien wrapper sont repris
+comme plancher dans `fabric_compat_paths.json`. Le workflow autonome
+`p13-primitives-noyau.yml` est retiré. Les paliers Ladybird et leur
+appel strict, ainsi que le workflow manuel des primitives, restent en place.
+Les seuils et les recettes des bancs de ce workflow restent identiques.
+Les suites IPC et A/B sont désormais lancées par le même orchestrateur.
+Leur verdict exige les deux résultats. C22 et la provenance relèvent
+toujours du workflow Ladybird.
+
+Les jobs P13 et IPC démarrent après le plan, en parallèle des constructions
+BIOS communes aux autres domaines. Le résultat central est limité au
+périmètre migré. Son rapport indique `PASS_SCOPE` et
+`global_qualification: NOT_RUN` tant que les preuves globales sont absentes.
+
+### Cycle Windows avec QEMU
+
+Depuis un checkout propre du candidat, sous PowerShell Windows avec QEMU
+installé, exécuter chaque commande puis fermer proprement l'invité et
+vérifier le code de sortie avant de lancer la suivante.
+
+```powershell
+powershell -NoProfile -File .\run.ps1 -Accel whpx -CpuCount 1 -VerifierDepotPropre
+if ($LASTEXITCODE -ne 0) { throw 'WHPX SMP1 ou propreté Git en échec' }
+powershell -NoProfile -File .\run.ps1 -Accel whpx -CpuCount 4 -VerifierDepotPropre
+if ($LASTEXITCODE -ne 0) { throw 'WHPX SMP4 ou propreté Git en échec' }
+git status --porcelain=v1 --untracked-files=all
+```
+
+Relever l'identité du noyau, les cœurs en ligne, la signature invitée,
+le choix WHPX sur l'hôte, la première trame et la navigation Ladybird,
+puis le code QEMU et la propreté Git. Conserver les journaux sous
+`target/journaux-qemu/`.
+
+### Référence console #375
+
+L'agrandissement de l'anneau de 64 à 512 Kio a supprimé les attentes
+producteur dans les paires TCG à coût UART injecté de #375. Le volume
+transmis, le coût par octet et les gains interactifs restent à mesurer
+séparément. Le banc à injection, les mesures ABBA et le diagnostic des
+tenues HID sont réutilisables pour la future PR console, après intégration
+de CI/CD Fabric. [PR #375](https://github.com/bcharthur/bouchaud-os/pull/375)

@@ -56,7 +56,9 @@ import simule_paliers  # noqa: E402
 
 F = {
     "lb": RACINE / ".github/workflows/ladybird-native-browser.yml",
-    "p13": RACINE / ".github/workflows/p13-primitives-noyau.yml",
+    "p13": RACINE / ".github/workflows/bouchaud-ci.yml",
+    "p13_paths": RACINE / "tools/ci/fabric_compat_paths.json",
+    "primitives": RACINE / ".github/workflows/os-primitives.yml",
     "verdict": RACINE / "tools/ci/verdict_convergence.py",
     "contrat": RACINE / "tools/ci/contrat_paliers.py",
 }
@@ -265,17 +267,12 @@ def verifie(t: dict) -> list:
             or v.count('print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")') != 1 or "juge = contrat.juge" not in v:
         f.append("verdict_convergence.py : ne juge pas avec le contrat, ou CONVERGENCE_OK hors qualification")
     # 8
-    p13 = t["p13"]
-    branches = re.search(r"\n  push:\n    branches: \[([^\]]*)\]", p13)
-    if "uses: ./.github/workflows/os-primitives.yml" not in p13 or not branches or "audit/" in branches.group(1):
-        f.append("p13-primitives-noyau : n'appelle pas os-primitives, ou double la branche d'audit")
+    from fabric_coverage import p13_errors
     pousse = lb[lb.find("\n  push:"):lb.find("\n  workflow_dispatch:")]
     noyau = set(re.findall(r"^      - '(src/[^']+)'$", pousse, re.M))
-    for evenement in ("pull_request", "push"):
-        bloc = re.search(rf"\n  {evenement}:\n(?:    branches:[^\n]*\n)?    paths:\n((?:      - '[^']+'\n)+)", p13)
-        couverts = set(re.findall(r"^      - '([^']+)'$", bloc.group(1), re.M)) if bloc else set()
-        if not noyau or not noyau <= couverts:
-            f.append(f"p13-primitives-noyau ({evenement}) : chemins noyau non couverts {sorted(noyau - couverts)}")
+    if not noyau:
+        f.append("contrat Ladybird : liste des chemins noyau absente")
+    f.extend(p13_errors(t["p13"], t["p13_paths"], t["primitives"], noyau))
     # 9
     try:
         f += [f"simulation : {e}" for e in simule_paliers.controle(lb, c)]
@@ -365,16 +362,11 @@ def negatifs(t: dict) -> list:
          "          R_ATTENTE"),
         ("convergence en developpement", "verdict", 'if os.environ.get("BOUCHAUD_PALIER") == contrat.QUALIFICATION:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")',
          'if True:\n        print("BOUCHAUD_LADYBIRD_CONVERGENCE_OK")'),
-        ("chemin noyau oublie (push)", "p13", "    branches: [main]\n    paths:\n"
-         "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"
-         "      - 'src/kernel/process/**'\n",
-         "    branches: [main]\n    paths:\n"
-         "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"),
-        ("chemin noyau oublie (pull_request)", "p13", "  pull_request:\n    paths:\n"
-         "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"
-         "      - 'src/kernel/process/**'\n",
-         "  pull_request:\n    paths:\n"
-         "      - '.github/workflows/os-primitives.yml'\n      - '.github/workflows/p13-primitives-noyau.yml'\n"),
+        ("chemin noyau oublié", "p13_paths",
+         '    "src/kernel/navigateur/**",\n    "src/kernel/process/**",\n',
+         '    "src/kernel/navigateur/**",\n'),
+        ("P13 retiré du verdict", "p13", "gpu, security, storage, p13, ipc]\n    if: always()",
+         "gpu, security, storage, ipc]\n    if: always()"),
         ("audit double", "p13", "branches: [main]",
          "branches: [main, 'audit/p13-console-sync-ci-20261024']"),
     ]

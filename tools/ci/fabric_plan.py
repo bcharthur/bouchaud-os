@@ -6,8 +6,8 @@ from pathlib import Path
 
 
 CONSUMERS = {
-    "cpu": {"memory", "ipc", "storage", "gpu", "network", "security"},
-    "memory": {"cpu", "gpu", "ipc", "storage", "security"},
+    "cpu": {"p13", "memory", "ipc", "storage", "gpu", "network", "security"},
+    "memory": {"p13", "cpu", "gpu", "ipc", "storage", "security"},
     "ipc": {"security", "integration", "ladybird"},
     "gpu": {"integration", "atelier", "ladybird"},
     "network": {"integration", "ladybird", "update", "security"},
@@ -20,6 +20,7 @@ CONSUMERS = {
     "ladybird": {"integration"},
     "reliability": set(),
     "windows": set(),
+    "p13": set(),
 }
 
 OWNERS = {
@@ -36,7 +37,7 @@ OWNERS = {
     "windows": ("tools/windows/", "run.ps1"),
 }
 
-MIGRATED = frozenset(("gpu", "security", "storage"))
+MIGRATED = frozenset(("gpu", "security", "storage", "p13", "ipc"))
 COMPAT = json.loads((Path(__file__).parent / "fabric_compat_paths.json").read_text())
 CONFIG = (".github/", "tools/ci/", "targets/", ".cargo/")
 

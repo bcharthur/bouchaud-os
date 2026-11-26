@@ -208,5 +208,180 @@
     "evidence": [
       "ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}"
     ]
+  },
+  "CPU.L5.CLOCK_AGREEMENT": {
+    "owner": "p13",
+    "layer": "L5",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "probes",
+    "steps": [
+      "Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG SMP4",
+      "KVM SMP4 (2 boots)"
+    ],
+    "criteria": "Trois passages et seuils du banc horaire existant",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "CPU.L4.PRECISE_WAKEUP": {
+    "owner": "p13",
+    "layer": "L4",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "reveil-precis",
+    "steps": [
+      "P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 puis SMP4 (politique par defaut on depuis b6c99032)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "KVM SMP1",
+      "KVM SMP4"
+    ],
+    "criteria": "Verdict du banc A/B, témoins conservés",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "CPU.L4.SCHEDULER_ATTRIBUTION": {
+    "owner": "p13",
+    "layer": "L4",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "probes",
+    "steps": [
+      "Ordonnanceur -- methode de preuve P13 sous KVM, SMP1, SMP2, SMP4, SMP8 (temps vole prouve par l'hote)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "KVM SMP1/2/4/8"
+    ],
+    "criteria": "Attribution par preuve du temps volé",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "CPU.L5.FUTEX": {
+    "owner": "p13",
+    "layer": "L5",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "probes",
+    "steps": [
+      "Futex -- un reveil compte n'est jamais perdu (attendant temporise, condvar glibc), SMP1 et SMP4 (TCG)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG SMP1/4"
+    ],
+    "criteria": "Aucun réveil compté perdu",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "MEMORY.L6.DMA_TIMEOUT": {
+    "owner": "p13",
+    "layer": "L6",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "probes",
+    "steps": [
+      "P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG",
+      "KVM"
+    ],
+    "criteria": "Mémoire DMA conservée après perte de réponse",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "MEMORY.L4.MULTITHREAD_FAULT": {
+    "owner": "p13",
+    "layer": "L4",
+    "workflow": ".github/workflows/os-primitives.yml",
+    "job": "probes",
+    "steps": [
+      "Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG SMP1/8",
+      "KVM SMP4"
+    ],
+    "criteria": "Confinement de la faute multithread",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "IPC.L5.RING3_ABI": {
+    "owner": "ipc",
+    "layer": "L5",
+    "workflow": ".github/workflows/native-ipc-runtime.yml",
+    "job": "native-ipc-runtime",
+    "steps": [
+      "Preuve ABI/IPC native depuis ring3"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG"
+    ],
+    "criteria": "Sonde ABI/IPC réussie",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "ATELIER.L7.DESKTOP_RING3": {
+    "owner": "ipc",
+    "layer": "L7",
+    "workflow": ".github/workflows/native-ipc-runtime.yml",
+    "job": "native-ipc-runtime",
+    "steps": [
+      "Bureau ring 3 utilisable -- dock, calculatrice, reprise du compositeur (TCG)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG"
+    ],
+    "criteria": "Dock, calculatrice et reprise du compositeur",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
+  },
+  "IPC.L6.SUPERVISED_SERVICES": {
+    "owner": "ipc",
+    "layer": "L6",
+    "workflow": ".github/workflows/native-ipc-runtime.yml",
+    "job": "native-ipc-runtime",
+    "steps": [
+      "Services natifs supervises (SMP4 puis SMP1)"
+    ],
+    "dependencies": [],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG SMP1/4"
+    ],
+    "criteria": "Comportement des services supervisés",
+    "evidence": [
+      "journal et artefacts du job"
+    ]
   }
 }

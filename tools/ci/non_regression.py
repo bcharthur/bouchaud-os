@@ -25,7 +25,7 @@ NO_BUDGET_CHANGES = (
 STRICT_WORKFLOWS = {
     ".github/workflows/ci.yml",
     ".github/workflows/reliability-v3.yml",
-    ".github/workflows/p13-primitives-noyau.yml",
+    ".github/workflows/bouchaud-ci.yml",
     ".github/workflows/release.yml",
 }
 CHECKED_WORKFLOWS = {
@@ -44,17 +44,17 @@ CHECKED_WORKFLOWS = {
 }
 RISK_DOMAINS = (
     ("usb_ab", ("src/drivers/usb/", "src/kernel/update/", "tools/ci/run_ab_rollback.sh",
-                "system/update-core/"), ("Native IPC Runtime", "Reliability V3", "Integration")),
+                "system/update-core/"), ("Bouchaud CI", "Reliability V3", "Integration")),
     ("smp", ("src/kernel/scheduler/", "src/kernel/process/thread/", "src/arch/x86_64/smp",
-             "tools/smp/"), ("Reliability V3", "p13-primitives-noyau")),
+             "tools/smp/"), ("Reliability V3", "Bouchaud CI")),
     ("gui", ("src/gui/", "userland/services/windowd/", "userland/services/composited/",
              "tools/gui/"), ("CI Fast", "Integration")),
     ("storage", ("src/fs/", "tools/fs/", "userland/apps/notes/"),
      ("CI Fast", "Integration")),
     ("native_ipc", ("src/kernel/native/", "userland/services/", "userland/libs/",
-                    "tools/native/"), ("Native IPC Runtime",)),
+                    "tools/native/"), ("Bouchaud CI",)),
     ("physical", ("tools/release/", "src/boot/", "tools/reference/uefi-"),
-     ("Integration", "Native IPC Runtime")),
+     ("Integration", "Bouchaud CI")),
     ("security", ("src/kernel/security/", "tools/security/"),
      ("CI Fast", "Reliability V3")),
     ("browser", ("tools/ladybird/", "tools/userland/navigateur/", "third_party/"),
