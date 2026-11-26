@@ -56,8 +56,9 @@ static void touche(unsigned char *p, size_t n)
         p[i] = (unsigned char)i | 1;
 }
 
-static int zombie(void)
+static int zombie(int force)
 {
+    const char *mode = force ? "zombie-force" : "zombie";
     const size_t taille = 48 * MIO;
     /* `tube` : le fils annonce qu'il tient sa memoire ; `feu` : le pere l'a
      * mesuree, le fils peut mourir. Sans ce second tube, le fils sortait
@@ -66,10 +67,10 @@ static int zombie(void)
      * banc concluait a tort que le zombie gardait sa memoire). */
     int tube[2], feu[2];
     if (pipe(tube) != 0 || pipe(feu) != 0)
-        return echec("zombie", "pipe", 0);
+        return echec(mode, "pipe", 0);
     pid_t pid = fork();
     if (pid < 0)
-        return echec("zombie", "fork", 0);
+        return echec(mode, "fork", 0);
     if (pid == 0) {
         close(tube[0]);
         close(feu[1]);
@@ -82,17 +83,24 @@ static int zombie(void)
             _exit(3);
         if (read(feu[0], &c, 1) != 1)
             _exit(4);
+        if (force) {
+            volatile unsigned travail = 0;
+            for (;;)
+                travail++;
+        }
         _exit(0);
     }
     close(tube[1]);
     close(feu[0]);
     char c;
     if (read(tube[0], &c, 1) != 1)
-        return echec("zombie", "pret", 0);
+        return echec(mode, "pret", 0);
     unsigned long vivant = libre_mio();
     if (write(feu[1], &c, 1) != 1)
-        return echec("zombie", "feu", 0);
+        return echec(mode, "feu", 0);
     close(feu[1]);
+    if (force && kill(pid, SIGKILL) != 0)
+        return echec(mode, "kill", 0);
     /* Fin de fichier : le fils est mort (ses descripteurs sont fermes a la
      * mort, avant toute recolte). */
     while (read(tube[0], &c, 1) > 0)
@@ -109,16 +117,17 @@ static int zombie(void)
     long delai = ms() - t0;
     int statut = 0;
     if (waitpid(pid, &statut, 0) != pid)
-        return echec("zombie", "waitpid", 0);
+        return echec(mode, "waitpid", 0);
     unsigned long recolte = libre_mio();
     printf("MEMOIRE_MORT_ZOMBIE libre_vivant_mio=%lu libre_mort_mio=%lu "
            "libre_recolte_mio=%lu rendue_avant_recolte=%d delai_ms=%ld\n",
            vivant, apres, recolte, rendue, delai);
-    if (!WIFEXITED(statut) || WEXITSTATUS(statut) != 0)
-        return echec("zombie", "statut_fils", statut);
+    if (force ? (!WIFSIGNALED(statut) || WTERMSIG(statut) != SIGKILL)
+              : (!WIFEXITED(statut) || WEXITSTATUS(statut) != 0))
+        return echec(mode, "statut_fils", statut);
     if (!rendue)
-        return echec("zombie", "memoire_gardee_par_le_zombie", (long)(apres - vivant));
-    printf("MEMOIRE_MORT_OK mode=zombie\n");
+        return echec(mode, "memoire_gardee_par_le_zombie", (long)(apres - vivant));
+    printf("MEMOIRE_MORT_OK mode=%s\n", mode);
     return 0;
 }
 
@@ -179,7 +188,9 @@ int main(int argc, char **argv)
     const char *mode = argc > 1 ? argv[1] : "zombie";
     printf("MEMOIRE_MORT_BEGIN mode=%s libre_mio=%lu\n", mode, libre_mio());
     if (strcmp(mode, "zombie") == 0)
-        return zombie();
+        return zombie(0);
+    if (strcmp(mode, "zombie-force") == 0)
+        return zombie(1);
     if (strcmp(mode, "oom") == 0)
         return oom();
     return echec(mode, "mode_inconnu", 0);

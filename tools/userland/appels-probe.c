@@ -110,6 +110,7 @@ static int protection(void)
     errno = 0;
     if (mprotect((void *)base, 4096, PROT_READ | PROT_WRITE) == 0) return echec("vdso_mprotect_ecriture", 0);
     if (mprotect((void *)(base - 4096), 4096, PROT_READ | PROT_WRITE) == 0) return echec("vvar_mprotect_ecriture", 0);
+    if (mprotect((void *)(base - 4096), 4096, PROT_READ | PROT_EXEC) == 0) return echec("vvar_mprotect_execution", 0);
     int t[2];
     if (pipe(t)) return echec("pipe", errno);
     if (write(t[1], "XXXXXXXX", 8) != 8) return echec("pipe_ecriture", errno);

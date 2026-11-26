@@ -411,6 +411,14 @@ jobs:
             BO_QEMU_KVM=1 BO_SMP="$smp" BO_TEMPETE_MASQUE_IRQ="$((smp == 4))" OUT="$sortie" tools/ci/run_tempete_exec.sh image/bootimage-bouchaud-os.bin 40
             grep -aE 'BOUCHAUD_CPU_ISA hyperviseur=KVMKVMKVM([[:space:]]|$)' "$sortie/serie.log"
           done
+      - name: CPU Fabric, vDSO et SIGKILL sous KVM SMP1/2/4
+        run: |
+          set -e
+          python3 tools/verifie-vdso.py
+          for smp in 1 2 4; do
+            BO_QEMU_KVM=1 BO_APPELS_REQUIRE_VDSO=1 GARDE_JOURNAL="$PWD/appels-kvm-smp${smp}.log" tools/ci/run_appels.sh image/bootimage-bouchaud-os.bin "$smp"
+            BO_QEMU_KVM=1 GARDE_JOURNAL="$PWD/latence-kvm-smp${smp}.log" tools/ci/run_latence.sh image/bootimage-bouchaud-os.bin "$smp" 3 calcul
+          done
       - name: Retrait de memoire et OOM, KVM SMP2
         run: BO_QEMU_KVM=1 MEMOIRE_JOURNAL="$PWD/memoire-mort-kvm.log" tools/ci/run_memoire_mort.sh image/bootimage-bouchaud-os.bin "zombie oom" 2 1024
       - name: Victime OOM en quarantaine, KVM SMP2
@@ -432,6 +440,8 @@ jobs:
             tempete-exec-smp4/serie.log*
             tempete-exec-smp1/serie.log*
             tempete-exec-kvm-smp*/serie.log*
+            appels-kvm-smp*.log
+            latence-kvm-smp*.log
             memoire-mort-kvm.log
             memoire-quarantaine-kvm.log
           if-no-files-found: warn

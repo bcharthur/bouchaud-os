@@ -1454,6 +1454,7 @@ impl AddressSpace {
                 if !create {
                     return None;
                 }
+                self.tables.try_reserve(1).ok()?;
                 let frame = alloc_frame()?;
                 self.tables.push(frame);
                 table[index] = frame | PTE_PRESENT | PTE_WRITE | PTE_USER;
@@ -1999,10 +2000,12 @@ impl AddressSpace {
         #[cfg(feature = "banc-gpu-venus")]
         child.baux_gpu.clone_from(&self.baux_gpu);
         let mut compte = DuplicationCompte::default();
-        let mut possedees: Vec<u64> = Vec::with_capacity(self.pages.len());
-        child.pages.reserve(self.pages.len());
-        let mut retrogradees: Vec<u64> = Vec::new();
+        let mut possedees: Vec<u64> = Vec::new();
+        possedees.try_reserve_exact(self.pages.len()).ok()?;
+        child.pages.try_reserve(self.pages.len()).ok()?;
+        let mut retrogradees = [0; SEUIL_INVLPG];
         let mut nb_retrogradees = 0usize;
+        let mut cow_deja_retrogradee = false;
         let mut reussi = true;
         let pml4 = table_at(self.pml4);
         'parcours: for creneau in 0..USER_SLOTS {
@@ -2042,12 +2045,18 @@ impl AddressSpace {
                             } else {
                                 entry | PTE_COW
                             };
+                            // Un autre fork a pu retrograder cette PTE et ne pas
+                            // avoir encore execute son shootdown (hors verrou Mm).
+                            // Un fork echoue peut aussi laisser la PTE en COW.
+                            // Avant de publier ce fils, couvrir les deux cas.
+                            cow_deja_retrogradee |= entry & (PTE_COW | PTE_COW_ECRITURE)
+                                == (PTE_COW | PTE_COW_ECRITURE);
                             if partagee != entry {
                                 pt[i1] = partagee;
-                                nb_retrogradees += 1;
-                                if retrogradees.len() < SEUIL_INVLPG {
-                                    retrogradees.push(virt);
+                                if nb_retrogradees < SEUIL_INVLPG {
+                                    retrogradees[nb_retrogradees] = virt;
                                 }
+                                nb_retrogradees += 1;
                             }
                             // Une part par frame et par fork, meme si la frame
                             // est projetee a deux adresses : l'insertion dans
@@ -2081,10 +2090,10 @@ impl AddressSpace {
         // Le TLB LOCAL du pere : ses PTE retrogradees ne doivent plus y etre
         // inscriptibles. Les autres coeurs : l'invalidation rendue, executee
         // par l'appelant hors du verrou.
-        if nb_retrogradees > SEUIL_INVLPG {
+        if cow_deja_retrogradee || nb_retrogradees > SEUIL_INVLPG {
             flush_local_range(0, 0);
         } else {
-            for &virt in &retrogradees {
+            for &virt in &retrogradees[..nb_retrogradees] {
                 flush(virt);
             }
         }
@@ -2100,11 +2109,13 @@ impl AddressSpace {
         {
             // Ordre respecte : `Mm` (tenu par l'appelant) -> `COW`.
             let mut table = COW.lock();
-            for &frame in &possedees {
-                table.partage(frame);
+            if !table.partage_lot(&possedees) {
+                child.pages.clear();
+                return None;
             }
         }
-        let invalidation = (nb_retrogradees > 0).then(|| self.invalidation(0, 0));
+        let invalidation = (nb_retrogradees > 0 || cow_deja_retrogradee)
+            .then(|| self.invalidation(0, 0));
         Some((child, compte, invalidation))
     }
 
@@ -2119,6 +2130,7 @@ impl AddressSpace {
             let next = if entry & PTE_PRESENT != 0 {
                 entry & ADDR_MASK
             } else {
+                self.tables.try_reserve(1).ok()?;
                 let frame = alloc_frame()?;
                 self.tables.push(frame);
                 table[index] = frame | PTE_PRESENT | PTE_WRITE | PTE_USER;

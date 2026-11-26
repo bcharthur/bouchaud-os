@@ -143,6 +143,10 @@ pub fn publie() {
     );
 }
 
+pub(crate) fn adresse_vvar() -> u64 {
+    vmm::user_stack_top().saturating_add(DECALAGE_SUR_PILE)
+}
+
 /// Projette vvar + vDSO dans un espace neuf (exec) et y reserve leurs VMA.
 /// Rend l'adresse de l'en-tete ELF du vDSO (`AT_SYSINFO_EHDR`), ou 0.
 pub fn projette(space: &mut vmm::AddressSpace, promesses: &mut alloc::vec::Vec<crate::kernel::vma::Vma>) -> u64 {
@@ -150,7 +154,7 @@ pub fn projette(space: &mut vmm::AddressSpace, promesses: &mut alloc::vec::Vec<c
     if phys == 0 {
         return 0;
     }
-    let base = vmm::user_stack_top().saturating_add(DECALAGE_SUR_PILE);
+    let base = adresse_vvar();
     let lecture = vmm::PTE_PRESENT | vmm::PTE_USER | vmm::PTE_NO_EXEC;
     let execution = vmm::PTE_PRESENT | vmm::PTE_USER;
     let zones = [

@@ -98,6 +98,7 @@ static void mesure(const char *phase, int secondes, const char *soi)
     pid_t p[2];
     for (int i = 0; i < nb; i++) {
         p[i] = fork();
+        if (p[i] < 0) { perror("fork perturbateur"); exit(1); }
         if (p[i] == 0) perturbe(phase, soi);
     }
     usleep(200000);
@@ -115,7 +116,14 @@ static void mesure(const char *phase, int secondes, const char *soi)
         ret[n++] = r > cible ? r - cible : 0;
         if (r >= fin) break;
     }
-    for (int i = 0; i < nb; i++) { kill(p[i], SIGKILL); waitpid(p[i], 0, 0); }
+    for (int i = 0; i < nb; i++) {
+        int etat;
+        if (kill(p[i], SIGKILL) != 0 || waitpid(p[i], &etat, 0) != p[i]
+            || !WIFSIGNALED(etat) || WTERMSIG(etat) != SIGKILL) {
+            fprintf(stderr, "LATENCE_PROBE_FAIL phase=%s sigkill pid=%ld\n", phase, (long)p[i]);
+            exit(1);
+        }
+    }
     qsort(ret, n, sizeof *ret, cmp);
     size_t s10 = 0, s100 = 0;
     for (size_t i = 0; i < n; i++) { s10 += ret[i] > 10000000; s100 += ret[i] > 100000000; }
@@ -145,7 +153,9 @@ int main(int argc, char **argv)
             mesure(phases[i], secondes, argv[0]);
             _exit(0);
         }
-        waitpid(m, 0, 0);
+        int etat;
+        if (m < 0 || waitpid(m, &etat, 0) != m || !WIFEXITED(etat) || WEXITSTATUS(etat))
+            return 1;
     }
     printf("LATENCE_PROBE_FIN\n");
     return 0;

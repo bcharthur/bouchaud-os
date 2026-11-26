@@ -95,9 +95,18 @@ impl TableCow {
 
     /// Reconstruit la table a `capacite` emplacements (puissance de deux),
     /// sans tombes.
-    fn retaille(&mut self, capacite: usize) {
-        let anciennes = core::mem::replace(&mut self.cles, alloc::vec![VIDE; capacite]);
-        let comptes = core::mem::replace(&mut self.comptes, alloc::vec![0; capacite]);
+    fn retaille(&mut self, capacite: usize) -> bool {
+        let mut nouvelles_cles = Vec::new();
+        let mut nouveaux_comptes = Vec::new();
+        if nouvelles_cles.try_reserve_exact(capacite).is_err()
+            || nouveaux_comptes.try_reserve_exact(capacite).is_err()
+        {
+            return false;
+        }
+        nouvelles_cles.resize(capacite, VIDE);
+        nouveaux_comptes.resize(capacite, 0);
+        let anciennes = core::mem::replace(&mut self.cles, nouvelles_cles);
+        let comptes = core::mem::replace(&mut self.comptes, nouveaux_comptes);
         self.tombes = 0;
         let masque = capacite - 1;
         for (c, n) in anciennes.into_iter().zip(comptes) {
@@ -110,15 +119,28 @@ impl TableCow {
                 self.comptes[i] = n;
             }
         }
+        true
     }
 
-    /// Une place libre pour `frame` (absente), apres croissance eventuelle.
-    fn place(&mut self, frame: u64) -> usize {
-        // Charge au plus 3/4, tombes comprises.
-        if (self.vivantes + self.tombes + 1) * 4 > self.cles.len() * 3 {
-            let voulu = ((self.vivantes + 1) * 2).max(CAPACITE_MIN).next_power_of_two();
-            self.retaille(voulu);
+    /// Reserve avant toute mutation des comptes. Les frames du lot sont
+    /// distinctes ; le verrou COW couvre la reservation et les insertions.
+    fn reserve_partages(&mut self, frames: &[u64]) -> bool {
+        let majorant = self.vivantes + self.tombes + frames.len();
+        let seuil = self.cles.len() / 4 * 3;
+        if majorant <= seuil {
+            return true;
         }
+        let nouvelles = frames.iter().filter(|&&frame| self.trouve(frame).is_none()).count();
+        if self.vivantes + self.tombes + nouvelles <= seuil {
+            return true;
+        }
+        let voulu = ((self.vivantes + nouvelles) * 2).max(CAPACITE_MIN).next_power_of_two();
+        self.retaille(voulu)
+    }
+
+    /// Une place libre pour `frame` (absente), apres reservation.
+    fn place(&mut self, frame: u64) -> usize {
+        debug_assert!((self.vivantes + self.tombes) < self.cles.len());
         let masque = self.cles.len() - 1;
         let mut i = depart(frame, masque);
         loop {
@@ -133,18 +155,27 @@ impl TableCow {
         }
     }
 
-    pub fn partage(&mut self, frame: u64) -> u32 {
+    pub fn partage_lot(&mut self, frames: &[u64]) -> bool {
+        if !self.reserve_partages(frames) {
+            return false;
+        }
+        for &frame in frames {
+            self.partage(frame);
+        }
+        true
+    }
+
+    fn partage(&mut self, frame: u64) {
         self.partages += 1;
         if let Some(i) = self.trouve(frame) {
             let n = self.comptes[i].checked_add(1).expect("cow: debordement du compte de proprietaires");
             self.comptes[i] = n;
-            return n;
+            return;
         }
         let i = self.place(frame);
         self.cles[i] = cle(frame);
         self.comptes[i] = 2;
         self.vivantes += 1;
-        2
     }
 
     pub fn rend(&mut self, frame: u64) -> Rendu {

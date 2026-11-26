@@ -100,8 +100,10 @@ def verifie_noyau(t: dict) -> list:
         fautes.append("vdso.rs : la page vvar doit etre lecture seule et jamais executable")
     if "let execution = vmm::PTE_PRESENT | vmm::PTE_USER;" not in v or "PTE_WRITE" in v.split("fn projette")[1].split("\n}\n")[0]:
         fautes.append("vdso.rs : le vDSO ne doit jamais etre projete inscriptible")
-    if "Backing::Vdso { .. }" not in t["mem"]:
+    if "Backing::Vdso { mapping_start, .. }" not in t["mem"]:
         fautes.append("mem.rs : mprotect(PROT_WRITE) n'est plus refuse sur le vDSO")
+    if "prot & PROT_EXEC != 0 && mapping_start == crate::kernel::vdso::adresse_vvar()" not in t["mem"]:
+        fautes.append("mem.rs : mprotect(PROT_EXEC) n'est plus refuse sur vvar")
     if "effective.drapeaux & !crate::kernel::vmm::PTE_WRITE" not in t["faute"]:
         fautes.append("faute_memoire.rs : une faute sur le vDSO pourrait le projeter inscriptible")
     for fichier, motif in (
@@ -144,7 +146,7 @@ def negatifs(image: bytes, t: dict) -> list:
     m = dict(t, proc=t["proc"].replace("space.write_utilisateur(demande.child_tid", "space.write(demande.child_tid"))
     if not verifie_noyau(m):
         passent.append("CHILD_SETTID non verifie")
-    m = dict(t, mem=t["mem"].replace("Backing::Vdso { .. }", "Backing::Zero"))
+    m = dict(t, mem=t["mem"].replace("Backing::Vdso { mapping_start, .. }", "Backing::Zero"))
     if not verifie_noyau(m):
         passent.append("mprotect inscriptible")
     return passent
