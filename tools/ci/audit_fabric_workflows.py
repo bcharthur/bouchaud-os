@@ -18,6 +18,8 @@ REPLACEMENTS = {
         "BIOS attesté du run pour le banc GPU et le produit Ladybird",
     ("gpu-composition.yml", "Image de banc -- panne GPU injectee (non livrable)"):
         "build-kernel.yml, variant banc-gpu-composition-panne et manifeste",
+    ("ladybird-native-browser.yml", "Bootimage"):
+        "BIOS attesté du run, distinct de l'artefact natif Ladybird",
     ("native-ipc-runtime.yml", "decision"):
         "déclenchement unique dans bouchaud-ci.yml",
     ("native-ipc-runtime.yml", "Verdict reflete du run push du meme arbre"):

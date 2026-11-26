@@ -199,9 +199,14 @@ def verifie(t: dict) -> list:
             continue
         i_v = index(es, lambda x: LIAISON in x[1])
         e_job = entete(bloc)
-        if not re.search(r"^    needs: \[dedoublonne, artefact\]$", e_job, re.M) or not i_dl < i_v \
+        if not re.search(r"^    needs: \[dedoublonne, artefact(?:, bios-ladybird)?\]$", e_job, re.M) or not i_dl < i_v \
                 or not ATTENTE_ARTEFACT.search(e_job):
             f.append(f"{nom} : joue l'artefact sans l'attendre explicitement ou sans le verifier")
+        if "./.github/actions/fabric-bootimage" in bloc and (
+                "needs: [dedoublonne, artefact, bios-ladybird]" not in e_job
+                or "&& needs.bios-ladybird.result == 'success'" not in e_job
+                or "artifact: ${{ needs.bios-ladybird.outputs.artifact }}" not in bloc):
+            f.append(f"{nom} : BIOS commun sans dépendance, verdict ou identité attestée")
     # 7
     conv = j.get("convergence", "")
     if f"name: ${{{{ inputs.palier == 'artefact' && 'ladybird / verdict de production' || (({Q}) && 'ladybird / verdict de convergence' || 'ladybird / verdict integration developpement') }}}}" not in conv:
@@ -304,7 +309,7 @@ def negatifs(t: dict) -> list:
         ("consommateur non verifie", "lb", f"        run: {LIAISON}\n      - name: WPT sur Bouchaud OS",
          "        run: true\n      - name: WPT sur Bouchaud OS"),
         ("consommateur sans condition explicite (run 40554668634)", "lb",
-         "    name: ladybird / sites reels\n    needs: [dedoublonne, artefact]\n",
+         "    name: ladybird / sites reels\n    needs: [dedoublonne, artefact, bios-ladybird]\n",
          "    name: ladybird / sites reels\n    needs: artefact\n"),
         ("performance sans condition explicite", "lb",
          "    needs: [dedoublonne, browser-host-smoke]\n    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.browser-host-smoke.result == 'success' }}\n",

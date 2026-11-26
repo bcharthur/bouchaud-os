@@ -266,6 +266,12 @@ jobs:
             echo reutilise=false >> "$GITHUB_OUTPUT"
           fi
 
+  # La préparation BIOS s'exécute pendant la résolution de Ladybird.
+  bios-ladybird:
+    needs: dedoublonne
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && inputs.palier != 'artefact' }}
+    uses: ./.github/workflows/build-kernel.yml
+
   primitives:
     # Les sondes P13 (~80 min-runner) ne dependent pas de Ladybird : en
     # developpement elles tournent via bouchaud-ci.yml, sur les seuls
@@ -698,11 +704,11 @@ jobs:
   wpt:
     # BOUCHAUD_WPT_V1 (P11) : Ladybird SUR Bouchaud contre Ladybird sous Linux.
     name: ladybird / wpt
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -722,8 +728,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -750,11 +757,11 @@ jobs:
     # BOUCHAUD_CACHE_REDEMARRAGE_V1 (convergence P2) : cache HTTP disque et
     # base SQL a travers un redemarrage complet du navigateur.
     name: ladybird / cache et SQL apres redemarrage
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -774,8 +781,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -798,11 +806,11 @@ jobs:
     # BOUCHAUD_ENDURANCE_V1 : 10 minutes de cycle de vie (cadres, workers,
     # onglets cross-site) sans crash du Compositor.
     name: ladybird / endurance 10 min
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -822,8 +830,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -858,11 +867,11 @@ jobs:
     # DIAGNOSTIC (hors verdict de convergence) : il dit ce que coute
     # l'emulation TCG dans les cadences mesurees par l'endurance.
     name: ladybird / endurance sous KVM (stabilite + performance)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -882,8 +891,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -939,11 +949,11 @@ jobs:
     # BOUCHAUD_CRASH_RENDU_V1 : un WebContent faute pour de vrai ; l'onglet
     # de l'autre site et le Compositor vivent, le navigateur le remplace.
     name: ladybird / robustesse (crash d'un rendu, cadres isoles, cycle des workers)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -963,8 +973,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -998,8 +1009,8 @@ jobs:
     # ordinaires dans leurs processus, composees ensemble par `composited`
     # ring 3 (deplacement, empilement, une troisieme application qui meurt).
     name: ladybird / bureau ring 3 (DOOM + Ladybird composes par composited)
-    needs: [dedoublonne, artefact]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    needs: [dedoublonne, artefact, bios-ladybird]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1019,8 +1030,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1091,11 +1103,11 @@ jobs:
     # BOUCHAUD_SITES_REELS_V1 : Example Domain (exige) et Wikipedia (mesure)
     # en HTTPS reel, sonde de pixels sur la trame du Compositor.
     name: ladybird / sites reels
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -1115,8 +1127,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1205,11 +1218,11 @@ jobs:
 
   browser-host-smoke:
     name: ladybird / browser-host smoke
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1229,8 +1242,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1268,8 +1282,8 @@ jobs:
   # verdict de convergence) tant qu'il n'a pas ete vu vert.
   e2e-parcours:
     name: ladybird / e2e parcours (${{ matrix.accel }} SMP4, diagnostic)
-    needs: [dedoublonne, artefact]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    needs: [dedoublonne, artefact, bios-ladybird]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     strategy:
@@ -1295,8 +1309,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1338,8 +1353,8 @@ jobs:
   # pas multiplier par neuf le cout de chaque PR.
   ab-perf:
     name: ladybird / ab perf (kvm smp${{ matrix.smp }}, ${{ matrix.mimalloc }})
-    needs: [dedoublonne, artefact]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
+    needs: [dedoublonne, artefact, bios-ladybird]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -1367,8 +1382,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1422,16 +1438,17 @@ jobs:
   # Diagnostic des branches de perf ; le C22 contractuel ne change pas.
   memoire-c22-delai10:
     name: ladybird / C22 memoire 6x6 sous purge 10 ms (diagnostic)
-    needs: [dedoublonne, artefact]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
+    needs: [dedoublonne, artefact, bios-ladybird]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' && startsWith(github.head_ref, 'claude/perf-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1480,11 +1497,11 @@ jobs:
   # ete vu vert. Scanout 2D, aucune acceleration (P10 reste BLOCKED).
   browser-host-smoke-virtio:
     name: ladybird / browser-host smoke sur virtio-gpu (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1504,8 +1521,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1541,11 +1559,11 @@ jobs:
 
   browser-host-smoke-surface-double:
     name: ladybird / browser-host smoke, surface a deux tampons (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -1565,8 +1583,9 @@ jobs:
           restore-keys: |
             ladybird-smoke-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1753,11 +1772,11 @@ jobs:
 
   ordre-worker:
     name: ladybird / ordre worker (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1765,8 +1784,9 @@ jobs:
       - name: QEMU + outils
         run: |
           tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1794,11 +1814,11 @@ jobs:
     # RIP alterne : frequence, bras, role du profil, et pour chaque faute la
     # pile symbolisee publiee par le noyau (BOUCHAUD_PILE_DE_FAUTE_V1).
     name: ladybird / piege du Compositor (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -1806,8 +1826,9 @@ jobs:
       - name: QEMU + outils
         run: |
           tools/ci/apt-installe.sh qemu-system-x86 file socat netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1841,16 +1862,17 @@ jobs:
     # RSS verdict and unchanged 1024 KiB ceiling in analyse_memoire.py.
     # Fail closed on QEMU, process, marker, memory or artefact errors.
     name: ladybird / C22 memoire 6x6 candidat (KVM strict)
-    needs: [dedoublonne, artefact]
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    needs: [dedoublonne, artefact, bios-ladybird]
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + outils
         run: tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1919,11 +1941,11 @@ jobs:
     # SIGSEGV dans le meme demarrage : remplacant unique, reprise de la page,
     # le Compositor relance presente encore, aucune corruption noyau.
     name: ladybird / politique de crash des services (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1931,8 +1953,9 @@ jobs:
       - name: QEMU + outils
         run: |
           tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser
@@ -1964,11 +1987,11 @@ jobs:
     # proportionnel a la duree), memoire du Compositor ([LB:MEM]) et pentes
     # RSS sur toute la duree.
     name: ladybird / endurance 20 min sous KVM (diagnostic)
-    needs: [dedoublonne, artefact]
+    needs: [dedoublonne, artefact, bios-ladybird]
     # `build` et `reutilise` sont exclusifs : l'un est TOUJOURS saute. Sans
     # condition explicite, le success() implicite de GitHub porte sur tous les
     # ancetres et saute ce job (run 40554668634 : 15 jobs sautes).
-    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}
+    if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' && needs.bios-ladybird.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -1976,8 +1999,9 @@ jobs:
       - name: QEMU + outils
         run: |
           tools/ci/apt-installe.sh qemu-system-x86 file netcat-openbsd
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ needs.bios-ladybird.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
           name: bouchaud-ladybird-native-browser

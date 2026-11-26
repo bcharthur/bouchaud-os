@@ -252,3 +252,10 @@ signale chaque différence documentée et échoue sur une étape manquante
 hors des remplacements déclarés. Ce contrôle structurel doit être
 complété par les preuves de déclenchement, de matrice, de provenance
 et d’exécution sur GitHub.
+
+Le workflow de qualification Ladybird mutualise aussi le BIOS standard
+pour ses 18 recettes QEMU compatibles. Le BIOS se construit pendant la
+résolution de provenance du navigateur. Les consommateurs vérifient
+l’image du run puis la provenance Ladybird selon le contrat existant.
+La production seule de l’artefact natif et les constructions des bras
+instrumentés conservent leurs chemins.
