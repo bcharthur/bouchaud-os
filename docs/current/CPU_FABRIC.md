@@ -67,3 +67,53 @@ Acquisition sous Mm → cache, puis état de page pour le cache propre. Les rout
 Le témoin hôte compile les routines de production contre un cache contrôlé. Une même clé est réinsérée sur une autre frame entre instantané et prise. Le mutant qui accepte la clé seule échoue. Le correctif refuse la substitution à la deuxième référence. Le témoin contrôle le préfixe à restituer, puis exerce le succès sur la nouvelle frame et les refus du registre partagé. L'ordre des appels dans le vrai fork est vérifié séparément. Ce témoin détermine la course sans dépendre du hasard d'ordonnancement.
 
 TCG SMP4, sonde COW passée avec écritures père/fils/noyau, MAP_SHARED, sorties, futex et pression mémoire. Fork 64 Mio ABBA, 20 mesures par boot. Médianes 9,144 et 8,915 ms sur le lot de retrait de référence, 8,145 et 9,690 ms sur le correctif. Les distributions se recouvrent. La qualification KVM de la nouvelle tête et le test utilisateur WHPX sont des preuves distinctes. [Recyclage différé #385](https://github.com/bcharthur/bouchaud-os/issues/385)
+
+## Échec P13 à la tête 086e1dfa
+
+GitHub confirme huit workflows sur neuf réussis au SHA
+`086e1dfa25ccb7487752c630a8c102912a97a456`. À ce SHA, la tempête Integration
+sous KVM passe en SMP1/2/4, de même que Ladybird C22, l'endurance et
+Non-regression Gate. Le verdict P13 reste rouge.
+[Integration KVM](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113324/job/139865885448) ·
+[Ladybird](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113523) ·
+[Non-regression Gate](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113327)
+
+| Écart MONOTONIC invité − hôte | 1 s | 10 s | 60 s |
+|---|---:|---:|---:|
+| TCG SMP4 | −0,5 ms | −0,1 ms | +0,6 ms |
+| KVM SMP4 | **+64,5 ms** | +2,9 ms | −9,3 ms |
+| KVM SMP4 à `8bf4f6ea` | +4,3 ms | −0,1 ms | −7,0 ms |
+
+En KVM avec `-cpu host`, l'invité a mesuré 1 000,438 ms contre 935,9 ms
+sur l'hôte. La limite est de 50 ms. REALTIME suit MONOTONIC à 1 µs près
+sur cet intervalle et l'écart absolu REALTIME avec l'hôte reste admis.
+Le code du banc est identique à celui de main `fdef86be`. Le banc, le
+vDSO, le vvar, le code SMP et le minuteur sont identiques à ceux de la
+référence verte `8bf4f6ea`. Les mesures ne montrent pas de dérive
+soutenue et ne suffisent pas à attribuer le point de 1 s.
+[Campagne en échec](https://github.com/bcharthur/bouchaud-os/actions/runs/45805113333/job/139858275863) ·
+[Campagne verte](https://github.com/bcharthur/bouchaud-os/actions/runs/45782160808/job/139780121616)
+
+Le banc horodate les lignes quand le lecteur Python les traite. Un
+retard différentiel du marqueur de départ se soustrait donc à la durée
+hôte. Le juge d'origine, alimenté avec le même intervalle invité et un
+départ hôte décalé de 64,5 ms, reproduit 935,9 ms et l'échec à +6,89 %.
+Le cas sans décalage passe. Cette injection reproduit le symptôme du
+juge. L'origine du retard dans la campagne réelle reste indéterminée.
+L'artefact historique contient la série TCG. Le retour non nul KVM sous
+`bash -e` interrompait l'étape avant la copie de sa série et les
+horodatages bruts étaient absents de la collecte.
+
+Le changement de collecte conserve la série et les horodatages pour
+chaque accélérateur, y compris après un échec, et conserve un verdict
+rouge dès qu'un des deux bancs échoue. Les seuils et la sonde sont
+identiques. Ce changement traite la perte de preuves. Les mesures
+avant/après en VM et le correctif de l'échec temporel restent ouverts.
+**NO-GO** sur `086e1dfa`.
+
+Le témoin hôte des références du fork passe avec rejet du mutant. Il
+couvre l'identité de frame, le préfixe des références acquises et le
+partage. La matrice d'échecs partiels dans le vrai noyau et l'observation
+du TLB distant à ces frontières restent des limites de couverture. Le
+recyclage autonome des slots et des piles reste suivi dans
+[#385](https://github.com/bcharthur/bouchaud-os/issues/385).
