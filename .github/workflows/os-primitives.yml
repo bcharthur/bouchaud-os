@@ -416,49 +416,6 @@ jobs:
             fi
           done
           exit $r
-      - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
-        # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
-        # part vers QEMU, puis l'attente est declaree echue. La memoire doit
-        # rester hors de l'allocateur (etat Inconnue), le bureau se replier,
-        # sans panique. DERNIER pas : il reconstruit l'image avec l'option, les
-        # pas precedents ont teste l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-sans-reponse
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
-          PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
-          PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
-      - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
-        # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
-        # (une entree, id de tete, longueur, barriere identique). Noyau
-        # compile avec `banc-virtio-gpu-reponse-etrangere` : le premier
-        # transfert du bureau est juge contre la barriere d'une autre
-        # commande. La violation doit etre nommee et chiffree, la file
-        # cassee, le scanout abandonne au premier echec, le bureau vivant.
-        # Image a option : apres les pas de l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-reponse-etrangere
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
-          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
-          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
-      - name: P10+.1 -- pannes de l'attente par interruption, MSI-X masque, parasites, reponse jamais vue (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : noyau compile avec
-        # `banc-virtio-gpu-irq-pannes`, bureau sous `gpu-irq on`. Interruptions
-        # perdues rattrapees par la relecture, parasites sans progres et sans
-        # presentation refusee, attente aveugle finie a son echeance, file
-        # cassee, scanout abandonne, compositeur vivant, aucune panique.
-        # Image a option : apres les pas de l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-irq-pannes
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-irq-pannes.bin
-          r=0
-          PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
-          PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
-          exit $r
       # Mode normal : publication du diagnostic, sans modifier la CI produit.
       # Mode manuel p13_strict=true : les NON_QUALIFIANT deviennent bloquants.
       - name: P13 -- qualification stricte ordonnanceur KVM SMP1/2/4
@@ -504,12 +461,9 @@ jobs:
             compta-utilisateur-kvm-smp*/serie.log
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
-            virtio-dma-panne*/serie.log
-            virtio-reponse-etrangere*/serie.log
             ordonnanceur-attribution-*/serie.log
             banc-presentation-*/serie-*.log
             banc-irq-gpu-*/serie.log
-            virtio-irq-pannes*/serie.log
           if-no-files-found: warn
 
   # Les A/B d'ordonnancement, en parallele des sondes : chacun est un
@@ -656,7 +610,7 @@ jobs:
   # parallele des sondes (deux demarrages par accelerateur).
   gpu-tampon:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
@@ -739,6 +693,49 @@ jobs:
           AB_SORTIE=$PWD/banc-dechirure-tcg tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
           AB_SORTIE=$PWD/banc-dechirure-kvm BO_QEMU_KVM=1 tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
           exit $r
+      - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
+        # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
+        # part vers QEMU, puis l'attente est declaree echue. La memoire doit
+        # rester hors de l'allocateur (etat Inconnue), le bureau se replier,
+        # sans panique. DERNIER pas : il reconstruit l'image avec l'option, les
+        # pas precedents ont teste l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-sans-reponse
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+      - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
+        # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
+        # (une entree, id de tete, longueur, barriere identique). Noyau
+        # compile avec `banc-virtio-gpu-reponse-etrangere` : le premier
+        # transfert du bureau est juge contre la barriere d'une autre
+        # commande. La violation doit etre nommee et chiffree, la file
+        # cassee, le scanout abandonne au premier echec, le bureau vivant.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-reponse-etrangere
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+      - name: P10+.1 -- pannes de l'attente par interruption, MSI-X masque, parasites, reponse jamais vue (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : noyau compile avec
+        # `banc-virtio-gpu-irq-pannes`, bureau sous `gpu-irq on`. Interruptions
+        # perdues rattrapees par la relecture, parasites sans progres et sans
+        # presentation refusee, attente aveugle finie a son echeance, file
+        # cassee, scanout abandonne, compositeur vivant, aucune panique.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-irq-pannes
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-irq-pannes.bin
+          r=0
+          PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -751,4 +748,7 @@ jobs:
             scanout-trame-*/capture-*.ppm
             banc-trame-*/serie.log
             banc-dechirure-*/serie.log
+            virtio-dma-panne*/serie.log
+            virtio-reponse-etrangere*/serie.log
+            virtio-irq-pannes*/serie.log
           if-no-files-found: warn

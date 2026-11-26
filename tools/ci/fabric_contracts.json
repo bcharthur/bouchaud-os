@@ -291,7 +291,7 @@
     "owner": "p13",
     "layer": "L6",
     "workflow": ".github/workflows/os-primitives.yml",
-    "job": "probes",
+    "job": "gpu-tampon",
     "steps": [
       "P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)"
     ],

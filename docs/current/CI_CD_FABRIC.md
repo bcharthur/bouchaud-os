@@ -225,3 +225,10 @@ sans attendre l'image BIOS d'Integration. Le groupe DHCP consomme cette
 dernière. Les recettes des deux groupes ont été comparées au SHA validé
 `018a5287`, étapes et paramètres compris. La convergence des profils
 et l'agrégation des preuves des workflows indépendants restent à établir.
+
+Les trois variantes P10 de panne DMA, de réponse étrangère et
+d'interruptions s'exécutent à la suite du job GPU de P13, en parallèle
+des sondes CPU. Elles gardent leurs compilations distinctes et leurs
+bras TCG/KVM. Leurs journaux passent de l'archive
+`os-primitives-debug` à `os-primitives-gpu-tampon`. Les chemins de
+preuve CPU utilisés par le rapport P13 restent dans l'archive d'origine.
