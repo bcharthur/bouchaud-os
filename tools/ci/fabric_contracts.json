@@ -430,5 +430,98 @@
     "evidence": [
       "journaux et artefacts Integration"
     ]
+  },
+  "LADYBIRD.L7.C22": {
+    "owner": "ladybird",
+    "layer": "L7",
+    "workflow": ".github/workflows/ladybird-native-browser.yml",
+    "job": "memoire-onglets",
+    "steps": [
+      "C22 -- 6/6 stricts sur le candidat, sans temoin historique"
+    ],
+    "dependencies": [
+      "dedoublonne",
+      "artefact"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "KVM"
+    ],
+    "criteria": "Six répétitions strictes et preuve mémoire du candidat",
+    "evidence": [
+      "journal et preuves du workflow"
+    ]
+  },
+  "SYSTEM.L6.NIGHTLY": {
+    "owner": "integration",
+    "layer": "L6",
+    "workflow": ".github/workflows/nightly.yml",
+    "job": "nightly-gate",
+    "steps": [
+      "Verdict"
+    ],
+    "dependencies": [
+      "kernel-build",
+      "qemu-core",
+      "dns",
+      "resolve-ladybird",
+      "ladybird-smoke",
+      "windows-debt"
+    ],
+    "criticality": "required",
+    "profile": "FULL",
+    "configurations": [
+      "QEMU et preuves hôte"
+    ],
+    "criteria": "Toutes les ressources du plan Nightly sont jugées",
+    "evidence": [
+      "journal et preuves du workflow"
+    ]
+  },
+  "SYSTEM.L7.ENDURANCE": {
+    "owner": "reliability",
+    "layer": "L7",
+    "workflow": ".github/workflows/endurance.yml",
+    "job": "endurance-gate",
+    "steps": [
+      "Verdict agrege"
+    ],
+    "dependencies": [
+      "construire",
+      "tranche"
+    ],
+    "criticality": "required",
+    "profile": "FULL",
+    "configurations": [
+      "Matrice hebdomadaire"
+    ],
+    "criteria": "Verdict agrégé des campagnes selon les budgets existants",
+    "evidence": [
+      "journal et preuves du workflow"
+    ]
+  },
+  "CPU.L7.P13_CERTIFICATION": {
+    "owner": "cpu",
+    "layer": "L7",
+    "workflow": ".github/workflows/p13-final-candidate.yml",
+    "job": "final-gate",
+    "steps": [
+      "Compare strict results AND independent C22 and Nightly runs"
+    ],
+    "dependencies": [
+      "hosted-primitives-strict",
+      "dedicated-three-campaigns",
+      "dedicated-smp8"
+    ],
+    "criticality": "required",
+    "profile": "CERTIFICATION",
+    "configurations": [
+      "KVM dédié et preuves indépendantes"
+    ],
+    "criteria": "Verdict strict C22 et Nightly sur candidat exact",
+    "evidence": [
+      "journal et preuves du workflow"
+    ]
   }
 }

@@ -12,7 +12,7 @@ name: ladybird-native-browser
 #                  epreuves Ladybird et memes seuils ; l'artefact est REUTILISE
 #                  d'un run aux entrees de build identiques s'il existe
 #                  (tools/ci/ladybird_provenance.py), les primitives P13 sont
-#                  jouees par p13-primitives-noyau.yml. Job « verdict
+#                  jouees par bouchaud-ci.yml. Job « verdict
 #                  integration developpement », jamais CONVERGENCE_OK.
 #   artefact       BOUCHAUD_LADYBIRD_PRODUCTION_V1 -- PRODUCTION seule, declenchee
 #                  par un run consommateur (workflow_dispatch palier=artefact,
@@ -35,6 +35,8 @@ on:
       - 'tools/perf/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      - '.github/workflows/bouchaud-ci.yml'
+      - 'tools/ci/fabric_contracts.json'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
       - 'tools/release/assemble_systeme.sh'
       - 'tools/release/build_bo_ota.sh'
@@ -45,7 +47,7 @@ on:
       - 'src/gui/window_manager.rs'
       - 'src/gui/client.rs'
       - 'src/kernel/update/**'
-      # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
+      # os-primitives.yml : joue par bouchaud-ci.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
@@ -116,6 +118,8 @@ on:
       - 'tools/perf/**'
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/ladybird-native-browser.yml'
+      - '.github/workflows/bouchaud-ci.yml'
+      - 'tools/ci/fabric_contracts.json'
       # BOUCHAUD_LIVRAISON_V1 : l'image Trigkey de livraison et son test.
       - 'tools/release/assemble_systeme.sh'
       - 'tools/release/build_bo_ota.sh'
@@ -126,7 +130,7 @@ on:
       - 'src/gui/window_manager.rs'
       - 'src/gui/client.rs'
       - 'src/kernel/update/**'
-      # os-primitives.yml : joue par p13-primitives-noyau.yml (palier developpement).
+      # os-primitives.yml : joue par bouchaud-ci.yml (palier developpement).
       - 'tools/ci/run_ladybird_browser_host.sh'
       - 'tools/ci/run_ladybird_wpt.sh'
       - 'tools/ci/run_ladybird_cache.sh'
@@ -264,7 +268,7 @@ jobs:
 
   primitives:
     # Les sondes P13 (~80 min-runner) ne dependent pas de Ladybird : en
-    # developpement elles tournent via p13-primitives-noyau.yml, sur les seuls
+    # developpement elles tournent via bouchaud-ci.yml, sur les seuls
     # chemins noyau. Ici : qualification uniquement.
     needs: dedoublonne
     # Jamais en production (palier artefact), y compris sur la branche d'audit.
