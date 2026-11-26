@@ -14,9 +14,15 @@ on:
       - 'third_party/UPSTREAM.md'
       - '.github/workflows/userland.yml'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      campaign:
+        description: Construire et tester sans publier de release
+        required: true
+        type: boolean
 
 concurrency:
-  group: userland-legacy-${{ github.ref }}
+  group: userland-legacy-${{ github.ref }}-${{ inputs.campaign && github.run_id || 'publication' }}
   cancel-in-progress: false
 
 permissions:
@@ -109,6 +115,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Publier release du commit
+        if: ${{ !inputs.campaign }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

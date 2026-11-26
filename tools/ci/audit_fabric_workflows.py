@@ -14,6 +14,10 @@ DIRECTORY = ".github/workflows"
 
 # Exact historical file and step identities, reviewed with their replacements.
 REPLACEMENTS = {
+    ("ci.yml", "Classer les changements"):
+        "classification exhaustive explicite pour le profil FAST",
+    ("ci.yml", "Verdict unique pour branch protection"):
+        "verdict historique et succès de chaque job exigé en mode exhaustif",
     ("gpu-composition.yml", "Bootimage"):
         "BIOS attesté du run pour le banc GPU et le produit Ladybird",
     ("gpu-composition.yml", "Image de banc -- panne GPU injectee (non livrable)"):
@@ -38,6 +42,8 @@ REPLACEMENTS = {
         "BIOS attesté du run",
     ("security-runtime.yml", "Images -- standard, cle-usb-test, temoin"):
         "BIOS attesté, variantes USB construites dans le job",
+    ("userland.yml", "Publier release du commit"):
+        "publication autonome conservée, campagne Fabric sans publication",
     ("unix-fs-reliability.yml", "Bootimage"):
         "BIOS attesté du run",
 }

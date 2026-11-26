@@ -276,3 +276,30 @@ et la tentative vérifiés. Un run absent, en attente, en échec, ou un job
 obligatoire sauté ou ambigu, rend la campagne rouge. La qualification
 Windows couverte à ce stade est celle de la préparation du scénario.
 Les contrôles de branche existants restent en vigueur.
+
+### Qualification avant fusion
+
+Le workflow présent sur une branche peut aussi être lancé par un push
+de tag léger `ci-fabric/PROFIL/SHA/branche`. Le plan vérifie que le SHA
+du tag, le checkout et la tête distante de la branche coïncident.
+Des tags uniques permettent de conserver une preuve par candidat. Les
+tags `v*` restent réservés à la publication et les checks de main
+continuent à s'appliquer à la PR.
+
+Sur la tête à qualifier, pour lancer FABRIC sur la PR #386 :
+
+```bash
+candidate=$(git rev-parse HEAD)
+tag="ci-fabric/FABRIC/$candidate/codex/ci-cd-fabric"
+git push origin "$candidate:refs/tags/$tag"
+```
+
+FULL et CERTIFICATION vérifient en plus les campagnes indépendantes
+indiquées dans le registre de preuves. Un déclenchement par tag ne
+confère aucun droit supplémentaire pour lancer ces campagnes.
+
+Le profil FAST exécute CI Fast en mode exhaustif et le contrôle
+de non-régression dans le même run. FULL et CERTIFICATION exécutent
+aussi Userland dans leur run. Il produit le même disque et joue le
+même scénario QEMU. La publication de la release Userland reste sur
+les déclencheurs autonomes historiques.

@@ -8,16 +8,7 @@ from pathlib import Path
 import subprocess
 
 
-FAST = {
-    "ci.yml": (
-        "fast-gate", "kernel / compile + invariants", "kernel / clippy + variantes",
-        "host / tests + preuves de mise a jour", "browser / engine tests",
-        "windows / scripts", "ci / policy",
-    ),
-    "non-regression.yml": ("non-regression-gate",),
-}
 FULL = {
-    **FAST,
     "integration.yml": (
         "integration-gate", "kernel / bootimage once", "qemu / mm-ng6 smp4",
         "qemu / os primitives", "qemu / proc-stat et cout du fork",
@@ -47,14 +38,13 @@ FULL = {
     ),
     "nightly.yml": ("nightly-gate", "nightly / Ladybird product", "nightly / dns ring3"),
     "endurance.yml": ("endurance-gate",),
-    "userland.yml": ("userland / legacy build", "userland / product qemu smoke"),
     "ladybird-run-selector-v7.yml": (
         "windows-powershell-51", "live-github-selection", "windows-real-download",
     ),
     "doom-port-windows.yml": ("doom-windows",),
 }
 PROFILES = {
-    "FAST": FAST,
+    "FAST": {},
     "FABRIC": {},
     "FULL": FULL,
     "CERTIFICATION": {
@@ -101,13 +91,22 @@ def main():
     parser.add_argument("profile", choices=PROFILES)
     args = parser.parse_args()
     sha = os.environ["GITHUB_SHA"]
-    branch = os.environ["GITHUB_REF_NAME"]
+    branch = os.environ.get("FABRIC_PROOF_BRANCH") or os.environ["GITHUB_REF_NAME"]
     repo = os.environ["GITHUB_REPOSITORY"]
     results = {}
     if args.profile != "FAST":
         results["fabric-current-run"] = {
             "status": "PASS" if os.environ["FABRIC_RESULT"] == "success"
             and os.environ["FABRIC_INPUT"] == "all" else "FAIL",
+        }
+    if args.profile in {"FAST", "FULL", "CERTIFICATION"}:
+        for name, variable in (("fast", "FAST_RESULT"), ("non-regression", "NON_REGRESSION_RESULT")):
+            results[f"{name}-current-run"] = {
+                "status": "PASS" if os.environ.get(variable) == "success" else "FAIL",
+            }
+    if args.profile in {"FULL", "CERTIFICATION"}:
+        results["userland-current-run"] = {
+            "status": "PASS" if os.environ.get("USERLAND_RESULT") == "success" else "FAIL",
         }
     for workflow, jobs in PROFILES[args.profile].items():
         try:

@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ["ci-fabric/**"]
   workflow_dispatch:
     inputs:
       profile:
@@ -34,6 +35,9 @@ jobs:
       p13: ${{ steps.plan.outputs.p13 }}
       ipc: ${{ steps.plan.outputs.ipc }}
       any: ${{ steps.plan.outputs.any }}
+      profile: ${{ steps.plan.outputs.profile }}
+      proof_branch: ${{ steps.plan.outputs.proof_branch }}
+      proof_fabric: ${{ steps.plan.outputs.proof_fabric }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,10 +50,12 @@ jobs:
           TEST_SHA: ${{ github.sha }}
           MANUAL_FABRIC: ${{ inputs.fabric }}
           MANUAL_PROFILE: ${{ inputs.profile }}
+          PROOF_REF: ${{ github.ref }}
+          PROOF_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$TEST_SHA" ]
-          if [ -z "$MANUAL_FABRIC" ]; then
+          if [[ "$PROOF_REF" != refs/tags/ci-fabric/* ]] && [ -z "$MANUAL_FABRIC" ]; then
             if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
               python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$TEST_SHA"
             else
@@ -57,7 +63,7 @@ jobs:
             fi
           fi
           python3 - <<'PY'
-          import json, os, sys
+          import json, os, subprocess, sys
           from pathlib import Path
 
           sys.path.insert(0, "tools/ci")
@@ -67,6 +73,23 @@ jobs:
           manual = os.environ["MANUAL_FABRIC"]
           domains = MIGRATED
           profile = os.environ["MANUAL_PROFILE"]
+          branch = os.environ["PROOF_BRANCH"]
+          prefix = "refs/tags/ci-fabric/"
+          ref = os.environ["PROOF_REF"]
+          if ref.startswith(prefix):
+              parts = ref.removeprefix(prefix).split("/", 2)
+              if len(parts) != 3 or parts[0] not in {"FAST", "FABRIC", "FULL", "CERTIFICATION"}:
+                  raise ValueError("tag attendu : ci-fabric/PROFIL/SHA/branche")
+              profile, requested_sha, branch = parts
+              if requested_sha != os.environ["TEST_SHA"]:
+                  raise ValueError("le SHA inscrit dans le tag doit être le commit testé")
+              branch_sha = subprocess.check_output(
+                  ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+                  text=True,
+              ).strip()
+              if branch_sha != os.environ["TEST_SHA"]:
+                  raise ValueError("le tag et la branche de preuve doivent désigner le même commit")
+              manual = "all"
           if profile in {"FULL", "CERTIFICATION"} and manual != "all":
               raise ValueError("le profil exige le périmètre Fabric complet")
           if profile == "FAST":
@@ -86,6 +109,9 @@ jobs:
                     "contracts": {key: value for key, value in contracts.items() if value["owner"] in selected}}
           Path("fabric-plan.json").write_text(json.dumps(report, indent=2) + "\n")
           with output.open("a") as stream:
+              print(f"profile={profile}", file=stream)
+              print(f"proof_branch={branch}", file=stream)
+              print(f"proof_fabric={manual}", file=stream)
               for domain in sorted(domains):
                   print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
               print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage', 'p13'} else 'false'}", file=stream)
@@ -168,10 +194,31 @@ jobs:
           if-no-files-found: error
 
 
+  fast:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FAST' || needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    uses: ./.github/workflows/ci.yml
+    with:
+      exhaustive: true
+
+  non-regression:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FAST' || needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    uses: ./.github/workflows/non-regression.yml
+
+  userland:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/userland.yml
+    with:
+      campaign: true
+
   qualification:
-    name: ${{ (inputs.profile == 'FULL' || inputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all') }}
-    needs: verdict
+    name: ${{ (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
+    if: ${{ always() && (startsWith(github.ref, 'refs/tags/ci-fabric/') || (github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all'))) }}
+    needs: [plan, verdict, fast, non-regression, userland]
     permissions:
       contents: read
       actions: read
@@ -184,9 +231,13 @@ jobs:
       - name: Exiger les preuves du profil sur le SHA exact
         env:
           GH_TOKEN: ${{ github.token }}
-          PROFILE: ${{ inputs.profile }}
-          FABRIC_INPUT: ${{ inputs.fabric }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          FABRIC_PROOF_BRANCH: ${{ needs.plan.outputs.proof_branch }}
+          FABRIC_INPUT: ${{ needs.plan.outputs.proof_fabric }}
           FABRIC_RESULT: ${{ needs.verdict.result }}
+          USERLAND_RESULT: ${{ needs.userland.result }}
+          FAST_RESULT: ${{ needs.fast.result }}
+          NON_REGRESSION_RESULT: ${{ needs.non-regression.result }}
         run: python3 tools/ci/fabric_merge_gate.py "$PROFILE"
       - if: always()
         uses: actions/upload-artifact@v4
