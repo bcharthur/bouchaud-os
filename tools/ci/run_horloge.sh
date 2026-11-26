@@ -9,6 +9,9 @@
 # juge exterieur mesure le temps de l'hote entre les marqueurs DEBUT et FIN
 # a l'ecriture de leur fin de ligne dans l'UART de QEMU. Le lecteur du tube
 # conserve aussi ses timestamps pour diagnostiquer les retards en aval.
+# La vidange asynchrone peut retarder DEBUT et FIN differemment, surtout
+# derriere le journal de demarrage. Ce banc dedie vide l'anneau et bascule
+# la console en synchrone avant la sonde pour comparer les memes intervalles.
 #
 #   HORLOGE_AUDIT d= invite_ms= hote_ms= ecart_ms= ecart_pct= reel_decalage_ms=
 #
@@ -37,16 +40,11 @@ rm -rf "tools/userland/$OUT"
 (cd tools/userland && OUT=$OUT ./build.sh musl >/dev/null)
 mkdir -p "$SCENARIO/bin"
 cp "tools/userland/$OUT/horloge-probe" "$SCENARIO/bin/"
-{
-  if [ "${BO_HORLOGE_CONSOLE_SYNC:-0}" = 1 ]; then
-    echo "console-async off"
-    echo "console-async etat"
-  fi
-  cat <<AUTORUN
+cat > "$SCENARIO/autorun" <<AUTORUN
+console-async off
 /bin/horloge-probe $PLAFOND
 echo HORLOGE_FIN_BANC
 AUTORUN
-} > "$SCENARIO/autorun"
 (cd tools/userland && IMAGE="$PWD/../../$IMAGE" ./mkdisk.sh "$PWD/../../$SCENARIO" >/dev/null)
 
 ACCEL="-cpu max"
@@ -170,6 +168,11 @@ sys.exit(1 if echecs else 0)
 PY
 rm -f horodateur.py
 if [ "$etat" != fini ]; then echo "HORLOGE_ECHEC banc=$etat" >&2; exit 1; fi
+# Le bilan de la bascule doit preceder la premiere mesure.
+awk '/HORLOGE_DEBUT d=1[[:space:]]/ { exit }
+     /BOUCHAUD_CONSOLE_BILAN active=/ { synchrone = /active=0 repli_securite=0 / }
+     END { exit !synchrone }' "$LOG" ||
+    { echo "HORLOGE_ECHEC console synchrone non confirmee" >&2; exit 1; }
 grep -aq HORLOGE_INVITE_OK "$LOG" || { echo "HORLOGE_ECHEC verifications de l'invite" >&2; exit 1; }
 [ "$rc_hote" -eq 0 ] || { echo "HORLOGE_ECHEC duree vue par l'invite contre l'hote" >&2; exit 1; }
 echo HORLOGE_AUDIT_OK

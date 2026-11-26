@@ -126,8 +126,9 @@ jobs:
           exit "$r"
       - name: Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # Le verdict utilise le temps de l'hote a l'UART QEMU (1 s : 50 ms ;
-        # 10 et 60 s : 1 %). Conserver aussi les timestamps du lecteur.
+        # Console synchrone pour aligner les mesures de la sonde avec
+        # l'UART QEMU (1 s : 50 ms ; 10 et 60 s : 1 %). Conserver aussi
+        # les timestamps du lecteur.
         # Deux boots KVM indépendants doivent tous deux passer.
         run: |
           rc=0
@@ -147,48 +148,6 @@ jobs:
             fi
           done
           exit "$rc"
-      - name: Diagnostic horloge KVM SMP4, main et PR, console async et sync
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        env:
-          BASE_HORLOGE: fdef86bef300852a37584eefdb86b0dc27f71082
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$BASE_HORLOGE"
-          git worktree add --detach "$RUNNER_TEMP/horloge-main" "$BASE_HORLOGE"
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/horloge-main/target"
-          (
-            cd "$RUNNER_TEMP/horloge-main"
-            cargo bootimage
-          )
-          mkdir -p diagnostic-horloge
-          for repetition in 1 2; do
-            for noyau in main pr; do
-              boot=target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-              if [ "$noyau" = main ]; then
-                boot="$CARGO_TARGET_DIR/$boot"
-              fi
-              for sync in 0 1; do
-                essai="diagnostic-horloge/${noyau}-${repetition}-sync${sync}"
-                mkdir -p "$essai"
-                sha256sum "$boot" > "$essai/image.sha256"
-                set +e
-                BO_QEMU_KVM=1 BO_HORLOGE_CONSOLE_SYNC="$sync" tools/ci/run_horloge.sh "$boot" 60 | tee "$essai/verdict.log"
-                rc=${PIPESTATUS[0]}
-                set -e
-                echo "HORLOGE_DIAGNOSTIC noyau=$noyau repetition=$repetition sync=$sync rc=$rc"
-                for fichier in serie-horloge.log horloge-uart.log horloge-horodatage.tsv; do
-                  if [ -f "$fichier" ]; then cp "$fichier" "$essai/"; fi
-                done
-              done
-            done
-          done
-      - name: Archiver le diagnostic horloge KVM
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: horloge-kvm-comparaison
-          path: diagnostic-horloge/
-          if-no-files-found: warn
       - name: ATA -- integrite du chemin DMA et repli PIO sur erreur injectee (TCG puis KVM)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_ATA_INTEGRITE_V1 : 2 048 secteurs ecrits, vides, relus et
