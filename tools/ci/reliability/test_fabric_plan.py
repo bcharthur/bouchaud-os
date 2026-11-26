@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import yaml
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -13,6 +14,21 @@ from fabric_plan import COMPAT, CONSUMERS, MIGRATED, plan
 
 
 class FabricPlan(unittest.TestCase):
+    def test_les_contrats_pointent_vers_des_bancs_actifs(self):
+        root = Path(__file__).resolve().parents[3]
+        contracts = json.loads((root / "tools/ci/fabric_contracts.json").read_text())
+        for identifier, record in contracts.items():
+            with self.subTest(contract=identifier):
+                document = yaml.safe_load((root / record["workflow"]).read_text())
+                job = document["jobs"][record["job"]]
+                self.assertFalse(job.get("continue-on-error"))
+                by_name = {step.get("name"): step for step in job["steps"]}
+                for name in record["steps"]:
+                    self.assertIn("run", by_name[name])
+                    self.assertFalse(by_name[name].get("continue-on-error"))
+                    self.assertNotIn(by_name[name].get("if"), ("false", False, "${{ false }}"))
+                self.assertTrue(record["evidence"])
+
     def test_empreinte_historique(self):
         for domain, patterns in COMPAT.items():
             for pattern in patterns:
@@ -37,6 +53,7 @@ class FabricPlan(unittest.TestCase):
                 "gpu": "true", "security": "false", "storage": "false", "any": "true",
             }},
             "kernel": {"result": "success"},
+            "gpu-witness": {"result": "success"},
             "gpu": {"result": "skipped"},
             "security": {"result": "skipped"},
             "storage": {"result": "skipped"},
@@ -48,6 +65,19 @@ class FabricPlan(unittest.TestCase):
         needs["plan"]["outputs"]["any"] = "false"
         self.assertEqual(verdict(needs)["plan"], "FAIL")
         self.assertEqual(verdict(needs)["kernel"], "BLOCKED")
+
+    def test_configuration_du_temoin_refusee_comme_standard(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(fabric_bootimage, "identity",
+                side_effect=lambda variant: {"source_sha": "abc", "features": variant}), patch.object(
+                fabric_bootimage.subprocess, "check_output", return_value="rustc"):
+            root = Path(root)
+            image = root / "bootimage.bin"
+            image.write_bytes(b"witness")
+            archive = root / "archive"
+            with patch.object(fabric_bootimage, "BOOT", image):
+                fabric_bootimage.publish(archive, "banc-gpu-composition-panne")
+                with self.assertRaisesRegex(ValueError, "features"):
+                    fabric_bootimage.install(archive)
 
     def test_artefact_mutants(self):
         with tempfile.TemporaryDirectory() as root, patch.object(fabric_bootimage, "identity", return_value={

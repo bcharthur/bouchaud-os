@@ -15,6 +15,10 @@ on:
         description: Image BIOS standard du run
         required: true
         type: string
+      witness:
+        description: Image distincte avec panne GPU injectée
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -57,13 +61,13 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Image de banc -- panne GPU injectee (non livrable)
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.witness }}
+          variant: banc-gpu-composition-panne
+      - name: Vérifier la séparation de l’image livrée et du témoin GPU
         run: |
-          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livre.bin
-          cargo bootimage --features banc-gpu-composition-panne
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-panne.bin
-          cp boot-livre.bin target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           if grep -aq GPU_COMPOSITION_INJECTION boot-livre.bin; then echo "INJECTION_DANS_L_IMAGE_LIVREE" >&2; exit 1; fi
           grep -aq GPU_COMPOSITION_INJECTION boot-panne.bin
       - name: Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)

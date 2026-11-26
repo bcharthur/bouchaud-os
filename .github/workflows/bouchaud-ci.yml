@@ -67,7 +67,9 @@ jobs:
               entry = next(line for line in output.read_text().splitlines() if line.startswith("fabric_plan="))
               plan = json.loads(entry.removeprefix("fabric_plan="))
               selected = sorted(domains & set(plan["domains"]))
-          report = {**plan, "profile": "FABRIC", "sha": os.environ["TEST_SHA"], "migrated": selected}
+          contracts = json.loads(Path("tools/ci/fabric_contracts.json").read_text())
+          report = {**plan, "profile": "FABRIC", "sha": os.environ["TEST_SHA"], "migrated": selected,
+                    "contracts": {key: value for key, value in contracts.items() if value["owner"] in selected}}
           Path("fabric-plan.json").write_text(json.dumps(report, indent=2) + "\n")
           with output.open("a") as stream:
               for domain in sorted(domains):
@@ -85,8 +87,15 @@ jobs:
     if: needs.plan.outputs.any == 'true'
     uses: ./.github/workflows/build-kernel.yml
 
+  gpu-witness:
+    needs: plan
+    if: needs.plan.outputs.gpu == 'true'
+    uses: ./.github/workflows/build-kernel.yml
+    with:
+      variant: banc-gpu-composition-panne
+
   gpu:
-    needs: [plan, kernel]
+    needs: [plan, kernel, gpu-witness]
     if: needs.plan.outputs.gpu == 'true'
     permissions:
       contents: read
@@ -94,6 +103,7 @@ jobs:
     uses: ./.github/workflows/gpu-composition.yml
     with:
       artifact: ${{ needs.kernel.outputs.artifact }}
+      witness: ${{ needs.gpu-witness.outputs.artifact }}
 
   security:
     needs: [plan, kernel]
@@ -111,7 +121,7 @@ jobs:
 
   verdict:
     name: Bouchaud Fabric Gate
-    needs: [plan, kernel, gpu, security, storage]
+    needs: [plan, kernel, gpu-witness, gpu, security, storage]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

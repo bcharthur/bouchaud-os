@@ -75,7 +75,9 @@ leurs qualifications.
 | STORAGE.L6.UNIX_FS | Stockage | L6 | TCG/KVM, témoin de persistance et tests hôte | Verdict Unix/FS et journaux |
 | STORAGE.L6.OTA_AB_ROLLBACK | Mise à jour | L6 | Matrice NVMe/USB et variantes OTA | Chronologies et verdict de la matrice |
 
-Ces contrats sont bloquants quand le plan les sélectionne. Les commandes,
+Le registre exécutable `tools/ci/fabric_contracts.json` relie les contrats
+aux étapes, preuves, dépendances et configurations. Le plan publié inclut
+les contrats sélectionnés. Ces contrats sont bloquants quand le plan les sélectionne. Les commandes,
 scénarios, témoins et critères existants restent dans leurs workflows
 réutilisables. Le plan indique aussi les domaines transitifs en attente
 de migration. Le verdict Fabric couvre les trois domaines migrés et
@@ -120,6 +122,10 @@ Tous les bancs du nouveau périmètre ont réussi.
 | Artefacts | 6 | 9 |
 | Octets listés par l’API | 6 585 302 | 12 440 439 |
 
+Après cette mesure, le témoin GPU à panne injectée est devenu une
+deuxième identité de compilation. Les bras TCG et KVM vérifient le même
+témoin, produit séparément de l’image standard.
+
 La durée cumulée des jobs baisse de 12 %, tandis que l’attente et les
 dépendances du nouveau run allongent le délai observé. L'image commune
 et la publication du plan et du verdict augmentent le volume archivé.
@@ -141,7 +147,9 @@ pour contrôler construction et préparation, ou retirer
 Le contrôle échoue si Git relève une modification à l’entrée ou à la fin.
 Le job Windows qui vérifie le vrai artefact exécute aussi la préparation
 complète avec ce contrôle. Le cycle avec démarrage et arrêt QEMU
-nécessite un hôte de test Windows.
+nécessite un hôte de test Windows. La préparation est verte sur le SHA
+`45bc53be65c1212ca9f3552aa8f1c66ee7f04e78`.
+[Préparation Windows](https://github.com/bcharthur/bouchaud-os/actions/runs/45853872163/job/140027460810)
 
 ## Protection et retour arrière
 

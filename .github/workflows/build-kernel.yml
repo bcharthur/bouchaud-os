@@ -1,6 +1,11 @@
 name: Build kernel
 on:
   workflow_call:
+    inputs:
+      variant:
+        description: Identité de la configuration à compiler
+        type: string
+        default: default
     outputs:
       artifact:
         description: Image BIOS standard de la qualification
@@ -22,16 +27,28 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin
             target
-          key: fabric-kernel-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          key: fabric-kernel-${{ inputs.variant }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            fabric-kernel-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-      - name: Construire l'image BIOS standard
-        run: tools/ci/build_kernel.sh
+            fabric-kernel-${{ inputs.variant }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Construire l'image BIOS
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          case "$VARIANT" in
+            default) tools/ci/build_kernel.sh ;;
+            banc-gpu-composition-panne)
+              command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+              BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" cargo bootimage --features "$VARIANT"
+              ;;
+            *) exit 1 ;;
+          esac
       - name: Établir l'identité de compilation
         id: artifact
+        env:
+          VARIANT: ${{ inputs.variant }}
         run: |
-          python3 tools/ci/fabric_bootimage.py publish target/fabric-publication
-          echo "name=fabric-bios-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          python3 tools/ci/fabric_bootimage.py publish target/fabric-publication --variant "$VARIANT"
+          echo "name=fabric-bios-${VARIANT}-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.name }}

@@ -28,9 +28,10 @@ def verdict(needs):
     if plan_result == "success" and not coherent:
         report["plan"] = "FAIL"
 
-    for name in ("kernel", *sorted(MIGRATED)):
+    for name in ("kernel", "gpu-witness", *sorted(MIGRATED)):
         result = needs.get(name, {}).get("result")
-        flag = outputs.get("any") if name == "kernel" else flags[name]
+        key = {"kernel": "any", "gpu-witness": "gpu"}.get(name, name)
+        flag = outputs.get(key)
         if report["plan"] != "PASS":
             report[name] = "BLOCKED"
         elif flag == "true":

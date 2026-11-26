@@ -1,0 +1,212 @@
+{
+  "GPU.L3.RING3_BLIT": {
+    "owner": "gpu",
+    "layer": "L3",
+    "workflow": ".github/workflows/gpu-composition.yml",
+    "job": "banc",
+    "steps": [
+      "Virtgpu ring 3, BLIT relu au pixel et profil 2D (TCG)"
+    ],
+    "dependencies": [
+      "kernel",
+      "gpu-witness",
+      "ladybird"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG"
+    ],
+    "criteria": "GPU ring 3 et pixels conformes",
+    "evidence": [
+      "gpu-composition-${{ matrix.accel }}"
+    ]
+  },
+  "GPU.L4.COMPOSITION": {
+    "owner": "gpu",
+    "layer": "L4",
+    "workflow": ".github/workflows/gpu-composition.yml",
+    "job": "banc",
+    "steps": [
+      "Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)"
+    ],
+    "dependencies": [
+      "kernel",
+      "gpu-witness",
+      "ladybird"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG",
+      "KVM"
+    ],
+    "criteria": "Mire conforme, témoin de panne et repli 2D",
+    "evidence": [
+      "gpu-composition-${{ matrix.accel }}"
+    ]
+  },
+  "GPU.L7.LADYBIRD_VIRGL": {
+    "owner": "gpu",
+    "layer": "L7",
+    "workflow": ".github/workflows/gpu-composition.yml",
+    "job": "ladybird-gpu",
+    "steps": [
+      "Verifier la provenance de l'artefact et les entrees du SHA",
+      "Verdict de composition GPU du navigateur",
+      "Benchmark Ladybird (GPU on / off)"
+    ],
+    "dependencies": [
+      "kernel",
+      "gpu-witness",
+      "ladybird"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "VIRGL",
+      "CPU témoin"
+    ],
+    "criteria": "Provenance identique, publication GPU démontrée et preuve A/B",
+    "evidence": [
+      "gpu-composition-ladybird"
+    ]
+  },
+  "SECURITY.L3.STRUCTURE": {
+    "owner": "security",
+    "layer": "L3",
+    "workflow": ".github/workflows/security-runtime.yml",
+    "job": "security-runtime",
+    "steps": [
+      "Security structural guard",
+      "Security policy host tests"
+    ],
+    "dependencies": [
+      "kernel"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "hôte"
+    ],
+    "criteria": "Garde et assertions hôte au vert",
+    "evidence": [
+      "security-runtime-proof"
+    ]
+  },
+  "SECURITY.L5.RING3": {
+    "owner": "security",
+    "layer": "L5",
+    "workflow": ".github/workflows/security-runtime.yml",
+    "job": "security-runtime",
+    "steps": [
+      "Security ring3 proof"
+    ],
+    "dependencies": [
+      "kernel"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG"
+    ],
+    "criteria": "Contrat d'isolation ring 3 accepté",
+    "evidence": [
+      "security-runtime-proof"
+    ]
+  },
+  "SECURITY.L6.MEDIA_WRITE": {
+    "owner": "security",
+    "layer": "L6",
+    "workflow": ".github/workflows/security-runtime.yml",
+    "job": "cle-usb-test",
+    "steps": [
+      "Garde des chemins d'ecriture (mutations)",
+      "Regle pure et suivi NVMe (tests hote)",
+      "Banc QEMU TCG",
+      "Banc QEMU KVM"
+    ],
+    "dependencies": [
+      "kernel"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "hôte",
+      "TCG",
+      "KVM"
+    ],
+    "criteria": "Témoins, contrôle du support autorisé et interdiction des autres écritures",
+    "evidence": [
+      "cle-usb-test-proof"
+    ]
+  },
+  "STORAGE.L3.HOST_TREE": {
+    "owner": "storage",
+    "layer": "L3",
+    "workflow": ".github/workflows/unix-fs-reliability.yml",
+    "job": "unix-fs",
+    "steps": [
+      "Classement du banc (tests)",
+      "Parcours de find (tests hote)"
+    ],
+    "dependencies": [
+      "kernel"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "hôte"
+    ],
+    "criteria": "Verdicts et traversée hôte acceptés",
+    "evidence": [
+      "unix-fs-reliability"
+    ]
+  },
+  "STORAGE.L6.UNIX_FS": {
+    "owner": "storage",
+    "layer": "L6",
+    "workflow": ".github/workflows/unix-fs-reliability.yml",
+    "job": "unix-fs",
+    "steps": [
+      "Scenarios find et commandes (TCG)",
+      "Scenarios find et commandes (KVM)",
+      "Temoin -- persistance avec zone effacee entre deux demarrages (DOIT echouer)"
+    ],
+    "dependencies": [
+      "kernel"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG",
+      "KVM"
+    ],
+    "criteria": "Tous les scénarios passent et le témoin est rejeté",
+    "evidence": [
+      "unix-fs-reliability"
+    ]
+  },
+  "STORAGE.L6.OTA_AB_ROLLBACK": {
+    "owner": "update",
+    "layer": "L6",
+    "workflow": ".github/workflows/system-update.yml",
+    "job": "ab-rollback",
+    "steps": [
+      "Rollback A/B (${{ matrix.scenario }}, ${{ matrix.support }})"
+    ],
+    "dependencies": [
+      "ipc-compatibility"
+    ],
+    "criticality": "required",
+    "profile": "FABRIC",
+    "configurations": [
+      "TCG NVMe",
+      "TCG USB"
+    ],
+    "criteria": "Les séquences de démarrage, refus et états durables exigés sont observés",
+    "evidence": [
+      "ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}"
+    ]
+  }
+}
