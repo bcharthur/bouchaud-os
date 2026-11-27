@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   paired:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     env:
@@ -26,7 +27,15 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Préparer QEMU et les outils Ubuntu signés
-        run: candidate/tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
+        run: |
+          set -euo pipefail
+          source_list=/etc/apt/sources.list.d/ubuntu.sources
+          test -s "$source_list"
+          opts=(-o "Dir::Etc::sourcelist=$source_list" -o Dir::Etc::sourceparts=-
+                -o APT::Update::Error-Mode=any -o Acquire::Retries=3
+                -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${opts[@]}" update
+          sudo timeout 900 apt-get "${opts[@]}" install -y --no-install-recommends             qemu-system-x86 musl-tools build-essential file
       - name: Construire les deux BIOS et un scénario commun
         run: |
           set -euo pipefail
@@ -97,4 +106,37 @@ jobs:
             ${{ runner.temp }}/diag-smp4/*.sha256
             ${{ runner.temp }}/diag-smp4/*/*.log
             ${{ runner.temp }}/diag-smp4/*/verdict.json
+          if-no-files-found: error
+
+
+  audit-archives:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Vérifier et analyser les 68 cycles archivés
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for id in 15197547942 15200346928; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$id.zip"
+          done
+          sha256sum -c <<'SUMS'
+          843b5f63a255dfe1dec54f585e3ee28673082770fd8905d6a7c3716ef3fba08b  15197547942.zip
+          89882393072e7c448a4595c2c1b0261af2ed1a829afb71f879ae301a77d33033  15200346928.zip
+          SUMS
+          python3 tools/ci/analyse_diag_smp4.py 15197547942.zip 15200346928.zip | tee diag-distributions.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diag-distributions-smp4
+          path: |
+            diag-observations.csv
+            diag-distributions.txt
           if-no-files-found: error
