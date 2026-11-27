@@ -149,3 +149,24 @@ partage. La matrice d'échecs partiels dans le vrai noyau et l'observation
 du TLB distant à ces frontières restent des limites de couverture. Le
 recyclage autonome des slots et des piles reste suivi dans
 [#385](https://github.com/bcharthur/bouchaud-os/issues/385).
+
+## Correction SMP1 · preuve de battement et première élection
+
+Dans l’amorçage legacy, `net-rx-poll` (PID 4, TID 100), la pompe de réception réseau, était mis en file avant la preuve de battement. Sur le seul CPU, l’attente active de 200 ms se déroulait sur la pile d’amorçage, sans tâche courante susceptible de céder le processeur. Les interruptions étaient livrées et comptées. Le fil n’était élu qu’à l’entrée effective dans l’ordonnanceur. #387 effectue la mesure SMP1 dans le contexte ordonnancé existant `avec_tache` et appelle `schedule()` pendant l’attente. Les compteurs, l’échéance de 200 ms, le plafond de l’attente et le chemin multicoeur restent identiques. [Correctif #387](https://github.com/bcharthur/bouchaud-os/pull/387)
+
+Les deux archives GitHub ont été vérifiées par SHA-256. Les quantiles de rang supérieur portent sur un maximum par cycle pour la latence globale et interactive, et sur le maximum attribué à la pompe dans les instantanés du journal. Ce sont deux campagnes historiques distinctes. Le témoin apparié sur un même runner isole l’effet du correctif.
+
+| Mesure en ms | Cycles | Minimum | Médiane | P95 | P99 | Maximum |
+|---|---:|---:|---:|---:|---:|---:|
+| Prêt → élu, global avant | 207 | 250,817 | 256,854 | 259,761 | 260,438 | 260,579 |
+| Prêt → élu, global après | 186 | 51,372 | 56,140 | 61,692 | 66,009 | 67,089 |
+| Pompe RX avant | 207 | 250,817 | 256,854 | 259,761 | 260,438 | 260,579 |
+| Pompe RX après | 186 | 25,522 | 26,023 | 27,576 | 28,173 | 29,256 |
+| Prêt → élu, interactif avant | 207 | 30,555 | 36,670 | 38,594 | 39,039 | 39,143 |
+| Prêt → élu, interactif après | 186 | 44,106 | 48,971 | 54,045 | 57,779 | 58,467 |
+
+Les 207 cycles historiques ont dépassé le budget global de 250 ms. Les 186 cycles corrigés et la réévaluation des budgets sont tous OK. Le maximum interactif a augmenté entre les deux campagnes et reste sous son budget de 100 ms. Les journaux ne fournissent pas les attentes individuelles de chaque fil pour chaque élection. [Avant](https://github.com/bcharthur/bouchaud-os/actions/runs/45986494632/artifacts/15201506009) · [Après](https://github.com/bcharthur/bouchaud-os/actions/runs/46039313879/artifacts/15224995679)
+
+Quatre comparaisons appariées reproduisent le dépassement avant correction et sa disparition après. Les trois fenêtres instrumentées durent de 200,060792 à 200,066548 ms avec 50 interruptions. Les comparaisons SMP2 et SMP4 passent. En SMP8, les deux bras restent `NON_QUALIFIANT` avec 94 et 97 réveils inexpliqués sur 300, sur un runner à quatre CPU visibles. [Témoin initial](https://github.com/bcharthur/bouchaud-os/actions/runs/46036290722) · [Comparaisons et mesure de fenêtre](https://github.com/bcharthur/bouchaud-os/actions/runs/46039313879)
+
+Le P13 initial SMP2 a ouvert quatre fenêtres de réarmement de comptabilité après idle avec zéro cession, zéro chevauchement et une sonde OK. Sans cession, le témoin ne vérifie pas le contrat. La même signature est archivée avant #387. La comparaison ciblée du même banc en ABBA sur main et le SHA exact de #387 exerce le contrat sur les quatre boots, avec respectivement 4, 2, 3 et 2 cessions dans les bras corrigés, zéro chevauchement et des témoins négatifs actifs. Le P13 initial conserve son verdict. [P13 initial](https://github.com/bcharthur/bouchaud-os/actions/runs/46036331034/job/140632624021) · [Précédent](https://github.com/bcharthur/bouchaud-os/actions/runs/45898617281/job/140185430259) · [ABBA ciblé](https://github.com/bcharthur/bouchaud-os/actions/runs/46046235648)
