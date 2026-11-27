@@ -11,7 +11,7 @@ import zipfile
 
 
 PHASES = r"sous charge \((normal|interactif)\)"
-CENTILES = re.compile(PHASES + r" median\s+\d+ us\s+p95\s+(\d+) us\s+p99\s+(\d+) us\s+pire\s+(\d+) us(.*)")
+CENTILES = re.compile(PHASES + r"\s+median\s+\d+ us\s+p95\s+(\d+) us\s+p99\s+(\d+) us\s+pire\s+(\d+) us(.*)")
 ATTRIBUTION = re.compile(r"attribution " + PHASES + r" : .*?tardif_us=(\d+) attente_us=(\d+) reprise_us=(\d+)")
 ATTEMPT = re.compile(r"tentative (\d+)/\d+ : (QUALIFIE_OK|QUALIFIE_ECHEC|NON_QUALIFIANT)")
 
@@ -58,6 +58,11 @@ def main():
     print("Verdicts:", dict(sorted(observed.items())))
     if observed != {("main", "OK"): 33, ("main", "NON_QUALIFIANT"): 1, ("candidate", "OK"): 34}:
         raise SystemExit("Unexpected archive coverage or cycle verdicts")
+    for arm, count in (("main", 33), ("candidate", 34)):
+        for phase in ("normal", "interactif"):
+            for kind, population in (("centiles", "tous"), ("centiles", "propres"), ("attribution", "tous")):
+                if len(values[arm, phase, kind, population]) != count:
+                    raise SystemExit(f"Missing phase observations: {arm}/{phase}/{kind}/{population}")
     for key, rows in sorted(values.items()):
         fields = ("p95", "p99", "max") if key[2] == "centiles" else ("réveil", "élection", "reprise")
         print(" / ".join(key), f"n={len(rows)}",

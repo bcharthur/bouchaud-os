@@ -140,3 +140,26 @@ jobs:
             diag-observations.csv
             diag-distributions.txt
           if-no-files-found: error
+
+
+  qualify-nightly:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Déclencher le Nightly de la branche indépendante
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: 38dfb6d756ad22831f98626ca2299c11799de839
+        run: |
+          set -euo pipefail
+          ref=codex/nightly-concurrency
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$ref" --jq .object.sha)
+          test "$actual" = "$EXPECTED_SHA"
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/nightly.yml/runs?head_sha=$EXPECTED_SHA&event=workflow_dispatch" --jq .total_count)
+          if [ "$existing" = 0 ]; then
+            gh workflow run nightly.yml --repo "$GITHUB_REPOSITORY" --ref "$ref"
+          fi
