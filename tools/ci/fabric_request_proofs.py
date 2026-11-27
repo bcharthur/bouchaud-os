@@ -4,8 +4,31 @@ import argparse
 import json
 import os
 import subprocess
+import time
 
 from fabric_merge_gate import PROFILES, QUALIFICATION, latest_run
+
+
+POLL_INTERVAL_SECONDS = 45
+PREREQUISITE_TIMEOUT_SECONDS = 180 * 60
+
+
+def wait_for_prerequisites(repo, sha, branch, workflows):
+    deadline = time.monotonic() + PREREQUISITE_TIMEOUT_SECONDS
+    while True:
+        pending = []
+        for workflow in workflows:
+            run = latest_run(repo, sha, branch, workflow)
+            if run is None or run["status"] != "completed":
+                pending.append(workflow)
+            elif run["conclusion"] != "success":
+                raise SystemExit(f"Prérequis en échec : {workflow} (run {run['id']})")
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"Prérequis encore absents ou en cours : {', '.join(pending)}")
+        print(f"Attente des prérequis : {', '.join(pending)}", flush=True)
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def main():
@@ -25,12 +48,16 @@ def main():
         if latest_run(repo, sha, branch, workflow) is not None:
             print(f"{workflow} : campagne déjà enregistrée sur ce SHA", flush=True)
             continue
-        if any(
-            (latest_run(repo, sha, branch, preceding) or {}).get("conclusion") != "success"
-            for preceding in campaign.get("after", [])
-        ):
-            print(f"{workflow} : en attente de ses prérequis", flush=True)
-            continue
+        if campaign.get("after"):
+            wait_for_prerequisites(repo, sha, branch, campaign["after"])
+            if latest_run(repo, sha, branch, workflow) is not None:
+                continue
+            actual = subprocess.check_output(
+                ["gh", "api", f"repos/{repo}/git/ref/heads/{branch}", "--jq", ".object.sha"],
+                text=True,
+            ).strip()
+            if actual != sha:
+                raise SystemExit("La branche de preuve a changé pendant l’attente.")
         subprocess.run(
             ["gh", "workflow", "run", workflow, "--repo", repo, "--ref", branch, "--json"],
             input=json.dumps(campaign["dispatch_inputs"]), text=True, check=True,

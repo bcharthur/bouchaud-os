@@ -269,7 +269,7 @@ indépendantes Integration, Reliability V3, Ladybird strict, Nightly,
 endurance, Userland et Windows. CERTIFICATION exige également le verdict
 P13 final sur le même commit, avec ses runners dédiés.
 
-Pour FULL et CERTIFICATION, le job Bouchaud Merge Gate exige
+Pour FULL et CERTIFICATION, le job Bouchaud profil exige
 `fabric=all`. Il vérifie les campagnes indépendantes déjà lancées
 manuellement sur la même branche et le même SHA. Il rapporte l’identifiant
 et la tentative vérifiés. Un run absent, en attente, en échec, ou un job
@@ -312,12 +312,10 @@ Git propre. La preuve d'un démarrage et arrêt réels reste distincte.
 ### Verdict automatique de la PR
 
 `fabric_contracts.json` versionne les contrats et les exigences des
-quatre profils. Le check supplémentaire Bouchaud Merge Gate refuse
-une PR sans rapport FULL issu du tag de sa tête exacte. Il vérifie
-l'identité de l'arbre, la tentative, l'empreinte du registre et le
-contenu du rapport après vérification SHA-256 de l'archive GitHub.
-Une relance du workflow PR après la fin de FULL réévalue ce check.
-Les quatre checks historiques restent requis par les protections.
+quatre profils. Pour une PR relevant de FULL, le Merge Gate exige le
+rapport du tag de sa tête exacte. Il vérifie l'identité de l'arbre,
+la tentative, l'empreinte du registre et le contenu du rapport après
+vérification SHA-256 de l'archive GitHub.
 
 Les preuves des campagnes indépendantes doivent provenir du run et
 du SHA retenus. Le vérificateur rejette les archives obligatoires
@@ -328,5 +326,102 @@ Un tag FULL ou CERTIFICATION demande aussi les campagnes indépendantes
 manquantes via le jeton Actions du run, limité à ce job et à ce
 déclencheur. Il vérifie d'abord la tête distante. Si une campagne est
 encore en cours, le verdict refuse la qualification et peut être
-rejoué après la fin des preuves. Pour CERTIFICATION, une relance après
-Ladybird strict et Nightly permet de lancer le P13 dédié.
+rejoué après la fin des preuves. CERTIFICATION attend Ladybird strict
+et Nightly avant de demander le P13 dédié.
+
+### Réévaluer le verdict de fusion
+
+La vérification Fabric est une étape du check requis `integration-gate`.
+Elle intervient après sa synthèse historique, uniquement sur les PR.
+Le mode manuel Integration reste indépendant de FULL. Cette disposition
+évite une dépendance circulaire et conserve les quatre protections.
+
+Une modification strictement documentaire sélectionne FAST. Un changement
+classé et couvert par les domaines déjà orchestrés sélectionne FABRIC.
+Une catégorie inconnue, un changement de configuration CI ou un plan
+sans domaine migré impose FULL. La PR #386 relève de FULL. Les checks
+requis continuent à porter leurs exigences sur tous les profils.
+
+Si la preuve FULL ou FABRIC arrive après la première évaluation, rejouer
+le seul job `integration-gate` en utilisant ses identifiants numériques
+GitHub. La relance réutilise les dépendances déjà terminées.
+
+```bash
+gh run rerun --repo bcharthur/bouchaud-os RUN_ID --job INTEGRATION_GATE_JOB_ID
+```
+
+CERTIFICATION attend les résultats indépendants stricts de Ladybird et
+Nightly avant de déclencher le P13 dédié. Une expiration, une annulation
+ou un échec des prérequis bloque cette demande. L'attente est réservée
+au profil CERTIFICATION et ne retarde pas FAST ni FABRIC.
+
+`python3 tools/ci/audit_fabric_workflows.py --graph` signale également
+les changements de déclencheurs, de jobs, de matrices, de dépendances,
+de conditions et de déclarations de transfert d'artefacts. Les différences
+listées demandent une justification et une preuve d'exécution lorsque
+la couverture dépend d'un comportement de GitHub Actions.
+
+### Analyse de la campagne eda7fcee
+
+Le verdict PR a refusé une preuve FULL encore en cours
+(run 45898273048, job 140179551585). FAST a ensuite échoué sur
+`verifie-barrieres-ci.py` car un job autonome portant l'identifiant
+`merge-gate` n'était pas couvert par les règles de branche.
+Le job CERTIFICATION `request-proofs` a indiqué que ses prérequis
+étaient en attente sans démarrer le P13 dédié. Nightly a aussi subi
+une erreur HTTP 403 du dépôt APT Microsoft avant son banc mémoire.
+Dans CERTIFICATION, le bras IPC B2 a relevé un échec initial
+`raison=ecran`, la mort des deux premiers clients et une relance.
+La PR et les tags FABRIC et FULL du même SHA ont réussi ce job IPC.
+Le résultat rouge reste dans la campagne de certification.
+
+Sur les références 1e7e3118 et e3bd364b, le job critique
+`p13 / probes` démarre respectivement 1,92 et 12,25 minutes après
+création du run. Son exécution passe de 35,12 à 34,23 minutes.
+Le plan lui-même attend 0,33 puis 6,27 minutes avant de démarrer.
+La production BIOS dure 1,68 minute sur e3bd364b. Ces timestamps
+séparent les effets de file du coût d'exécution et ne permettent
+pas d'attribuer toute la hausse du délai à la dépendance BIOS.
+Les quatre tags du même SHA servent à l'audit des profils. Ils
+ne constituent pas une mesure du fonctionnement nominal.
+
+Sur les trois échecs APT d’eda7fcee, les journaux indiquent le même
+HTTP 403 sur le dépôt Microsoft du runner. Les jobs Nightly QEMU,
+Ladybird perf-surface et rollback A/B sélectionnent désormais les
+sources Ubuntu du runner pour les paquets de distribution. La clé
+et les options de signature de ces sources restent appliquées. Un
+échec des sources Ubuntu continue à rendre le job rouge.
+
+La comptabilité P13 de CERTIFICATION échoue au bras TCG SMP2.
+Le correctif relève cinq fenêtres et zéro cession, donc
+`COMPTA_INJECTION_NON_QUALIFIANT`. SMP4 relève dix cessions,
+dix réarmements évités et zéro chevauchement pour le correctif. La
+référence e3bd364b passe les deux bras. Deux rejeux TCG locaux du
+banc IPC bureau sur eda7fcee ont abouti à `BUREAU_RING3_OK`.
+Le défaut intermittent observé sur GitHub reste distinct de cette preuve.
+
+Endurance compare les tranches de 90 minutes sur runners Ubuntu hébergés
+du run main du 22 novembre (45017613543, 621a84a8) au run eda7fcee
+(45898521358). Ces runs partagent le protocole et utilisent des hôtes
+et des révisions différents.
+
+| Tranche | Main du 22 novembre | eda7fcee |
+|---|---|---|
+| SMP1 | Échec, 192 cycles avec dépassement | Échec, 204 cycles avec dépassement |
+| SMP4 | OK | NON_QUALIFIANT, 6 cycles |
+| SMP8 | Échec, 14 dépassements et 77 cycles non qualifiants | NON_QUALIFIANT, 85 cycles rapportés |
+
+SMP1 franchit notamment le budget `ready_latency_max_ms`. Le premier
+dépassement eda7fcee relevé donne 257,693 ms contre 250 ms, avec
+un p99 à 33,554 ms. Le défaut de budget existe sur main. SMP4 et
+SMP8 manquent de preuve hôte pour attribuer leurs réveils tardifs.
+Le résultat SMP4 mérite une comparaison appariée sur le main courant.
+Aucun résultat NON_QUALIFIANT n’est compté comme un succès.
+
+Le transfert et la vérification du BIOS dans `p13 / probes` prennent
+environ 2 s sur e3bd364b, avec 22 s de préparation de cargo-bootimage
+pour les témoins. La construction locale du BIOS de ce job prenait
+87 s sur 1e7e3118. Le producteur commun d’e3bd364b se termine vers
+8,57 minutes après la création du run, puis le job démarre vers
+12,25 minutes. La file et la disponibilité du producteur dominent
+le temps de transfert. Le banc conserve ses constructions de témoins.

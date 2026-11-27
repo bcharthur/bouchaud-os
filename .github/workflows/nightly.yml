@@ -49,6 +49,8 @@ jobs:
           retention-days: 14
 
   qemu-core:
+    env:
+      BO_APT_UBUNTU_ONLY: "1"
     name: nightly / qemu core
     needs: kernel-build
     runs-on: ubuntu-24.04

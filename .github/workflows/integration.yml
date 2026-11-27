@@ -841,6 +841,9 @@ jobs:
     name: integration-gate
     if: always()
     needs: [gate, kernel-build, qemu-smoke, nvme-gpt, system-health, python-disque, souffrance-verrou, tempete-exec, fenetre-migration, atelier-reactivite, os-primitives, mm-ng6, qt-pixel, dns-udp, bar-haute, dhcp-recuperation, usb-arbre, usb-branchement, usb-stockage, usb-liaison, brdp-qemu-e2e]
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     steps:
       - name: Synthese
@@ -901,3 +904,22 @@ jobs:
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
           done
           echo INTEGRATION_GATE_OK
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bouchaud Merge Gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_BRANCH: ${{ github.head_ref }}
+        run: python3 tools/ci/fabric_pr_gate.py
+      - if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-pr-verdict-${{ github.run_attempt }}
+          path: fabric-pr-verdict.json
+          if-no-files-found: warn

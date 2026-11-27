@@ -7,6 +7,8 @@ permissions:
 
 jobs:
   ab-rollback:
+    env:
+      BO_APT_UBUNTU_ONLY: "1"
     # BOUCHAUD_LOADER_AB_V1 : le chargeur A/B sous OVMF, un QEMU par boot sur le
     # MEME disque, coupure SIGKILL a chaque boot. Candidat qui panique, candidat
     # qui gele, une copie META corrompue (chacune), les deux corrompues ; puis

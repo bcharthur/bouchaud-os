@@ -42,37 +42,40 @@ def evidence(repo, sha, branch, workflow, required, artifacts=()):
     if run["status"] != "completed" or run["conclusion"] != "success":
         return {**proof, "conclusion": run["conclusion"], "run_status": run["status"]}
     jobs = api(
-        f"repos/{repo}/actions/runs/{proof['run']}/attempts/{proof['attempt']}/jobs?per_page=100",
+        f"repos/{repo}/actions/runs/{proof['run']}/jobs?filter=latest&per_page=100",
         "jobs",
     )
     counts = Counter(job["name"] for job in jobs)
     succeeded = {job["name"] for job in jobs if job["status"] == "completed" and job["conclusion"] == "success"}
     missing = [name for name in required if counts[name] != 1 or name not in succeeded]
-    missing_artifacts = []
-    if artifacts and not missing:
-        listed = api(f"repos/{repo}/actions/runs/{proof['run']}/artifacts?per_page=100", "artifacts")
-        for template in artifacts:
-            name = template.format(sha=sha)
-            candidates = [item for item in listed if item["name"] == name]
-            if (
-                len(candidates) != 1
-                or not valid_artifact(candidates[0], run)
-                or not verify_download(repo, candidates[0])
-            ):
-                missing_artifacts.append(name)
+    archives = artifact_report(repo, run, artifacts) if artifacts and not missing else {}
     return {
-        **proof, "status": "FAIL" if missing or missing_artifacts else "PASS",
-        "missing_jobs": missing, "missing_artifacts": missing_artifacts,
+        **proof, "status": "FAIL" if missing or archives.get("status") == "FAIL" else "PASS",
+        "missing_jobs": missing, "archives": archives,
     }
 
 
-def valid_artifact(artifact, run):
+def artifact_report(repo, run, required, scope_attempt=None):
+    listed = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100", "artifacts")
+    checked = {}
+    missing = []
+    for template in required:
+        name = template.format(sha=run["head_sha"], attempt=scope_attempt or run["run_attempt"])
+        matches = [item for item in listed if item["name"] == name]
+        if len(matches) != 1 or not valid_artifact(matches[0], run, since=run.get("created_at")) or not verify_download(repo, matches[0]):
+            missing.append(name)
+        else:
+            checked[name] = {key: matches[0][key] for key in ("id", "digest")}
+    return {"status": "FAIL" if missing else "PASS", "missing": missing, "checked": checked}
+
+
+def valid_artifact(artifact, run, *, since=None):
     source = artifact.get("workflow_run") or {}
     return (
         not artifact.get("expired", True) and artifact.get("size_in_bytes", 0) > 0
         and source.get("id") == run["id"] and source.get("head_sha") == run["head_sha"]
         and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or "") is not None
-        and artifact["created_at"] >= run["run_started_at"]
+        and artifact["created_at"] >= (since or run["run_started_at"])
     )
 
 
@@ -97,6 +100,22 @@ def main():
     }
     if "FABRIC_RESULT" in results and os.environ.get("FABRIC_INPUT") != "all":
         results["FABRIC_RESULT"]["status"] = "FAIL"
+    if all(proof["status"] == "PASS" for proof in results.values()):
+        try:
+            run_id = os.environ["GITHUB_RUN_ID"]
+            run = json.loads(subprocess.check_output(
+                ["gh", "api", f"repos/{repo}/actions/runs/{run_id}"], text=True,
+            ))
+            if run["head_sha"] != sha or str(run["run_attempt"]) != os.environ["GITHUB_RUN_ATTEMPT"]:
+                raise ValueError("Identité du run courant incohérente")
+            scope_attempt = os.environ.get("FABRIC_VERDICT_ATTEMPT")
+            if "FABRIC_RESULT" in results and not (scope_attempt or "").isdigit():
+                raise ValueError("Tentative du verdict Fabric absente")
+            results["current-archives"] = artifact_report(
+                repo, run, requirements["current_artifacts"], scope_attempt,
+            )
+        except (KeyError, ValueError, subprocess.CalledProcessError) as error:
+            results["current-archives"] = {"status": "ERROR", "type": type(error).__name__}
     for workflow in requirements["campaigns"]:
         campaign = QUALIFICATION["campaigns"][workflow]
         try:

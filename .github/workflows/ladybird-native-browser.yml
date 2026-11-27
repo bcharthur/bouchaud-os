@@ -1628,6 +1628,8 @@ jobs:
   # Environnement : QEMU TCG sur runner GitHub (jamais confondu avec KVM,
   # WHPX ou le materiel).
   perf-surface:
+    env:
+      BO_APT_UBUNTU_ONLY: "1"
     name: ladybird / perf ${{ matrix.bras }} #${{ matrix.essai }}
     needs: [dedoublonne, artefact]
     if: ${{ !cancelled() && needs.dedoublonne.outputs.reutilise != 'true' && needs.artefact.result == 'success' }}

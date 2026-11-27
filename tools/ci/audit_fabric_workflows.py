@@ -11,6 +11,12 @@ import yaml
 
 BASELINE = "bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8"
 DIRECTORY = ".github/workflows"
+JOB_MOVES = {
+    ("integration.yml", "atelier-reactivite"): ("fabric-atelier.yml", "atelier-reactivite"),
+    ("integration.yml", "dns-udp"): ("fabric-network.yml", "dns-udp"),
+    ("integration.yml", "dhcp-recuperation"): ("fabric-network.yml", "dhcp-recuperation"),
+    ("native-ipc-runtime.yml", "ab-rollback"): ("system-update.yml", "ab-rollback"),
+}
 
 # Exact historical file and step identities, reviewed with their replacements.
 REPLACEMENTS = {
@@ -53,8 +59,12 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True)
 
 
+def load(document):
+    return yaml.load(document, Loader=yaml.BaseLoader)
+
+
 def shell_steps(document):
-    for job in yaml.load(document, Loader=yaml.BaseLoader)["jobs"].values():
+    for job in load(document)["jobs"].values():
         for step in job.get("steps", []):
             if "run" in step:
                 yield step
@@ -102,6 +112,53 @@ def audit():
     return not missing
 
 
+def graph():
+    """Expose changes outside shell steps for review against the pinned baseline."""
+    jobs = ("needs", "if", "strategy", "runs-on", "timeout-minutes", "uses", "permissions")
+    destination = {p.name: load(p.read_text()) for p in Path(DIRECTORY).glob("*.yml")}
+    intact = True
+    for filename in git("ls-tree", "--name-only", f"{BASELINE}:{DIRECTORY}").splitlines():
+        historical = load(git("show", f"{BASELINE}:{DIRECTORY}/{filename}"))
+        current = destination.get(filename, {})
+        if historical["on"] != current.get("on"):
+            print(f"{filename}: déclencheurs modifiés")
+        for name, before in historical["jobs"].items():
+            after = current.get("jobs", {}).get(name)
+            target = JOB_MOVES.get((filename, name))
+            if target:
+                target_file, target_job = target
+                moved = destination[target_file]["jobs"][target_job]
+                fixed = ("strategy", "runs-on", "timeout-minutes", "continue-on-error")
+                exact = all(before.get(field) == moved.get(field) for field in fixed)
+                exact &= before.get("steps") == moved.get("steps")
+                intact &= exact
+                print(f"{filename}/{name} → {target_file}/{target_job}: "
+                      f"{'matrice, runner et étapes identiques' if exact else 'écart à vérifier'}")
+            if after is None:
+                print(f"{filename}/{name}: job déplacé ou remplacé")
+                continue
+            differences = [field for field in jobs if before.get(field) != after.get(field)]
+            before_artifacts = artifact_steps(before)
+            after_artifacts = artifact_steps(after)
+            if before_artifacts != after_artifacts:
+                differences.append("artefacts")
+            if differences:
+                print(f"{filename}/{name}: {', '.join(differences)}")
+    return intact
+
+
+def artifact_steps(job):
+    return [
+        step for step in job.get("steps", [])
+        if step.get("uses", "").startswith(("actions/upload-artifact@", "actions/download-artifact@"))
+    ]
+
+
 if __name__ == "__main__":
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    raise SystemExit(0 if audit() else 1)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--graph", action="store_true")
+    options = parser.parse_args()
+    passed = audit()
+    if options.graph:
+        passed = graph() and passed
+    raise SystemExit(0 if passed else 1)

@@ -184,6 +184,8 @@ jobs:
     uses: ./.github/workflows/native-ipc-runtime.yml
 
   verdict:
+    outputs:
+      attempt: ${{ steps.scope-attempt.outputs.attempt }}
     name: Bouchaud Fabric (périmètre migré)
     needs: [plan, kernel, gpu-witness, gpu, security, storage, p13, memory, ipc]
     if: always()
@@ -193,6 +195,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - id: scope-attempt
+        run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Vérifier les résultats du plan exécuté
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -200,7 +204,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fabric-verdict
+          name: fabric-verdict-${{ github.run_attempt }}
           path: fabric-verdict.json
           if-no-files-found: error
 
@@ -241,7 +245,7 @@ jobs:
       contents: read
       actions: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: ${{ needs.plan.outputs.profile == 'CERTIFICATION' && 185 || 8 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -254,7 +258,7 @@ jobs:
         run: python3 tools/ci/fabric_request_proofs.py "$PROFILE"
 
   qualification:
-    name: ${{ (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') && 'Bouchaud Merge Gate' || 'Bouchaud profil' }}
+    name: Bouchaud profil
     if: ${{ always() && (startsWith(github.ref, 'refs/tags/ci-fabric/') || (github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all'))) }}
     needs: [plan, verdict, fast, non-regression, userland, windows-selector, request-proofs]
     permissions:
@@ -273,6 +277,7 @@ jobs:
           FABRIC_PROOF_BRANCH: ${{ needs.plan.outputs.proof_branch }}
           FABRIC_INPUT: ${{ needs.plan.outputs.proof_fabric }}
           FABRIC_RESULT: ${{ needs.verdict.result }}
+          FABRIC_VERDICT_ATTEMPT: ${{ needs.verdict.outputs.attempt }}
           USERLAND_RESULT: ${{ needs.userland.result }}
           WINDOWS_SELECTOR_RESULT: ${{ needs.windows-selector.result }}
           FAST_RESULT: ${{ needs.fast.result }}
@@ -283,30 +288,4 @@ jobs:
         with:
           name: fabric-merge-verdict-${{ github.run_attempt }}
           path: fabric-merge-verdict.json
-          if-no-files-found: error
-
-  merge-gate:
-    name: Bouchaud Merge Gate
-    if: github.event_name == 'pull_request'
-    permissions:
-      contents: read
-      actions: read
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Vérifier la preuve FULL avant fusion
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_HEAD_BRANCH: ${{ github.head_ref }}
-        run: python3 tools/ci/fabric_pr_gate.py
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fabric-pr-verdict-${{ github.run_attempt }}
-          path: fabric-pr-verdict.json
           if-no-files-found: error
