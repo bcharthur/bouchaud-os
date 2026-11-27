@@ -5,29 +5,57 @@ import argparse
 import csv
 import re
 import struct
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from pathlib import Path
 
 LIGNE = re.compile(r"^ORDO_TRACE phase=(.+?) i=(\d+) (.*)$")
 RECORD = struct.Struct("<11Q")
+PUBLICATION = struct.Struct("<5Q")
 CAPACITE = 32768
 N_REVEILS = 300
 
 
-def noyau(total_path, records_path):
+def records(total_path, records_path, format_record):
     total, = struct.unpack("<Q", total_path.read_bytes())
     if total > CAPACITE:
         raise ValueError(f"trace noyau saturée ({total}/{CAPACITE})")
     records = records_path.read_bytes()
-    if len(records) < total * RECORD.size:
+    if len(records) < total * format_record.size:
         raise ValueError("dump de trace noyau tronqué")
-    index = defaultdict(list)
     for numero in range(total):
-        champs = RECORD.unpack_from(records, numero * RECORD.size)
+        champs = format_record.unpack_from(records, numero * format_record.size)
         if champs[-1] != numero + 1:
             raise ValueError(f"record noyau incomplet {numero}")
-        index[champs[1] // 1000].append(champs[:-1])
+        yield champs[:-1]
+
+
+def noyau(total_path, records_path):
+    index = defaultdict(list)
+    for champs in records(total_path, records_path, RECORD):
+        index[champs[1] // 1000].append(champs)
     return index
+
+
+def publications(total_path, records_path):
+    index = defaultdict(list)
+    for tache, avant, apres, neuve in records(total_path, records_path, PUBLICATION):
+        if not 0 < avant <= apres or neuve not in (0, 1):
+            raise ValueError("publication de file incohérente")
+        if neuve:
+            index[tache].append((avant, apres))
+    return {tache: sorted(instants) for tache, instants in index.items()}
+
+
+def raccord_file(trace, index):
+    tache, _, _, _, _, _, avant_appel, election, _, _ = trace
+    if not tache or not 0 < avant_appel <= election:
+        return 0, "", ""
+    instants = index.get(tache, [])
+    debut = bisect_left(instants, avant_appel, key=lambda mesure: mesure[0])
+    fin = bisect_right(instants, election, key=lambda mesure: mesure[0])
+    return (1, *instants[debut]) if fin - debut == 1 else (fin - debut, "", "")
+
 
 
 def phases(path):
@@ -49,7 +77,7 @@ def phases(path):
         raise ValueError(f"dernière phase incomplète {phase!r}")
 
 
-def rapport(index, phases_trace):
+def rapport(index, phases_trace, index_file=None):
     for serie, (nom, valeurs) in enumerate(phases_trace, 1):
         for population, indices in (
             ("tout", list(range(len(valeurs)))),
@@ -67,7 +95,8 @@ def rapport(index, phases_trace):
                         continue
                     candidats = index.get(echantillon["entree_noyau_us"], [])
                     trace = candidats[0] if len(candidats) == 1 else ("",) * 10
-                    yield (serie, nom, population, centile, rang, i, valeur, len(candidats), *trace)
+                    file = raccord_file(trace, index_file) if index_file is not None else ("", "", "")
+                    yield (serie, nom, population, centile, rang, i, valeur, len(candidats), *trace, *file)
 
 
 def main():
@@ -76,8 +105,10 @@ def main():
     parser.add_argument("records", type=Path)
     parser.add_argument("echantillons", type=Path)
     parser.add_argument("sortie", type=Path)
+    parser.add_argument("--file", nargs=2, type=Path, metavar=("TOTAL", "RECORDS"))
     args = parser.parse_args()
     index = noyau(args.total, args.records)
+    index_file = publications(*args.file) if args.file else None
     series = list(phases(args.echantillons))
     if not series or len(series) % 3:
         raise ValueError("le relevé doit contenir les trois phases de chaque tentative")
@@ -88,8 +119,9 @@ def main():
             "retard_us", "raccords_noyau", "tache", "entree_ns", "echeance_ns",
             "cpu_scan_plus_un", "irq_tsc", "debut_scan_ns", "avant_file_ns",
             "election_ns", "reprise_ns", "cpu_reprise",
+            "raccords_file", "publication_avant_ns", "publication_apres_ns",
         ))
-        csv_out.writerows(rapport(index, series))
+        csv_out.writerows(rapport(index, series, index_file))
 
 
 if __name__ == "__main__":

@@ -208,10 +208,21 @@ impl BandeFile {
             return false;
         }
         let (mot, bit) = position(emplacement);
+        #[cfg(feature = "diag-trace-reveil")]
+        let trace = crate::kernel::attribution_reveil::ENREGISTREUR.arme_pour(emplacement as u32 + 1);
+        #[cfg(feature = "diag-trace-reveil")]
+        let avant_ns = if trace { crate::kernel::timer::monotonic_ns() } else { 0 };
         let avant = self.mots[mot].fetch_or(bit, Ordering::SeqCst);
         // Toujours poser le bit de resume, doublon ou non : un resume en trop
         // ne coute qu'un mot relu, un resume manquant perd une tache.
         self.resume.fetch_or(1u64 << mot, Ordering::SeqCst);
+        #[cfg(feature = "diag-trace-reveil")]
+        if trace {
+            let apres_ns = crate::kernel::timer::monotonic_ns();
+            crate::kernel::attribution_reveil::trace_publication(
+                emplacement as u64 + 1, avant_ns, apres_ns, avant & bit == 0,
+            );
+        }
         if avant & bit != 0 {
             return false;
         }

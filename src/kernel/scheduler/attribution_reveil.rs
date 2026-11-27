@@ -1453,3 +1453,25 @@ pub fn trace_reveil(champs: [u64; 10]) {
         case[10].store(numero + 1, Ordering::Release);
     }
 }
+
+// La pose du bit et de son résumé est comprise entre les deux lectures d'horloge.
+// Ce tampon distinct reste lisible même si le fil reprend sur un autre coeur
+// avant que le producteur ait fini de ranger cette mesure.
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_FILE_TOTAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_FILE: [[AtomicU64; 5]; TRACE_REVEIL_CAPACITE] =
+    [const { [const { AtomicU64::new(0) }; 5] }; TRACE_REVEIL_CAPACITE];
+
+#[cfg(feature = "diag-trace-reveil")]
+pub fn trace_publication(tache: u64, avant_ns: u64, apres_ns: u64, neuve: bool) {
+    let numero = BO_TRACE_FILE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if let Some(case) = BO_TRACE_FILE.get(numero as usize) {
+        for (destination, valeur) in case.iter().zip([tache, avant_ns, apres_ns, u64::from(neuve)]) {
+            destination.store(valeur, Ordering::Relaxed);
+        }
+        case[4].store(numero + 1, Ordering::Release);
+    }
+}
