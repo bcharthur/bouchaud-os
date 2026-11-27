@@ -10,7 +10,7 @@ permissions:
 jobs:
   paired:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 100
     env:
       MAIN_SHA: bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8
       CANDIDATE_SHA: eb8ac15cf7f1e73fdc20ecb612e7a267a5400462
@@ -53,26 +53,36 @@ jobs:
           import sys
           from pathlib import Path
 
-          from etat_cycle import etat_du_cycle
+          from etat_cycle import ECHEC, OK, etat_du_cycle
           from qemu_matrix import qemu_binary, run_one
 
           root = Path(sys.argv[1])
           markers = (root / "scenario/marqueurs-endurance.txt").read_text().splitlines()
           states = []
-          for index, arm in enumerate(("main", "candidate", "candidate", "main"), 1):
-              output = root / f"{index}-{arm}"
-              result = run_one(
-                  qemu_binary(), root / f"{arm}.bin", 4, 300, 4096, output,
-                  markers, root / "scenario/endurance.img",
-              )
-              log = Path(result["log"]).read_text(errors="replace")
-              state, reason = etat_du_cycle(result, log, "ENDURANCE_ORDONNANCEUR_OK")
-              (output / "verdict.json").write_text(json.dumps({
-                  **result, "etat": state, "raison": reason,
-              }, indent=2) + "\n")
-              print(index, arm, state, reason)
-              states.append(state)
-          from etat_cycle import OK
+          for block in range(16):
+              qualified_failure = False
+              for arm in ("main", "candidate", "candidate", "main"):
+                  index = len(states) + 1
+                  output = root / f"{index:03d}-{arm}"
+                  result = run_one(
+                      qemu_binary(), root / f"{arm}.bin", 4, 300, 4096, output,
+                      markers, root / "scenario/endurance.img",
+                  )
+                  log = Path(result["log"]).read_text(errors="replace")
+                  state, reason = etat_du_cycle(result, log, "ENDURANCE_ORDONNANCEUR_OK")
+                  # Le disque commun reste attesté. Le clone de cycle n'est pas une preuve
+                  # de scheduling et peut représenter plusieurs Gio sur cette campagne.
+                  if result.get("disque"):
+                      Path(result["disque"]).unlink(missing_ok=True)
+                  (output / "verdict.json").write_text(json.dumps({
+                      **result, "etat": state, "raison": reason, "disque_conserve": False,
+                  }, indent=2) + "\n")
+                  print(index, arm, state, reason)
+                  states.append(state)
+                  qualified_failure |= state == ECHEC and "VERDICT_SONDE : QUALIFIE_ECHEC" in log
+              if qualified_failure:
+                  print(f"Échec de la sonde dans le bloc apparié {block + 1}")
+                  break
           raise SystemExit(0 if all(state == OK for state in states) else 1)
           PY
       - name: Conserver les traces et identités
