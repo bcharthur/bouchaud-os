@@ -1014,6 +1014,10 @@ pub fn lapic_hz() -> u64 {
 /// La mesure prend deux releves separes par `fenetre_ms` et rend, pour chaque
 /// coeur, le nombre d'interruptions de quantum recues entre les deux.
 pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
+    mesure_battement(fenetre_ms, || {})
+}
+
+fn mesure_battement(fenetre_ms: u64, mut laisse_tourner: impl FnMut()) -> (usize, usize) {
     let coeurs = schedulable_cpus().min(MAX_CPUS);
     let mut avant = [0u64; MAX_CPUS];
     for cpu in 0..coeurs {
@@ -1024,7 +1028,11 @@ pub fn mesure_battement_par_coeur(fenetre_ms: u64) -> (usize, usize) {
     // Une attente bornee et non un sommeil : la mesure doit valoir depuis
     // n'importe quel contexte, y compris l'amorcage ou aucune tache n'existe.
     crate::kernel::timer::attente_bornee(fenetre_ms.saturating_add(50), || {
-        crate::kernel::timer::monotonic_ns() >= echeance
+        if crate::kernel::timer::monotonic_ns() >= echeance {
+            return true;
+        }
+        laisse_tourner();
+        false
     });
     let mut battants = 0usize;
     for cpu in 0..coeurs {
@@ -1694,7 +1702,17 @@ pub fn enable_scheduler() {
     // BOUCHAUD_WHPX_CPU_V1 : aussi en monocoeur. Sans elle, SMP1 n'a aucune
     // preuve que son timer local se declenche : un banc qui exige « chaque
     // coeur bat » rendait un faux rouge, ou devait l'exempter sans preuve.
-    if schedulable_cpus() >= 1 {
+    if schedulable_cpus() == 1 {
+        // Sans AP, une attente sur la pile d'amorçage laisse les services
+        // déjà en file sans aucun coeur capable de les élire. Garder la
+        // fenêtre et les compteurs du banc, mais effectuer l'attente dans
+        // un contexte qui peut céder le BSP aux services prêts.
+        crate::kernel::task::avec_tache(|| {
+            mesure_battement(200, || {
+                crate::kernel::task::schedule();
+            });
+        });
+    } else {
         let _ = mesure_battement_par_coeur(200);
     }
 }
