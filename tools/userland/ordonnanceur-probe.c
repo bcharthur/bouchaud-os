@@ -175,6 +175,8 @@ struct compte_fil {
 struct sommeil_noyau {
     long long echeance_us;
     long long entree_us;
+    long long trace_tache;
+    long long trace_entree_ns;
     long long externe_ns;
     long long inexplique_ns;
     long long masque_ns;
@@ -301,7 +303,7 @@ static long long champ(const char *ligne, const char *cle)
 // Lit `/proc/self/fil` : les comptes CUMULES du fil, puis, si `ph`, les
 // sommeils que le noyau a ranges depuis l'ouverture precedente. L'ouverture
 // rearme l'enregistreur. Rend 0 si le fichier manque (hors de Bouchaud).
-static char brut_fil[40000];
+static char brut_fil[160000]; // Inclut les clés de corrélation du BIOS de diagnostic.
 
 static int lis_fil(struct compte_fil *c, struct phase *ph)
 {
@@ -348,11 +350,20 @@ static int lis_fil(struct compte_fil *c, struct phase *ph)
     char *l = strchr(seconde, '\n');
     while (l && *++l && strncmp(l, "absences ", 9) != 0 && ph->n_sommeils < SOMMEILS_MAX) {
         struct sommeil_noyau *z = &ph->sommeils[ph->n_sommeils];
-        if (sscanf(l, "%lld %lld %lld %lld %lld %lld", &z->echeance_us, &z->entree_us, &z->externe_ns,
-                   &z->inexplique_ns, &z->masque_ns, &z->pret_ns) != 6)
+        int fin_champs = 0;
+        if (sscanf(l, "%lld %lld %lld %lld %lld %lld%n", &z->echeance_us, &z->entree_us, &z->externe_ns,
+                   &z->inexplique_ns, &z->masque_ns, &z->pret_ns, &fin_champs) != 6)
             break;
+        char *suivante = strchr(l, '\n');
+        z->trace_tache = z->trace_entree_ns = -1;
+        if (suivante && l + fin_champs < suivante) {
+            *suivante = '\0';
+            if (sscanf(l + fin_champs, "%lld %lld", &z->trace_tache, &z->trace_entree_ns) != 2)
+                z->trace_tache = z->trace_entree_ns = -1;
+            *suivante = '\n';
+        }
         ph->n_sommeils++;
-        l = strchr(l, '\n');
+        l = suivante;
     }
     // Une liste tronquee (tampon, ou ligne illisible) ne doit pas passer
     // pour complete.
@@ -596,15 +607,19 @@ static void exporte_echantillons(FILE *sortie, const struct phase *ph)
 {
     int sommeil = 0;
     for (int i = 0; i < REVEILS; i++) {
-        long long entree_noyau_us = -1;
-        if (!ph->non_apparies && ph->dormi[i] && sommeil < ph->n_sommeils)
-            entree_noyau_us = ph->sommeils[sommeil++].entree_us;
+        long long entree_noyau_us = -1, tache = -1, entree_ns = -1;
+        if (!ph->non_apparies && ph->dormi[i] && sommeil < ph->n_sommeils) {
+            const struct sommeil_noyau *z = &ph->sommeils[sommeil++];
+            entree_noyau_us = z->entree_us;
+            tache = z->trace_tache;
+            entree_ns = z->trace_entree_ns;
+        }
         fprintf(sortie, "ORDO_TRACE phase=%s i=%d echeance_us=%lld retard_us=%lld "
                        "sommeil=%d ecart=%d non_apparies=%d entree_noyau_us=%lld pret_ns=%lld "
-                       "externe_ns=%lld masque_ns=%lld inexplique_ns=%lld\n",
+                       "externe_ns=%lld masque_ns=%lld inexplique_ns=%lld tache=%lld entree_ns=%lld\n",
                 ph->nom, i, ph->attendu[i], ph->retard[i],
                 ph->dormi[i], ph->contamine[i], ph->non_apparies, entree_noyau_us, ph->pret[i],
-                ph->externe[i], ph->masque[i], ph->inexplique[i]);
+                ph->externe[i], ph->masque[i], ph->inexplique[i], tache, entree_ns);
     }
 }
 

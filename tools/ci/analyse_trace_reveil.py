@@ -34,6 +34,7 @@ def noyau(total_path, records_path):
     index = defaultdict(list)
     for champs in records(total_path, records_path, RECORD):
         index[champs[1] // 1000].append(champs)
+        index[(champs[0], champs[1])].append(champs)
     return index
 
 
@@ -93,7 +94,11 @@ def rapport(index, phases_trace, index_file=None):
                     echantillon = valeurs[i]
                     if echantillon["retard_us"] != valeur:
                         continue
-                    candidats = index.get(echantillon["entree_noyau_us"], [])
+                    if "tache" in echantillon and echantillon["tache"] > 0:
+                        cle = (echantillon["tache"], echantillon["entree_ns"])
+                    else:
+                        cle = echantillon["entree_noyau_us"]
+                    candidats = index.get(cle, [])
                     trace = candidats[0] if len(candidats) == 1 else ("",) * 10
                     file = raccord_file(trace, index_file) if index_file is not None else ("", "", "")
                     yield (serie, nom, population, centile, rang, i, valeur, len(candidats), *trace, *file)

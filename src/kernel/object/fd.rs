@@ -1123,10 +1123,13 @@ fn proc_fil() -> Vec<u8> {
     let perdus = ENREGISTREUR.lis(tache, |s| {
         n += 1;
         sommeils.push_str(&format!(
-            "{} {} {} {} {} {}\n",
+            "{} {} {} {} {} {}",
             s.echeance_ns / 1000, s.entree_ns / 1000, s.comptes.externe_ns, s.comptes.inexplique_ns,
             s.comptes.masque_ns, s.comptes.pret_ns
         ));
+        #[cfg(feature = "diag-trace-reveil")]
+        sommeils.push_str(&format!(" {} {}", tache, s.entree_ns));
+        sommeils.push('\n');
     });
     // Les absences closes pendant que le fil tenait son coeur, rangees par
     // le gestionnaire de battement depuis l'armement.
