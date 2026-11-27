@@ -1,0 +1,155 @@
+name: Qualification indépendante du correctif SMP1
+on:
+  push:
+    branches: [codex/qualification-387]
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8
+  FIX_SHA: 439fc23b5212936baf7ea8db27e3927fd2ea8a9c
+
+jobs:
+  bios:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - arm: base
+            sha: bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8
+          - arm: corrige
+            sha: 439fc23b5212936baf7ea8db27e3927fd2ea8a9c
+          - arm: mesure
+            sha: 439fc23b5212936baf7ea8db27e3927fd2ea8a9c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Mesurer les bornes réelles dans un BIOS de diagnostic
+        if: matrix.arm == 'mesure'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/arch/x86_64/smp.rs')
+          s = p.read_text()
+          start = s.index('fn mesure_battement(fenetre_ms:')
+          end = s.index('    (battants, coeurs)', start)
+          part = s[start:end].replace('    let echeance = crate::kernel::timer::monotonic_ns()\n', '    let debut = crate::kernel::timer::monotonic_ns();\n    let echeance = debut\n').replace('    let mut battants = 0usize;', '    let fin = crate::kernel::timer::monotonic_ns();\n    let mut battants = 0usize;')
+          part += '    crate::serial_println!("BOUCHAUD_DIAG_FENETRE_NS {}", fin.saturating_sub(debut));\n'
+          assert 'let echeance = debut' in part and 'let fin =' in part
+          p.write_text(s[:start] + part + s[end:])
+          PY
+      - run: tools/ci/build_kernel.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bios-${{ matrix.arm }}
+          path: target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
+          if-no-files-found: error
+
+  essais:
+    needs: bios
+    runs-on: ubuntu-24.04
+    timeout-minutes: 125
+    strategy:
+      fail-fast: false
+      matrix:
+        essai: [paires-smp1, endurance-smp1, smp2, smp4, smp8, mesure]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIX_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bios-*
+          path: images
+      - name: Installer QEMU et musl depuis Ubuntu
+        run: |
+          args=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
+          sudo apt-get "${args[@]}" update
+          sudo apt-get "${args[@]}" install -y --no-install-recommends qemu-system-x86 musl-tools build-essential
+      - name: Préparer le scénario historique et relever l'hôte
+        run: |
+          tools/ci/fabrique-scenario-endurance.sh "$RUNNER_TEMP/scenario"
+          mkdir -p preuves
+          { qemu-system-x86_64 --version; lscpu; cat /sys/fs/cgroup/cpu.max; } > preuves/hote.txt
+          sha256sum images/*/*.bin "$RUNNER_TEMP/scenario/endurance.img" > preuves/inputs.sha256
+      - name: Exécuter les essais
+        env:
+          ESSAI: ${{ matrix.essai }}
+          PYTHONPATH: tools/ci/reliability
+        run: |
+          set -euo pipefail
+          scenario="$RUNNER_TEMP/scenario"
+          base=images/bios-base/bootimage-bouchaud-os.bin
+          corrige=images/bios-corrige/bootimage-bouchaud-os.bin
+          case "$ESSAI" in
+            endurance-smp1)
+              set +e
+              python3 tools/ci/reliability/soak.py "$corrige" --cpus 1 --duration-seconds 5400 --cycle-seconds 300 --memory-mb 4096 --disque "$scenario/endurance.img" --require-fichier "$scenario/marqueurs-endurance.txt" --marqueur-sonde ENDURANCE_ORDONNANCEUR_OK --out-dir preuves/endurance
+              soak=$?
+              python3 tools/ci/reliability/budgets_endurance.py preuves/endurance
+              budgets=$?
+              test "$soak" = 0 && test "$budgets" = 0
+              ;;
+            *)
+              python3 -u - "$scenario" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          from budgets_endurance import CHECK_BUDGETS, evalue_budgets
+          from etat_cycle import OK, etat_du_cycle
+          from qemu_matrix import qemu_binary, run_one
+
+          essai = os.environ["ESSAI"]
+          scenario = Path(sys.argv[1])
+          marqueurs = (scenario / "marqueurs-endurance.txt").read_text().splitlines()
+          cpus = int(essai[-1]) if essai.startswith("smp") else 1
+          bras = ("base", "corrige", "corrige", "base", "base", "corrige")
+          if essai == "mesure":
+              bras = ("mesure",) * 3
+          elif cpus != 1:
+              bras = ("base", "corrige")
+          preuves = []
+          for i, arm in enumerate(bras, 1):
+              dossier = Path("preuves") / f"{i}-{arm}"
+              image = Path("images") / f"bios-{arm}" / "bootimage-bouchaud-os.bin"
+              r = run_one(qemu_binary(), image, cpus, 300, 4096, dossier, marqueurs, scenario / "endurance.img")
+              trace = Path(r["log"])
+              journal = trace.read_text(errors="replace")
+              etat, raison = etat_du_cycle(r, journal, "ENDURANCE_ORDONNANCEUR_OK")
+              budgets = evalue_budgets(trace, CHECK_BUDGETS)
+              fenetres = [int(ns) for ns in re.findall(r"BOUCHAUD_DIAG_FENETRE_NS (\d+)", journal)]
+              battements = [int(n) for n in re.findall(r"BOUCHAUD_SMP_BATTEMENT cpu=0 quantums=(\d+) fenetre_ms=200", journal)]
+              depassement = bool(re.search(r"^\s*ready_latency_max_ms .* > .* \(budget\)", budgets["sortie"], re.M))
+              (dossier / "budgets.log").write_text(budgets["sortie"])
+              if r.get("disque"):
+                  Path(r["disque"]).unlink(missing_ok=True)
+              preuve = dict(bras=arm, etat=etat, raison=raison, budgets=budgets["rc"], depassement=depassement, fenetres_ns=fenetres, battements=battements)
+              preuves.append(preuve)
+              print(json.dumps(preuve))
+          Path("preuves/verdicts.json").write_text(json.dumps(preuves, indent=2) + "\n")
+          ok = all(p["etat"] == OK and p["battements"] and all(p["battements"]) for p in preuves)
+          if essai == "paires-smp1":
+              ok &= all((p["budgets"] == 1 and p["depassement"]) if p["bras"] == "base" else p["budgets"] == 0 for p in preuves)
+          elif essai == "mesure":
+              ok &= all(p["fenetres_ns"] and min(p["fenetres_ns"]) >= 200_000_000 for p in preuves)
+          else:
+              ok &= all(p["budgets"] == 0 for p in preuves)
+          sys.exit(0 if ok else 1)
+          PY
+              ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-${{ matrix.essai }}
+          path: |
+            preuves/**/*.log
+            preuves/**/*.json
+            preuves/*.txt
+            preuves/*.sha256
