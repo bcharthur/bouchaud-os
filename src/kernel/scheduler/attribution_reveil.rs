@@ -1425,3 +1425,31 @@ impl Enregistreur {
 }
 
 pub static ENREGISTREUR: Enregistreur = Enregistreur::neuf();
+
+#[cfg(feature = "diag-trace-reveil")]
+pub fn trace_entree_irq(cpu: usize) -> u64 {
+    ENTREE_IRQ_TSC.get(cpu).map_or(0, |tsc| tsc.load(Ordering::Relaxed))
+}
+
+// Diagnostic TCG. Lire les symboles avec la VM arrêtée. Aucun accès série,
+// aucune allocation, aucun recyclage de case pendant la capture.
+#[cfg(feature = "diag-trace-reveil")]
+const TRACE_REVEIL_CAPACITE: usize = 32768;
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_REVEIL_TOTAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_REVEIL: [[AtomicU64; 11]; TRACE_REVEIL_CAPACITE] =
+    [const { [const { AtomicU64::new(0) }; 11] }; TRACE_REVEIL_CAPACITE];
+
+#[cfg(feature = "diag-trace-reveil")]
+pub fn trace_reveil(champs: [u64; 10]) {
+    let numero = BO_TRACE_REVEIL_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if let Some(case) = BO_TRACE_REVEIL.get(numero as usize) {
+        for (destination, valeur) in case.iter().zip(champs) {
+            destination.store(valeur, Ordering::Relaxed);
+        }
+        case[10].store(numero + 1, Ordering::Release);
+    }
+}

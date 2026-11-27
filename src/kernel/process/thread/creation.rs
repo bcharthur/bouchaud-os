@@ -70,6 +70,12 @@ impl Task {
             reveil_commute_ns: EcheanceAtomique::neuf(0),
             reveil_passe_ns: EcheanceAtomique::neuf(0),
             reveil_par: EcheanceAtomique::neuf(0),
+            #[cfg(feature = "diag-trace-reveil")]
+            trace_reveil_irq_tsc: EcheanceAtomique::neuf(0),
+            #[cfg(feature = "diag-trace-reveil")]
+            trace_reveil_cpu_scan: EcheanceAtomique::neuf(0),
+            #[cfg(feature = "diag-trace-reveil")]
+            trace_reveil_avant_file_ns: EcheanceAtomique::neuf(0),
             attribution_reveil: crate::kernel::attribution_reveil::Registre::neuf(),
             ventilation_reveil: crate::kernel::attribution_reveil::RegistreVentilation::neuf(),
             comptes_fil: crate::kernel::attribution_reveil::ComptesFil::neuf(),
@@ -483,6 +489,10 @@ fn publie_pret(index: usize, publication: ReveilPublication) {
             Priorite::Interactive => crate::kernel::scheduler::runqueue::Bande::Interactive,
             Priorite::Normale => crate::kernel::scheduler::runqueue::Bande::Normale,
         };
+        #[cfg(feature = "diag-trace-reveil")]
+        if tasks()[index].trace_reveil_cpu_scan != 0 {
+            tasks()[index].trace_reveil_avant_file_ns.range(crate::kernel::timer::monotonic_ns());
+        }
         crate::arch::x86_64::cpu_local::local(id).enqueue_bande(identite.en_mot(), bande);
     } else {
         // Coeur inadressable : la tache reste en file logique, personne a

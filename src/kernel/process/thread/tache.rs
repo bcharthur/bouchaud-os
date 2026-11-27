@@ -163,6 +163,12 @@ pub struct Task {
     /// ... et qui tenait le coeur quand le balayage l'a reveillee
     /// (`attribution_reveil::empaquete_par`).
     pub reveil_par: EcheanceAtomique,
+    #[cfg(feature = "diag-trace-reveil")]
+    trace_reveil_irq_tsc: EcheanceAtomique,
+    #[cfg(feature = "diag-trace-reveil")]
+    trace_reveil_cpu_scan: EcheanceAtomique,
+    #[cfg(feature = "diag-trace-reveil")]
+    trace_reveil_avant_file_ns: EcheanceAtomique,
     /// BOUCHAUD_IPC_ATTRIBUTION_V1 (instrumentation SEULE, aucune decision
     /// d'ordonnancement ne la lit) : a chaque election, l'instant de mise en
     /// file (`ready_since_ns`) et l'instant d'election, gardes pour que

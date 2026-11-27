@@ -588,19 +588,23 @@ static void imprime(const struct phase *ph)
         printf("  ventilation %s : %s\n", ph->nom, ph->ventilation);
     if (ph->non_jugeable[0])
         printf("  phase non jugeable -- %s\n", ph->non_jugeable);
+}
 
-    // Diagnostic opt-in, après la mesure. N'ajoute aucun appel système entre
-    // deux réveils et ne change pas le calcul des centiles ni le verdict.
-    const char *trace = getenv("BO_ORDO_TRACE_SAMPLES");
-    if (trace && strcmp(trace, "1") == 0) {
-        for (int i = 0; i < REVEILS; i++) {
-            printf("ORDO_TRACE phase=%s i=%d echeance_us=%lld retard_us=%lld "
-                   "sommeil=%d ecart=%d non_apparies=%d pret_ns=%lld "
-                   "externe_ns=%lld masque_ns=%lld inexplique_ns=%lld\n",
-                   ph->nom, i, ph->attendu[i], ph->retard[i],
-                   ph->dormi[i], ph->contamine[i], ph->non_apparies, ph->pret[i],
-                   ph->externe[i], ph->masque[i], ph->inexplique[i]);
-        }
+// Écriture après les trois phases. Le sommeil du noyau ne correspond à un
+// échantillon que si l'appariement ordinal est complet pour la phase.
+static void exporte_echantillons(FILE *sortie, const struct phase *ph)
+{
+    int sommeil = 0;
+    for (int i = 0; i < REVEILS; i++) {
+        long long entree_noyau_us = -1;
+        if (!ph->non_apparies && ph->dormi[i] && sommeil < ph->n_sommeils)
+            entree_noyau_us = ph->sommeils[sommeil++].entree_us;
+        fprintf(sortie, "ORDO_TRACE phase=%s i=%d echeance_us=%lld retard_us=%lld "
+                       "sommeil=%d ecart=%d non_apparies=%d entree_noyau_us=%lld pret_ns=%lld "
+                       "externe_ns=%lld masque_ns=%lld inexplique_ns=%lld\n",
+                ph->nom, i, ph->attendu[i], ph->retard[i],
+                ph->dormi[i], ph->contamine[i], ph->non_apparies, entree_noyau_us, ph->pret[i],
+                ph->externe[i], ph->masque[i], ph->inexplique[i]);
     }
 }
 
@@ -763,6 +767,20 @@ static enum verdict tentative(int calculs, long long grain, struct bilan *b)
     imprime(&prio);
     printf("  %-24s %llu tours de calcul\n", "", tours_prio);
 
+    const char *trace_path = getenv("BO_ORDO_TRACE_FILE");
+    if (trace_path && *trace_path) {
+        FILE *trace = fopen(trace_path, "a");
+        if (trace) {
+            exporte_echantillons(trace, &repos);
+            exporte_echantillons(trace, &normale);
+            exporte_echantillons(trace, &prio);
+            int erreur = ferror(trace);
+            if (fclose(trace) != 0 || erreur)
+                fprintf(stderr, "ORDO_TRACE export incomplet\n");
+        } else {
+            perror("ORDO_TRACE");
+        }
+    }
     return evalue(&repos, &normale, &prio, tours_normale, tours_prio, grain, b);
 }
 

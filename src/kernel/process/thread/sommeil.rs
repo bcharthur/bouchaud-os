@@ -185,6 +185,12 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
     current().reveil_commute_ns.range(0);
     current().reveil_passe_ns.range(0);
     current().reveil_par.range(0);
+    #[cfg(feature = "diag-trace-reveil")]
+    current().trace_reveil_irq_tsc.range(0);
+    #[cfg(feature = "diag-trace-reveil")]
+    current().trace_reveil_cpu_scan.range(0);
+    #[cfg(feature = "diag-trace-reveil")]
+    current().trace_reveil_avant_file_ns.range(0);
     current().wake_deadline_ns.range(deadline);
     // BOUCHAUD_PREUVE_HOTE_V1 : le fil arme range l'echeance et ses comptes
     // a l'entree du sommeil (echeance deja fixee : rien ne la deplace).
@@ -252,6 +258,20 @@ fn dort_jusqua(deadline: u64, ticks: u64, interruptible: bool) -> bool {
             commute_ns: current().reveil_commute_ns.charge(),
             passe_ns: current().reveil_passe_ns.charge(),
         };
+        #[cfg(feature = "diag-trace-reveil")]
+        {
+            use crate::kernel::attribution_reveil as ar;
+            let tache = indice_courant();
+            if ar::ENREGISTREUR.arme_pour(tache) {
+                ar::trace_reveil([
+                    tache as u64, mesure.entree_ns, mesure.echeance_ns,
+                    current().trace_reveil_cpu_scan.charge(),
+                    current().trace_reveil_irq_tsc.charge(), mesure.pret_ns,
+                    current().trace_reveil_avant_file_ns.charge(), mesure.elu_ns,
+                    mesure.reprise_ns, local_cpu() as u64,
+                ]);
+            }
+        }
         let d = crate::kernel::attribution_reveil::decompose(&mesure);
         current().attribution_reveil.note(&d, mesure.reprise_ns, local_cpu() as u64, current().reveil_par.charge());
         // BOUCHAUD_ATTRIBUTION_REVEIL_V2 : un retard au-dela du seuil est
@@ -685,6 +705,14 @@ fn wake_sleepers() {
             task.reveil_commute_ns.range(0);
             task.reveil_passe_ns.range(0);
             task.reveil_par.range(par);
+            #[cfg(feature = "diag-trace-reveil")]
+            if crate::kernel::attribution_reveil::ENREGISTREUR.arme_pour(index as u32 + 1) {
+                let cpu = local_cpu();
+                task.trace_reveil_cpu_scan.range(cpu as u64 + 1);
+                if source_irq {
+                    task.trace_reveil_irq_tsc.range(crate::kernel::attribution_reveil::trace_entree_irq(cpu));
+                }
+            }
             task.reveil_pret_ns.range(now);
             publie_depuis_balayage(index);
         }
