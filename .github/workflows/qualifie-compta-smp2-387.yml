@@ -1,0 +1,51 @@
+name: Diagnostic apparié comptabilité injectée SMP2
+on:
+  push:
+    branches: [codex/qualification-compta-387]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 439fc23b5212936baf7ea8db27e3927fd2ea8a9c
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: 46039313879
+          github-token: ${{ github.token }}
+          pattern: bios-*
+          path: images
+      - name: Installer QEMU et musl depuis Ubuntu
+        run: |
+          args=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
+          sudo apt-get "${args[@]}" update
+          sudo apt-get "${args[@]}" install -y --no-install-recommends qemu-system-x86 musl-tools build-essential
+      - name: Comparer les BIOS de main et de la PR dans le seul banc SMP2
+        run: |
+          mkdir preuves
+          { qemu-system-x86_64 --version; lscpu; } > preuves/hote.txt
+          sha256sum images/bios-{base,corrige}/*.bin > preuves/inputs.sha256
+          index=0
+          resultat=0
+          for arm in base corrige corrige base; do
+            index=$((index + 1))
+            dossier="preuves/$index-$arm"
+            mkdir "$dossier"
+            rc=0
+            BO_SMP=2 tools/ci/run_compta_injection.sh "images/bios-$arm/bootimage-bouchaud-os.bin" 2000 8 > "$dossier/verdict.log" 2>&1 || rc=$?
+            cp compta-injection-*.log "$dossier/"
+            printf '%s\n' "$rc" > "$dossier/rc.txt"
+            cat "$dossier/verdict.log"
+            if (( rc != 0 )); then resultat=1; fi
+          done
+          exit "$resultat"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compta-smp2-main-387
+          path: preuves/
