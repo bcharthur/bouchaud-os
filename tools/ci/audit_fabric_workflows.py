@@ -20,6 +20,12 @@ JOB_MOVES = {
 
 # Exact historical file and step identities, reviewed with their replacements.
 REPLACEMENTS = {
+    ("ladybird-native-browser.yml", "QEMU + outils"):
+        "préparation perf-surface à partir des sources Ubuntu signées",
+    ("native-ipc-runtime.yml", "QEMU + OVMF"):
+        "préparation A/B à partir des sources Ubuntu signées",
+    ("nightly.yml", "Dependances"):
+        "préparation QEMU core à partir des sources Ubuntu signées",
     ("ci.yml", "Classer les changements"):
         "classification exhaustive explicite pour le profil FAST",
     ("ci.yml", "Verdict unique pour branch protection"):
@@ -130,10 +136,17 @@ def graph():
                 moved = destination[target_file]["jobs"][target_job]
                 fixed = ("strategy", "runs-on", "timeout-minutes", "continue-on-error")
                 exact = all(before.get(field) == moved.get(field) for field in fixed)
-                exact &= before.get("steps") == moved.get("steps")
+                moved_steps = moved.get("steps")
+                if target_file == "system-update.yml":
+                    moved_steps = [
+                        {**step, "run": step["run"].replace("apt-installe-ubuntu.sh", "apt-installe.sh")}
+                        if step.get("name") == "QEMU + OVMF" else step
+                        for step in moved_steps
+                    ]
+                exact &= before.get("steps") == moved_steps
                 intact &= exact
                 print(f"{filename}/{name} → {target_file}/{target_job}: "
-                      f"{'matrice, runner et étapes identiques' if exact else 'écart à vérifier'}")
+                      f"{'matrice, runner et étapes couverts' if exact else 'écart à vérifier'}")
             if after is None:
                 print(f"{filename}/{name}: job déplacé ou remplacé")
                 continue

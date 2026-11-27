@@ -30,6 +30,13 @@ def latest_run(repo, sha, branch, workflow):
         if run["head_sha"] == sha and run["head_branch"] == branch
         and run["event"] == "workflow_dispatch"
         and run["path"] == f".github/workflows/{workflow}"
+        and (
+            workflow != "ladybird-native-browser.yml"
+            or (
+                run["name"] == "ladybird-native-browser"
+                and not (run.get("display_title") or "").startswith("ladybird-artefact ")
+            )
+        )
     ]
     return max(matches, key=lambda item: item["run_number"], default=None)
 

@@ -7,8 +7,6 @@ permissions:
 
 jobs:
   ab-rollback:
-    env:
-      BO_APT_UBUNTU_ONLY: "1"
     # BOUCHAUD_LOADER_AB_V1 : le chargeur A/B sous OVMF, un QEMU par boot sur le
     # MEME disque, coupure SIGKILL a chaque boot. Candidat qui panique, candidat
     # qui gele, une copie META corrompue (chacune), les deux corrompues ; puis
@@ -54,7 +52,7 @@ jobs:
             ab-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
             cargo-${{ runner.os }}-
       - name: QEMU + OVMF
-        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 ovmf
       - name: Toolchain
         run: |
           rustup show active-toolchain || rustup toolchain install

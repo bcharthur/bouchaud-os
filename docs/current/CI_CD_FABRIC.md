@@ -425,3 +425,10 @@ pour les témoins. La construction locale du BIOS de ce job prenait
 8,57 minutes après la création du run, puis le job démarre vers
 12,25 minutes. La file et la disponibilité du producteur dominent
 le temps de transfert. Le banc conserve ses constructions de témoins.
+
+Le premier correctif APT modifiait un fichier de l'empreinte de
+production Ladybird. La recette des trois consommateurs affectés
+appelle donc un script Ubuntu distinct. La recette du producteur
+reste identique. La recherche d'une qualification Ladybird ignore
+les campagnes `ladybird-artefact`, y compris quand elles partagent
+le SHA et le fichier workflow de la qualification stricte.

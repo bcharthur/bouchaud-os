@@ -13,13 +13,6 @@
 set -uo pipefail
 [ "$#" -ge 1 ] || { echo "usage: apt-installe.sh PAQUET..." >&2; exit 2; }
 opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120)
-# Ces bancs utilisent exclusivement les paquets de la distribution.
-# Écarter les dépôts tiers préinstallés qui ne font pas partie de la recette.
-if [ "${BO_APT_UBUNTU_ONLY:-0}" = 1 ]; then
-  ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
-  [ -s "$ubuntu_sources" ] || { echo "APT_SOURCE_UBUNTU_ABSENTE $ubuntu_sources" >&2; exit 1; }
-  opts+=(-o "Dir::Etc::sourcelist=$ubuntu_sources" -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any)
-fi
 for essai in 1 2 3; do
   if sudo timeout 300 apt-get "${opts[@]}" update \
     && sudo timeout 900 apt-get "${opts[@]}" install -y --no-install-recommends "$@"; then

@@ -104,3 +104,16 @@ class MergeGate(unittest.TestCase):
             dispatch.assert_called_once()
             self.assertEqual(dispatch.call_args.args[0][3], workflow)
             self.assertEqual(json.loads(dispatch.call_args.kwargs["input"])["perimetre"], "complet")
+
+    def test_ladybird_artifact_only_does_not_suppress_qualification(self):
+        workflow = "ladybird-native-browser.yml"
+        common = {
+            "head_sha": "candidate", "head_branch": "topic", "event": "workflow_dispatch",
+            "path": ".github/workflows/" + workflow, "name": "ladybird-native-browser",
+        }
+        production = {**common, "run_number": 8, "display_title": "ladybird-artefact recipe"}
+        strict = {**common, "run_number": 7, "display_title": "ladybird-native-browser"}
+        with patch.object(fabric_merge_gate, "api", return_value=[production]):
+            self.assertIsNone(fabric_merge_gate.latest_run("owner/repo", "candidate", "topic", workflow))
+        with patch.object(fabric_merge_gate, "api", return_value=[strict, production]):
+            self.assertEqual(fabric_merge_gate.latest_run("owner/repo", "candidate", "topic", workflow), strict)
