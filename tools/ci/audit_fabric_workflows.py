@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -20,12 +21,6 @@ JOB_MOVES = {
 
 # Exact historical file and step identities, reviewed with their replacements.
 REPLACEMENTS = {
-    ("ladybird-native-browser.yml", "QEMU + outils"):
-        "préparation perf-surface à partir des sources Ubuntu signées",
-    ("native-ipc-runtime.yml", "QEMU + OVMF"):
-        "préparation A/B à partir des sources Ubuntu signées",
-    ("nightly.yml", "Dependances"):
-        "préparation QEMU core à partir des sources Ubuntu signées",
     ("ci.yml", "Classer les changements"):
         "classification exhaustive explicite pour le profil FAST",
     ("ci.yml", "Verdict unique pour branch protection"):
@@ -102,6 +97,7 @@ def audit():
         moved.update(remaining)
     replaced = Counter()
     missing = Counter()
+    ubuntu_sources = Counter()
     for name, step in unmatched:
         key = identity(step)
         if moved[key]:
@@ -109,10 +105,18 @@ def audit():
             retained += 1
             continue
         label = (name, step.get("name") or step.get("id") or "(sans nom)")
-        (replaced if label in REPLACEMENTS else missing)[label] += 1
+        command = step["run"]
+        ubuntu_only = command.replace("tools/ci/apt-installe.sh", "tools/ci/apt-installe-ubuntu.sh", 1)
+        changed_key = identity({**step, "run": ubuntu_only})
+        if ubuntu_only != command and moved[changed_key]:
+            moved[changed_key] -= 1
+            ubuntu_sources[label] += 1
+        else:
+            (replaced if label in REPLACEMENTS else missing)[label] += 1
     print(f"{retained} étapes historiques strictement identiques")
     for label, count in sorted(replaced.items()):
         print(f"{count} × {' / '.join(label)} → {REPLACEMENTS[label]}")
+    print(f"{sum(ubuntu_sources.values())} étapes historiques avec seule modification de la sélection des sources APT")
     for label, count in sorted(missing.items()):
         print(f"MANQUANT {count} × {' / '.join(label)}")
     return not missing
@@ -136,13 +140,11 @@ def graph():
                 moved = destination[target_file]["jobs"][target_job]
                 fixed = ("strategy", "runs-on", "timeout-minutes", "continue-on-error")
                 exact = all(before.get(field) == moved.get(field) for field in fixed)
-                moved_steps = moved.get("steps")
-                if target_file == "system-update.yml":
-                    moved_steps = [
-                        {**step, "run": step["run"].replace("apt-installe-ubuntu.sh", "apt-installe.sh")}
-                        if step.get("name") == "QEMU + OVMF" else step
-                        for step in moved_steps
-                    ]
+                moved_steps = [
+                    {**step, "run": step["run"].replace("apt-installe-ubuntu.sh", "apt-installe.sh")}
+                    if "run" in step else step
+                    for step in moved.get("steps", [])
+                ]
                 exact &= before.get("steps") == moved_steps
                 intact &= exact
                 print(f"{filename}/{name} → {target_file}/{target_job}: "
@@ -167,11 +169,54 @@ def artifact_steps(job):
     ]
 
 
+APT_LEGACY_STEPS = {
+    ("ladybird-native-browser.yml", "build", "Toolchain C/C++"):
+        "producteur natif, recette attestée avec repli signé apt.llvm.org",
+    ("ladybird-vulkan-experimental.yml", "build", "Installer la chaîne de compilation"):
+        "repli clang-20 signé apt.llvm.org",
+}
+
+
+def apt_inventory():
+    calls = Counter()
+    compliant = True
+    for path in sorted(Path(DIRECTORY).glob("*.yml")):
+        for job, config in load(path.read_text())["jobs"].items():
+            for step in config.get("steps", []):
+                for line in step.get("run", "").splitlines():
+                    command = line.strip()
+                    if command.startswith("tools/ci/apt-installe-ubuntu.sh "):
+                        calls[path.name, "Ubuntu"] += 1
+                    elif command.startswith("tools/ci/apt-installe.sh "):
+                        label = (path.name, job, step.get("name"))
+                        reason = APT_LEGACY_STEPS.get(label)
+                        allowed = reason and (
+                            path.name == "ladybird-native-browser.yml"
+                            or command == "tools/ci/apt-installe.sh clang-20 lld-20 llvm-20"
+                        )
+                        if allowed:
+                            calls[path.name, "LLVM / recette historique"] += 1
+                        else:
+                            print(f"APT À VÉRIFIER {path.name}/{job}: {command}")
+                            compliant = False
+                    elif re.match(r"^(?:sudo\s+)?(?:apt(?:-get)?\s|add-apt-repository\s)", command):
+                        print(f"APT DIRECT À VÉRIFIER {path.name}/{job}: {command}")
+                        compliant = False
+    for (workflow, mode), count in sorted(calls.items()):
+        print(f"APT {workflow}: {count} × {mode}")
+    print(f"APT total: {sum(calls.values())}, dont "
+          f"{sum(count for (_, mode), count in calls.items() if mode == 'Ubuntu')} Ubuntu")
+    return compliant
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--graph", action="store_true")
+    parser.add_argument("--apt", action="store_true")
     options = parser.parse_args()
     passed = audit()
     if options.graph:
         passed = graph() and passed
+    if options.apt:
+        passed = apt_inventory() and passed
     raise SystemExit(0 if passed else 1)

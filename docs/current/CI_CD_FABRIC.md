@@ -432,3 +432,18 @@ appelle donc un script Ubuntu distinct. La recette du producteur
 reste identique. La recherche d'une qualification Ladybird ignore
 les campagnes `ladybird-artefact`, y compris quand elles partagent
 le SHA et le fichier workflow de la qualification stricte.
+
+### Inventaire APT après le 403 de WPT
+
+`python3 tools/ci/audit_fabric_workflows.py --graph --apt` recense les
+appels APT dans les workflows. Les 68 appels de paquets de distribution
+utilisent les sources Ubuntu signées du runner, dans 19 workflows.
+L'audit compare les commandes historiques en ne normalisant que le nom
+du script APT pour ces migrations. Aucun argument de banc ne change.
+
+Les deux appels de la recette native qui prépare le compilateur et le
+repli LLVM de Vulkan restent sur le chemin historique. Ces recettes
+prévoient un dépôt `apt.llvm.org` avec `signed-by`. La partie Ubuntu de
+Vulkan utilise les seules sources de la distribution. Les scripts de
+construction consultés en aval affichent des prérequis pour l'hôte, et
+le provisionnement des runners dédiés conserve son installation propre.

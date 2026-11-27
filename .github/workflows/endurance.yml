@@ -98,7 +98,7 @@ jobs:
         run: |
           # musl-tools/build-essential : les sondes du scenario sont compilees
           # ici, depuis les sources du commit -- jamais un binaire perime.
-          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential
       - name: Scenario d'endurance (disque autorun + charges reelles)
         shell: bash
         run: tools/ci/fabrique-scenario-endurance.sh endurance-scenario

@@ -32,7 +32,7 @@ jobs:
 
       - name: QEMU + probe toolchain
         run: |
-          tools/ci/apt-installe.sh \
+          tools/ci/apt-installe-ubuntu.sh \
             qemu-system-x86 build-essential binutils file
 
       - uses: ./.github/actions/fabric-bootimage
@@ -78,7 +78,7 @@ jobs:
           target-hote/nvme-suivi
 
       - name: QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 build-essential file
 
 
       - name: Cache Cargo

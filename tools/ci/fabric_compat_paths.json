@@ -55,6 +55,7 @@
     ".github/workflows/unix-fs-reliability.yml"
   ],
   "p13": [
+    "tools/ci/apt-installe-ubuntu.sh",
     ".github/workflows/os-primitives.yml",
     ".github/workflows/p13-primitives-noyau.yml",
     "Cargo.lock",

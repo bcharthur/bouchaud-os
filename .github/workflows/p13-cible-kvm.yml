@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
-        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -90,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
-        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -182,7 +182,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
-        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -280,7 +280,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
-        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -338,7 +338,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
-        run: tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:

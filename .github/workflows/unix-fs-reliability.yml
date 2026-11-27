@@ -36,7 +36,7 @@ jobs:
           target-hote/parcours
 
       - name: QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 build-essential file
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 build-essential file
 
 
       - uses: ./.github/actions/fabric-bootimage

@@ -32,7 +32,7 @@ jobs:
 
       - name: QEMU + toolchains de sondes
         run: |
-          tools/ci/apt-installe.sh \
+          tools/ci/apt-installe-ubuntu.sh \
             qemu-system-x86 \
             musl-tools \
             build-essential \
