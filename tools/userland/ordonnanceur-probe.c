@@ -588,6 +588,20 @@ static void imprime(const struct phase *ph)
         printf("  ventilation %s : %s\n", ph->nom, ph->ventilation);
     if (ph->non_jugeable[0])
         printf("  phase non jugeable -- %s\n", ph->non_jugeable);
+
+    // Diagnostic opt-in, après la mesure. N'ajoute aucun appel système entre
+    // deux réveils et ne change pas le calcul des centiles ni le verdict.
+    const char *trace = getenv("BO_ORDO_TRACE_SAMPLES");
+    if (trace && strcmp(trace, "1") == 0) {
+        for (int i = 0; i < REVEILS; i++) {
+            printf("ORDO_TRACE phase=%s i=%d echeance_us=%lld retard_us=%lld "
+                   "sommeil=%d ecart=%d non_apparies=%d pret_ns=%lld "
+                   "externe_ns=%lld masque_ns=%lld inexplique_ns=%lld\n",
+                   ph->nom, i, ph->attendu[i], ph->retard[i],
+                   ph->dormi[i], ph->contamine[i], ph->non_apparies, ph->pret[i],
+                   ph->externe[i], ph->masque[i], ph->inexplique[i]);
+        }
+    }
 }
 
 // Un processus de calcul : une boucle qui ne se bloque jamais. Il ecrit son
