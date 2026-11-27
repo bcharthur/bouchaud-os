@@ -1,0 +1,41 @@
+name: Capture causale SMP4 sur runner hébergé
+on:
+  push:
+    branches: [codex/trace-smp4-heberge]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Installer les dépendances Ubuntu signées
+        run: |
+          args=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
+          sudo apt-get "${args[@]}" update
+          sudo apt-get "${args[@]}" install -y --no-install-recommends qemu-system-x86 musl-tools build-essential
+      - name: Construire le BIOS instrumenté et le scénario
+        run: |
+          mkdir preuves
+          { git rev-parse HEAD; lscpu; qemu-system-x86_64 --version; cat /proc/self/cgroup; } > preuves/hote.txt
+          cargo bootimage --version || cargo install bootimage --locked
+          BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" cargo bootimage --features diag-trace-reveil
+          tools/ci/fabrique-scenario-endurance.sh scenario
+          sed -i '1i export BO_ORDO_TRACE_FILE=/ordo-trace.txt' scenario/scenario/autorun
+          printf 'cat /ordo-trace.txt\necho TRACE_EXPORT_FIN\n' >> scenario/scenario/autorun
+          touch scenario/scenario/garde-vm-vivante
+          (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/scenario/endurance.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario/scenario")
+          sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin scenario/endurance.img > preuves/inputs.sha256
+      - name: Capturer et corréler les réveils
+        run: |
+          target=target/x86_64-bouchaud_os/debug
+          python3 tools/ci/capture_trace_reveil_qemu.py "$target/bouchaud-os" "$target/bootimage-bouchaud-os.bin" scenario/endurance.img preuves
+          python3 tools/ci/analyse_trace_reveil.py preuves/BO_TRACE_REVEIL_TOTAL preuves/BO_TRACE_REVEIL preuves/echantillons.txt preuves/quantiles.csv --file preuves/BO_TRACE_FILE_TOTAL preuves/BO_TRACE_FILE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trace-reveils-smp4
+          path: preuves/
