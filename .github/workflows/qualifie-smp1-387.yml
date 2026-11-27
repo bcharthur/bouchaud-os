@@ -73,7 +73,14 @@ jobs:
         run: |
           tools/ci/fabrique-scenario-endurance.sh "$RUNNER_TEMP/scenario"
           mkdir -p preuves
-          { qemu-system-x86_64 --version; lscpu; cat /sys/fs/cgroup/cpu.max; } > preuves/hote.txt
+          {
+            qemu-system-x86_64 --version
+            lscpu
+            cat /proc/self/cgroup
+            for quota in /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu/cpu.cfs_quota_us /sys/fs/cgroup/cpu/cpu.cfs_period_us; do
+              if test -r "$quota"; then printf '%s ' "$quota"; cat "$quota"; fi
+            done
+          } > preuves/hote.txt
           sha256sum images/*/*.bin "$RUNNER_TEMP/scenario/endurance.img" > preuves/inputs.sha256
       - name: Exécuter les essais
         env:
