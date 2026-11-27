@@ -153,7 +153,7 @@ jobs:
       - name: Déclencher le Nightly de la branche indépendante
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: 38dfb6d756ad22831f98626ca2299c11799de839
+          EXPECTED_SHA: b3fa8d41438cfa0959a9b437b70dc0d876642fe9
         run: |
           set -euo pipefail
           ref=codex/nightly-concurrency
