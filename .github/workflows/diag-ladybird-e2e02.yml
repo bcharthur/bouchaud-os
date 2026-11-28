@@ -1,0 +1,66 @@
+name: Diagnostic Ladybird E2E-02 KVM
+on:
+  push:
+    branches: [codex/diag-ladybird-e2e02]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  parcours:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Outils Ubuntu et accès à KVM
+        run: |
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 file acl unzip
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+      - name: Relire le BIOS et l’artefact du run indépendant en échec
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ee311e024925e50d4f22ae128b31e9e52c05f1ee
+          SOURCE_RUN: '46140302365'
+        run: |
+          set -euo pipefail
+          mkdir -p preuves
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/artifacts?per_page=100" > "$RUNNER_TEMP/archives.json"
+          for artifact in 15260904703 15262105599; do
+            digest=$(jq -er --argjson id "$artifact" --arg sha "$SOURCE_SHA" --argjson run "$SOURCE_RUN" \
+              '.artifacts[] | select(.id == $id and (.expired == false) and (.workflow_run.head_sha == $sha) and (.workflow_run.id == $run)) | .digest | sub("^sha256:"; "")' "$RUNNER_TEMP/archives.json")
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact/zip" > "$RUNNER_TEMP/$artifact.zip"
+            printf '%s  %s\n' "$digest" "$RUNNER_TEMP/$artifact.zip" | sha256sum -c - | tee -a preuves/entrees.txt
+          done
+          git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/source" "$SOURCE_SHA"
+          unzip -q "$RUNNER_TEMP/15260904703.zip" -d "$RUNNER_TEMP/proof-bios"
+          (
+            cd "$RUNNER_TEMP/source"
+            python3 tools/ci/fabric_bootimage.py install "$RUNNER_TEMP/proof-bios"
+            cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$RUNNER_TEMP/boot.bin"
+          ) | tee -a preuves/entrees.txt
+          printf '098ce7b8db657facf559beb675a1d13d433f37a831684504381be60668a8c2b2  %s\n' "$RUNNER_TEMP/boot.bin" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/15262105599.zip" -d native-browser
+          tools/ci/verifie_artefact_ladybird.sh entrees native-browser | tee -a preuves/entrees.txt
+          cp native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json preuves/
+      - name: Parcours corrigé E2E-01 et E2E-02
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools/e2e/ladybird -p test_e2e.py -q
+          python3 -I tools/e2e/ladybird/tls/genere_tls.py "$RUNNER_TEMP/e2e-tls"
+          python3 -I tools/e2e/ladybird/prepare_disque.py --artefact native-browser \
+            --certs /etc/ssl/certs/ca-certificates.crt --ca-test "$RUNNER_TEMP/e2e-tls/ca.pem" \
+            --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img
+          for repetition in 1 2; do
+            python3 tools/e2e/ladybird/e2e.py --boot "$RUNNER_TEMP/boot.bin" \
+              --disque disque-e2e.img --accel kvm --smp 4 --memoire 8192 \
+              --sortie "preuves/kvm-$repetition" --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
+              --scenarios E2E-01,E2E-02 --exige E2E-01,E2E-02
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostic-ladybird-e2e02
+          path: preuves/
+          if-no-files-found: error

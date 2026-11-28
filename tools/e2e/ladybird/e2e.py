@@ -296,26 +296,48 @@ class Banc:
             return re.escape(v) if regex else v
         return re.sub(r"\$\{(\w+)\}", r, motif)
 
+    def attend_marqueurs(self, jalons: list[dict]) -> tuple[bool, str]:
+        # Un groupe observe les jalons après le même geste, dans l’ordre où
+        # ils arrivent. Chaque délai commence après le jalon précédent de
+        # la définition, comme pour les attentes séquentielles.
+        expressions = [re.compile(self.subst(e["attend"], True)) for e in jalons]
+        depart = self.curseur
+        trouves = {}
+        attendu = 0
+        fin = time.monotonic() + float(jalons[attendu].get("delai_s", 60))
+        while time.monotonic() < fin:
+            texte = self.texte()
+            for i, rx in enumerate(expressions):
+                if i in trouves:
+                    continue
+                m = rx.search(texte, depart)
+                if m:
+                    trouves[i] = m.end()
+                    self.vars.update({k: v for k, v in m.groupdict().items() if v is not None})
+                    if nom := jalons[i].get("nom"):
+                        self.instants[nom] = self.maintenant_ms()
+            if len(trouves) == len(jalons):
+                self.curseur = max(trouves.values())
+                return True, ""
+            suivant = next(i for i in range(len(jalons)) if i not in trouves)
+            if suivant != attendu:
+                attendu = suivant
+                fin = time.monotonic() + float(jalons[attendu].get("delai_s", 60))
+            motif = expressions[attendu].pattern
+            if self.qemu.poll() is not None:
+                return False, f"QEMU arrete (code {self.qemu.returncode}) avant : {motif}"
+            if any(p in texte for p in PANIQUES):
+                return False, f"panique noyau avant : {motif}"
+            time.sleep(0.25)
+        return False, f"absent apres {jalons[attendu].get('delai_s', 60)} s : {expressions[attendu].pattern}"
+
     # --- etapes --------------------------------------------------------------
     def etape(self, e: dict) -> tuple[bool, str]:
         nom = e.get("nom")
         if "attend" in e:
-            rx = re.compile(self.subst(e["attend"], True))
-            fin = time.time() + float(e.get("delai_s", 60))
-            while time.time() < fin:
-                m = rx.search(self.texte(), self.curseur)
-                if m:
-                    self.curseur = m.end()
-                    self.vars.update({k: v for k, v in m.groupdict().items() if v is not None})
-                    if nom:
-                        self.instants[nom] = self.maintenant_ms()
-                    return True, ""
-                if self.qemu.poll() is not None:
-                    return False, f"QEMU arrete (code {self.qemu.returncode}) avant : {rx.pattern}"
-                if any(p in self.texte() for p in PANIQUES):
-                    return False, f"panique noyau avant : {rx.pattern}"
-                time.sleep(0.25)
-            return False, f"absent apres {e.get('delai_s', 60)} s : {rx.pattern}"
+            return self.attend_marqueurs([e])
+        if "attend_tous" in e:
+            return self.attend_marqueurs(e["attend_tous"])
         if "absent" in e:
             depart = self.curseur
             time.sleep(float(e.get("pendant_s", 3)))

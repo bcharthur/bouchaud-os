@@ -27,7 +27,7 @@ import e2e  # noqa: E402
 import fixture  # noqa: E402
 
 ACTIONS = {"attend", "absent", "menu", "touches", "tape", "pause_s", "capture", "fixture_vu", "clic_client", "fixture_jamais",
-           "survole_client", "molette", "attend_couleur"}
+           "survole_client", "molette", "attend_couleur", "attend_tous"}
 
 
 class Definition(unittest.TestCase):
@@ -66,7 +66,8 @@ class Definition(unittest.TestCase):
 
     def test_metriques_citent_des_etapes_nommees(self):
         for s in self.d["scenarios"]:
-            noms = {e["nom"] for e in s.get("etapes", []) if "nom" in e} | {"lancement_qemu"}
+            jalons = (j for e in s.get("etapes", []) for j in e.get("attend_tous", [e]))
+            noms = {e["nom"] for e in jalons if "nom" in e} | {"lancement_qemu"}
             for m in s.get("metriques", []):
                 if "de" in m:
                     self.assertIn(m["de"], noms, f"{s['id']} {m['nom']}")
@@ -162,6 +163,32 @@ class Disque(unittest.TestCase):
 
 
 class Metriques(unittest.TestCase):
+    def test_e2e02_exige_trame_et_document_dans_les_deux_ordres(self):
+        definition = json.loads((ICI / "scenarios.json").read_text(encoding="utf-8"))
+        scenario = next(sc for sc in definition["scenarios"] if sc["id"] == "E2E-02")
+        groupe = next(e for e in scenario["etapes"] if "attend_tous" in e)
+        fenetre = "BOUCHAUD_ATELIER_CLIENT_PREMIERE_TRAME pid=17 titre=Ladybird\n"
+        trame = "BOUCHAUD_UI_FIRST_FRAME onglet=1 page=1\n"
+        document = "[LB:NAV] onglet=1 document_charge url=http://10.0.2.2:18300/accueil.html\n"
+        with tempfile.TemporaryDirectory() as dossier:
+            options = SimpleNamespace(tls_dir=None, port_fixture=18300)
+            banc = e2e.Banc(options, Path(dossier))
+            banc.vars["pid_navigateur"] = "17"
+            banc.qemu = SimpleNamespace(poll=lambda: 0, returncode=0)
+            for sequence in (fenetre + trame + document, fenetre + document + trame):
+                with self.subTest(sequence=sequence):
+                    banc.curseur = 0
+                    banc.instants = {}
+                    banc.serie.write_text(sequence)
+                    self.assertEqual(banc.etape(groupe), (True, ""))
+                    self.assertEqual(set(banc.instants), {"fenetre", "premiere_trame", "accueil_charge"})
+                    reste = banc.texte()[banc.curseur:]
+                    self.assertNotIn("document_charge", reste)
+                    self.assertNotIn("BOUCHAUD_UI_FIRST_FRAME", reste)
+            banc.serie.write_text(document + fenetre + trame)
+            banc.curseur = len(document)
+            self.assertFalse(banc.etape(groupe)[0], "un ancien document ne doit pas servir de preuve")
+
     def test_instants_locaux_au_parcours(self):
         class FauxBanc:
             def __init__(self):

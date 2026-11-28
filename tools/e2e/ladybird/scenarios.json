@@ -27,9 +27,11 @@
         {"menu": "Ladybird", "nom": "clic_menu"},
         {"attend": "BOUCHAUD_STAGE2_LADYBIRD_LAUNCHED pid=(?P<pid_navigateur>\\d+)", "delai_s": 120, "nom": "lance"},
         {"attend": "BROWSER_HOST_START", "delai_s": 300, "nom": "browserhost"},
-        {"attend": "BOUCHAUD_ATELIER_CLIENT_PREMIERE_TRAME pid=${pid_navigateur} ", "delai_s": 600, "nom": "fenetre"},
-        {"attend": "BOUCHAUD_UI_FIRST_FRAME onglet=1", "delai_s": 600, "nom": "premiere_trame"},
-        {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/accueil.html", "delai_s": 300, "nom": "accueil_charge"},
+        {"attend_tous": [
+          {"attend": "BOUCHAUD_ATELIER_CLIENT_PREMIERE_TRAME pid=${pid_navigateur} ", "delai_s": 600, "nom": "fenetre"},
+          {"attend": "BOUCHAUD_UI_FIRST_FRAME onglet=1", "delai_s": 600, "nom": "premiere_trame"},
+          {"attend": "\\[LB:NAV\\] onglet=1 document_charge url=${FIXTURE}/accueil.html", "delai_s": 300, "nom": "accueil_charge"}
+        ]},
         {"pause_s": 3},
         {"capture": "02-navigateur", "couleur": "accueil", "min_px": 20000}
       ],
