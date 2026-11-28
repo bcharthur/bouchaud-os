@@ -118,10 +118,8 @@ impl Surface {
     /// graphique passera en ring 3, c'est cette fonction — et elle seule — qui
     /// deviendra un `sendmsg`.
     pub fn descripteur(&self, processus: &Process) -> i32 {
-        processus
-            .files
-            .lock()
-            .insert(FileDesc::fichier_partage_inscriptible(self.node))
+        let desc = FileDesc::fichier_partage_inscriptible(self.node);
+        processus.files.lock().insert(desc)
     }
 
     /// Adresse noyau du premier octet d'une page, si elle existe.

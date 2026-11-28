@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verifie le mode d'acces des fichiers destines au partage inscriptible."""
+"""Verifie le mode d'acces et la prise de reference hors verrou FdTable."""
 
 from pathlib import Path
 import sys
@@ -56,6 +56,20 @@ def main() -> int:
         "Surface::descripteur ne porte plus son droit d'ecriture",
         erreurs,
     )
+
+    for site, code, debut, fin, verrou in (
+        ("memfd", memoire, "pub fn sys_memfd_create(", "fn errno_creation(", ".files.lock()"),
+        ("client", client, "let mut prepare = move |processus:", "alloc::vec![", ".files.lock()"),
+        ("surface", surface, "pub fn descripteur(", "fn page(", ".lock()"),
+    ):
+        section = code.partition(debut)[2].partition(fin)[0]
+        constructeur = section.find("FileDesc::fichier_partage_inscriptible(")
+        prise = section.find(verrou)
+        exige(
+            0 <= constructeur < prise,
+            f"{site} : la prise de reference partagee peut attendre sous FdTable",
+            erreurs,
+        )
 
     oublis = []
     for chemin in (ROOT / "src").rglob("*.rs"):

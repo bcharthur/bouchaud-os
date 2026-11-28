@@ -1189,12 +1189,11 @@ pub fn sys_memfd_create(nom_addr: u64, _flags: u32) -> i64 {
         fs.nodes[idx].gid = owner_gid;
     }
     let process = task::current_process();
-    let mut borrowed = process.files.lock();
     // `MFD_CLOEXEC` vaut 1 : c'est le seul drapeau que les appelants posent en
     // pratique, et le respecter evite qu'un tampon fuie dans un `execve`.
     let mut desc = FileDesc::fichier_partage_inscriptible(idx);
     desc.cloexec = _flags & 1 != 0;
-    let fd = borrowed.insert(desc);
+    let fd = process.files.lock().insert(desc);
     if fd < 0 {
         -errno::EMFILE
     } else {
