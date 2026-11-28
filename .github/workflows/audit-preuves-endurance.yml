@@ -1,4 +1,4 @@
-name: Auditer les champs ftrace du diagnostic SMP
+name: Relire la reprise des réveils SMP8
 on:
   push:
     branches: [codex/audit-preuves-endurance]
@@ -10,40 +10,76 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
-      - name: Relire la trace GitHub publiée
+      - uses: actions/checkout@v4
+        with:
+          ref: d0c0f43c253f412b3e1efe5664b3a8e4a2c6accf
+          persist-credentials: false
+      - name: Raccorder la reprise et la lecture utilisateur sans relancer QEMU
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15271214091/zip" > traces.zip
-          printf '%s  %s\n' 6e70d094056a09d0f85d2a7e6b82461b8180b5573d4bee6c5388e288bc74896d traces.zip | sha256sum -c -
-          mkdir preuves
-          python3 - <<'PY'
-          from collections import Counter
+          mkdir preuves sources
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15272179792/zip" > hote.zip
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15273190318/zip" > invites.zip
+          sha256sum -c <<'EOF_HASH'
+          9b0412c64119447400ac55c5160e252cb63e8e44c0c0381cb5c138c4beb5a44b  hote.zip
+          69c032c528ed44b3d8cfb563fe86353e5d6e70a9a6008105d9521de86a2d4a2a  invites.zip
+          EOF_HASH
+          unzip -q invites.zip -d sources
+          PYTHONPATH=tools/ci python3 - <<'PY'
           from pathlib import Path
-          import gzip, re, zipfile
+          import csv, gzip, json, re, zipfile
+          from trace_hote_reveil import PERTE, ancres, borne_hote, chevauchement, residu_raccord, trace_linux
 
-          with zipfile.ZipFile('traces.zip') as archive:
-              for member in archive.namelist():
-                  if not member.endswith('.trace.gz'):
-                      continue
-                  bras = Path(member).parent.name
-                  print(bras, archive.getinfo(member).file_size)
-                  with archive.open(member) as fichier, gzip.open(fichier, 'rt') as trace:
-                      traces = []
-                      comptes = Counter()
-                      for i, ligne in enumerate(trace):
-                          if i < 7 or re.search(r'\b(sys_(?:enter_)?writev?)\b', ligne):
-                              traces.append(ligne)
-                          m = re.search(r'\d\.\d+: (\w+)', ligne)
-                          if m:
-                              comptes[m[1]] += 1
-                      (Path('preuves') / f'{bras}.txt').write_text(''.join(traces) + str(comptes) + '\n')
-                  if bras in {'smp4-1-hote4', 'smp4-4-hote4'}:
-                      (Path('preuves') / f'{bras}.trace.gz').write_bytes(archive.read(member))
+          def borne_reprise(debut, fin, points, intervalles, residu):
+              for g, d in zip(points, points[1:]):
+                  if g[1] <= debut < fin <= d[0]:
+                      h0, h1 = borne_hote(debut, g, d)
+                      h2, h3 = borne_hote(fin, g, d)
+                      return (chevauchement(intervalles, h1 + residu, h2 - residu, incertitude_debut=999),
+                              chevauchement(intervalles, h0 - residu, h3 + residu, incertitude_fin=999),
+                              max(h1-h0, h3-h2) + 2*residu)
+              return (None, None, None)
+
+          with zipfile.ZipFile('hote.zip') as hote:
+              for rep in sorted(Path('sources').glob('smp*')):
+                  assert not PERTE.search((rep / 'hote-stats.txt').read_text())
+                  cpu_map = {c['thread-id']: c['cpu-index'] for c in json.loads((rep / 'hote-vcpu.jsonl').read_text().splitlines()[0])['cpu_map']}
+                  member, = (n for n in hote.namelist() if n.endswith(f'{rep.name}/hote.trace.gz'))
+                  with hote.open(member) as fichier, gzip.open(fichier, 'rt') as flux:
+                      h, intervalles = trace_linux(flux, cpu_map)
+                  points = ancres(rep, h)
+                  residu = residu_raccord(points)
+                  brut = (rep / 'echantillons.txt').read_text().splitlines()
+                  with (rep / 'raccord-hote.csv').open() as fichier:
+                      p99 = [x for x in csv.DictReader(fichier) if x['population'] == 'tout' and x['phase'] != 'au repos' and x['centile'] == 'p99']
+                  for nom in ('sous charge (normal)', 'sous charge (interactif)'):
+                      phase = [x for x in p99 if x['phase'] == nom]
+                      serie = max(int(x['serie']) for x in phase)
+                      for r in phase:
+                          if int(r['serie']) != serie or not r['reprise_ns']:
+                              continue
+                          i = int(r['echantillon'])
+                          champs = dict(re.findall(r'(\w+)=(-?\d+)', brut[(serie - 1)*300 + i]))
+                          cible = int(champs['echeance_us'])*1000
+                          fin = cible + int(champs['retard_us'])*1000
+                          reprise = int(r['reprise_ns'])
+                          cpu = int(r['cpu_reprise'])
+                          arrivee = borne_reprise(reprise, fin, points, intervalles[cpu], residu)
+                          ligne = {
+                              'bras': rep.name, 'phase': nom, 'serie': serie, 'indice': i, 'cpu_reprise': cpu,
+                              'retard_us': int(r['retard_us']), 'cible_avancee_ns': int(r['echeance_ns']) - cible,
+                              'reprise_vers_utilisateur_ns': fin - reprise,
+                              'intervalle_cpu_reprise_pret_hote_ns': arrivee[:2], 'incertitude_ns': arrivee[2],
+                          }
+                          line = json.dumps(ligne, ensure_ascii=False)
+                          print(line)
+                          with Path('preuves/reprises-p99.jsonl').open('a') as rapport:
+                              rapport.write(line + '\n')
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: extrait-ftrace
+          name: reprises-p99
           path: preuves/
           if-no-files-found: error
