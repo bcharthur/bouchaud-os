@@ -81,8 +81,26 @@ jobs:
           foreach ($m in $matched) { Write-Host ('REAL_MATCH run='+$m.RunId+' sha='+$m.HeadSha) }
           Write-Host 'REAL_API_QUERY_OK'
 
+  artifact-ready:
+    name: Wait for the exact Ladybird artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 250
+    outputs:
+      source_run: ${{ steps.provenance.outputs.source_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: provenance
+        name: Wait for the canonical producer to publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPOT: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: python3 tools/ci/ladybird_provenance.py attends
+
   windows-real-download:
-    needs: [windows-powershell-51, live-github-selection]
+    needs: [windows-powershell-51, live-github-selection, artifact-ready]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -93,14 +111,18 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          LADYBIRD_SOURCE_RUN: ${{ needs.artifact-ready.outputs.source_run }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:LADYBIRD_SOURCE_RUN -notmatch '^[1-9][0-9]*$') {
+            throw 'No verified Ladybird producer supplied by the artifact gate'
+          }
           . .\tools\run\ladybird-artifact.ps1
           $target = Join-Path $env:RUNNER_TEMP 'bouchaud-ladybird-v7-verified'
           $required = @('BouchaudBrowserHost','WebContent','RequestServer','ImageDecoder',
                         'Compositor','WebWorker','WebDriver','webcontent-bootstrap',
                         'M9_CAPABLE','V16_UI_CAPABLE','V19_UI_CAPABLE')
-          Use-BoLadybirdArtifact -RepoRoot $PWD.Path -TargetDir $target -RequiredFiles $required -ArtifactName 'bouchaud-ladybird-native-browser'
+          Use-BoLadybirdArtifact -RepoRoot $PWD.Path -TargetDir $target -RequiredFiles $required -ArtifactName 'bouchaud-ladybird-native-browser' -RunId ([long]$env:LADYBIRD_SOURCE_RUN)
           if (-not (Test-BoArtifact -Root $PWD.Path -Directory $target -RequiredFiles $required)) {
             throw 'Downloaded artifact did not pass hash, ELF and fingerprint verification'
           }

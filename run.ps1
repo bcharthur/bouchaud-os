@@ -104,6 +104,11 @@ param(
     [ValidateSet('double', 'simple')]
     [string]$Surface = 'simple',
 
+    # Banc A/B WHPX CPU. Les deux bras utilisent le meme bootimage main.
+    [string]$BenchmarkBootImage,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$BenchmarkBootSha256,
+
     # BOUCHAUD_PERF_V1 -- journalisation de DIAGNOSTIC (profil RIP par tic,
     # releves periodiques complets). Sans ce commutateur, la session
     # interactive tourne en journalisation de PRODUCTION ; les evenements
@@ -143,6 +148,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Performance -and ($PSBoundParameters.ContainsKey('BenchmarkBootImage') -or $PSBoundParameters.ContainsKey('BenchmarkBootSha256'))) {
+    throw 'Performance incompatible avec -BenchmarkBootImage et -BenchmarkBootSha256. Le banc A/B exige -Accel whpx sans repli TCG.'
+}
 
 $RepoRoot = $PSScriptRoot
 # BOUCHAUD_WHPX_CPU_V1 : modele CPU par accelerateur, lancement journalise,
@@ -352,28 +361,43 @@ if ($LASTEXITCODE -ne 0) {
 # Construction du noyau
 # =============================================================================
 
-Write-Section "Construction du noyau"
-
-Ensure-Cargo
-
-if ($P10GPU) {
-    Write-Host "P10 GPU : compilation noyau avec composition VIRGL" -ForegroundColor Cyan
-    & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd" "--features" "p10-universal-present,p10-virgl-experimental"
+if ($BenchmarkBootImage -or $BenchmarkBootSha256) {
+    if (-not $BenchmarkBootImage -or -not $BenchmarkBootSha256 -or $Accel -ne 'whpx' -or $P10GPU) {
+        Fail 'Le bootimage de comparaison exige un fichier, son SHA-256, -Accel whpx et le backend CPU.'
+    }
+    if (-not (Test-Path -LiteralPath $BenchmarkBootImage -PathType Leaf)) {
+        Fail 'Bootimage de comparaison absent.'
+    }
+    $BootImage = (Resolve-Path -LiteralPath $BenchmarkBootImage).ProviderPath
+    $bootHash = (Get-FileHash -LiteralPath $BootImage -Algorithm SHA256).Hash
+    if ($bootHash -ne $BenchmarkBootSha256) {
+        Fail "SHA-256 du bootimage de comparaison incorrect ($bootHash)."
+    }
+    Write-Host "Bootimage WHPX commun SHA256=$bootHash"
 }
 else {
-    & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
+    Write-Section "Construction du noyau"
+
+    Ensure-Cargo
+
+    if ($P10GPU) {
+        Write-Host "P10 GPU : compilation noyau avec composition VIRGL" -ForegroundColor Cyan
+        & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd" "--features" "p10-universal-present,p10-virgl-experimental"
+    }
+    else {
+        & "$RepoRoot\tools\run\cargo-bootimage-safe.cmd"
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+
+        Fail "cargo bootimage a echoue (code $LASTEXITCODE). QEMU ne sera pas lance."
+    }
+
+
+    $BootImage = Join-Path `
+        $RepoRoot `
+        "target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin"
 }
-
-if ($LASTEXITCODE -ne 0) {
-
-    Fail "cargo bootimage a echoue (code $LASTEXITCODE). QEMU ne sera pas lance."
-}
-
-
-$BootImage = Join-Path `
-    $RepoRoot `
-    "target\x86_64-bouchaud_os\debug\bootimage-bouchaud-os.bin"
-
 
 if (-not (Test-Path $BootImage)) {
 

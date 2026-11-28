@@ -60,4 +60,18 @@ foreach ($free in @(0, 3072, 4095)) {
     $capabilities.AvailableMiB = $free
     Assert-Refused $capabilities @{} 'moins de 4096 MiB'
 }
+$launcher = Join-Path $PSScriptRoot '../../run.ps1'
+foreach ($benchmark in @(
+    @{ BenchmarkBootImage = 'nonexistent.bin' },
+    @{ BenchmarkBootSha256 = ('0' * 64) },
+    @{ BenchmarkBootImage = 'nonexistent.bin'; BenchmarkBootSha256 = ('0' * 64); Accel = 'whpx' }
+)) {
+    $refused = $false
+    try { & $launcher -Performance @benchmark }
+    catch {
+        if ($_.Exception.Message -notlike 'Performance incompatible*sans repli TCG*') { throw }
+        $refused = $true
+    }
+    Assert-Profile $refused 'Conflit entre Performance et le banc A/B non refuse'
+}
 Write-Output 'BOUCHAUD_PERFORMANCE_TEST_OK'
