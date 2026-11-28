@@ -149,3 +149,16 @@ fn un_client_qui_balbutie_puis_parle_finit_par_etre_cru() {
     assert!(verdict.protocole_actif());
     assert!(!verdict.recompose_a_l_aveugle());
 }
+
+#[path = "../../src/gui/sortie_courtier.rs"]
+mod sortie_courtier;
+
+#[test]
+fn seule_une_sortie_zero_annoncee_est_normale() {
+    assert!(sortie_courtier::normale(0, true));
+    assert!(!sortie_courtier::normale(0, false));
+    for code in [1, 127, -11, 139] {
+        assert!(!sortie_courtier::normale(code, true));
+        assert!(!sortie_courtier::normale(code, false));
+    }
+}
