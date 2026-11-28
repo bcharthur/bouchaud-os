@@ -27,7 +27,20 @@ jobs:
             taskset -pc $$
             qemu-system-x86_64 --version
             cat /proc/self/cgroup
-            cat /sys/fs/cgroup/cpu.max /proc/pressure/cpu
+            findmnt -t cgroup,cgroup2 -o TARGET,FSTYPE,OPTIONS
+            while IFS=: read -r id controleurs chemin; do
+              if [ "$id" = 0 ]; then
+                fichiers=(/sys/fs/cgroup"${chemin%/}"/cpu.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/unified"${chemin%/}"/cpu.max)
+              elif [[ ,$controleurs, == *,cpu,* ]]; then
+                fichiers=(/sys/fs/cgroup/{cpu,cpu\,cpuacct,cpuacct\,cpu}"${chemin%/}"/cpu.cfs_{quota,period}_us)
+              else
+                continue
+              fi
+              for f in "${fichiers[@]}"; do
+                if [ -r "$f" ]; then printf '%s ' "$f"; cat "$f"; fi
+              done
+            done < /proc/self/cgroup
+            if [ -r /proc/pressure/cpu ]; then cat /proc/pressure/cpu; fi
             qemu-system-x86_64 -trace help
           } > preuves/hote.txt
           cargo bootimage --version || cargo install bootimage --locked
