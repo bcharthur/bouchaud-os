@@ -1,4 +1,4 @@
-name: Relire la reprise des réveils SMP8
+name: Attribuer tous les réveils archivés SMP4 et SMP8
 on:
   push:
     branches: [codex/audit-preuves-endurance]
@@ -8,18 +8,22 @@ permissions:
 jobs:
   lecture:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: d0c0f43c253f412b3e1efe5664b3a8e4a2c6accf
           persist-credentials: false
-      - name: Raccorder la reprise et la lecture utilisateur sans relancer QEMU
+      - uses: actions/checkout@v4
+        with:
+          ref: d0c0f43c253f412b3e1efe5664b3a8e4a2c6accf
+          path: diagnostic-source
+          persist-credentials: false
+      - name: Refaire le rapprochement à partir des archives vérifiées
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir preuves sources
+          mkdir sources
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15272179792/zip" > hote.zip
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/15273190318/zip" > invites.zip
           sha256sum -c <<'EOF_HASH'
@@ -27,59 +31,10 @@ jobs:
           69c032c528ed44b3d8cfb563fe86353e5d6e70a9a6008105d9521de86a2d4a2a  invites.zip
           EOF_HASH
           unzip -q invites.zip -d sources
-          PYTHONPATH=tools/ci python3 - <<'PY'
-          from pathlib import Path
-          import csv, gzip, json, re, zipfile
-          from trace_hote_reveil import PERTE, ancres, borne_hote, chevauchement, residu_raccord, trace_linux
-
-          def borne_reprise(debut, fin, points, intervalles, residu):
-              for g, d in zip(points, points[1:]):
-                  if g[1] <= debut < fin <= d[0]:
-                      h0, h1 = borne_hote(debut, g, d)
-                      h2, h3 = borne_hote(fin, g, d)
-                      return (chevauchement(intervalles, h1 + residu, h2 - residu, incertitude_debut=999),
-                              chevauchement(intervalles, h0 - residu, h3 + residu, incertitude_fin=999),
-                              max(h1-h0, h3-h2) + 2*residu)
-              return (None, None, None)
-
-          with zipfile.ZipFile('hote.zip') as hote:
-              for rep in sorted(Path('sources').glob('smp*')):
-                  assert not PERTE.search((rep / 'hote-stats.txt').read_text())
-                  cpu_map = {c['thread-id']: c['cpu-index'] for c in json.loads((rep / 'hote-vcpu.jsonl').read_text().splitlines()[0])['cpu_map']}
-                  member, = (n for n in hote.namelist() if n.endswith(f'{rep.name}/hote.trace.gz'))
-                  with hote.open(member) as fichier, gzip.open(fichier, 'rt') as flux:
-                      h, intervalles = trace_linux(flux, cpu_map)
-                  points = ancres(rep, h)
-                  residu = residu_raccord(points)
-                  brut = (rep / 'echantillons.txt').read_text().splitlines()
-                  with (rep / 'raccord-hote.csv').open() as fichier:
-                      p99 = [x for x in csv.DictReader(fichier) if x['population'] == 'tout' and x['phase'] != 'au repos' and x['centile'] == 'p99']
-                  for nom in ('sous charge (normal)', 'sous charge (interactif)'):
-                      phase = [x for x in p99 if x['phase'] == nom]
-                      serie = max(int(x['serie']) for x in phase)
-                      for r in phase:
-                          if int(r['serie']) != serie or not r['reprise_ns']:
-                              continue
-                          i = int(r['echantillon'])
-                          champs = dict(re.findall(r'(\w+)=(-?\d+)', brut[(serie - 1)*300 + i]))
-                          cible = int(champs['echeance_us'])*1000
-                          fin = cible + int(champs['retard_us'])*1000
-                          reprise = int(r['reprise_ns'])
-                          cpu = int(r['cpu_reprise'])
-                          arrivee = borne_reprise(reprise, fin, points, intervalles[cpu], residu)
-                          ligne = {
-                              'bras': rep.name, 'phase': nom, 'serie': serie, 'indice': i, 'cpu_reprise': cpu,
-                              'retard_us': int(r['retard_us']), 'cible_avancee_ns': int(r['echeance_ns']) - cible,
-                              'reprise_vers_utilisateur_ns': fin - reprise,
-                              'intervalle_cpu_reprise_pret_hote_ns': arrivee[:2], 'incertitude_ns': arrivee[2],
-                          }
-                          line = json.dumps(ligne, ensure_ascii=False)
-                          print(line)
-                          with Path('preuves/reprises-p99.jsonl').open('a') as rapport:
-                              rapport.write(line + '\n')
-          PY
+          PYTHONPATH=diagnostic-source/tools/ci python3 tools/ci/audit_reveils_hote.py hote.zip sources preuves
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: reprises-p99
+          name: attribution-integrale-des-reveils
           path: preuves/
           if-no-files-found: error
