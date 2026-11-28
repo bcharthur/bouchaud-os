@@ -321,6 +321,10 @@ Les preuves des campagnes indépendantes doivent provenir du run et
 du SHA retenus. Le vérificateur rejette les archives obligatoires
 absentes, expirées, ambiguës ou dont le SHA-256 téléchargé diffère
 de celui publié par GitHub Actions.
+Au moment du verdict PR, le Gate vérifie que les tentatives indépendantes
+attestées sont toujours les dernières et que leurs archives ainsi que
+les archives internes de FULL existent avec les mêmes identifiants et
+empreintes. Une campagne relancée demande un rapport FULL actualisé.
 
 Un tag FULL ou CERTIFICATION demande aussi les campagnes indépendantes
 manquantes via le jeton Actions du run, limité à ce job et à ce

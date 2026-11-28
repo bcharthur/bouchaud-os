@@ -18,8 +18,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: nightly-full
-  cancel-in-progress: true
+  # Une qualification de candidat ne doit pas interrompre le Nightly de main.
+  group: nightly-full-${{ github.event_name }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   kernel-build:

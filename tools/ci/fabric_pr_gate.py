@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import zipfile
 
-from fabric_merge_gate import PROFILES, REGISTRY, api, valid_artifact
+from fabric_merge_gate import PROFILES, QUALIFICATION, REGISTRY, api, latest_run, valid_artifact
 from fabric_plan import CONFIG, MIGRATED, documentation, plan
 
 
@@ -89,7 +89,37 @@ def verify(repo, head, branch):
         raise ValueError("Couverture FULL incomplète.")
     if any(proof["status"] != "PASS" for proof in proofs.values()):
         raise ValueError("Une preuve FULL obligatoire n’a pas réussi.")
+    verify_archives(path, run, proofs["current-archives"], requirements["current_artifacts"])
+    verify_independent_campaigns(repo, head, branch, path, requirements["campaigns"], proofs)
     return {"decision": "GO", "profile": "FULL", **{key: expected[key] for key in ("sha", "run_id", "attempt")}}
+
+
+def verify_archives(path, run, proof, required):
+    if not required:
+        return
+    checked = proof.get("checked", {})
+    if len(checked) != len(required):
+        raise ValueError("Inventaire des archives obligatoires incomplet.")
+    listed = api(f"{path}/runs/{run['id']}/artifacts?per_page=100", "artifacts")
+    for name, attested in checked.items():
+        matches = [item for item in listed if item["name"] == name]
+        if (len(matches) != 1 or not valid_artifact(matches[0], run, since=run["created_at"])
+                or any(matches[0][key] != attested.get(key) for key in ("id", "digest"))):
+            raise ValueError(f"Archive attestée absente ou modifiée : {name}.")
+
+
+def verify_independent_campaigns(repo, head, branch, path, campaigns, proofs):
+    for workflow in campaigns:
+        run = latest_run(repo, head, branch, workflow)
+        if run is None:
+            raise ValueError(f"Campagne indépendante absente : {workflow}.")
+        if run["status"] != "completed":
+            raise PendingProof(f"Dernière tentative indépendante en cours : {workflow}.")
+        proof = proofs[workflow]
+        if (run["conclusion"] != "success"
+                or any(run[key] != proof.get(field) for key, field in (("id", "run"), ("run_attempt", "attempt")))):
+            raise ValueError(f"Preuve FULL obsolète ou en échec : {workflow}.")
+        verify_archives(path, run, proof.get("archives", {}), QUALIFICATION["campaigns"][workflow]["artifacts"])
 
 
 def read_report(path, run, expected_name, member_name):

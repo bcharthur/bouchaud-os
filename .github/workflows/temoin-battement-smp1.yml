@@ -1,0 +1,45 @@
+name: Témoin du battement SMP1
+
+on:
+  push:
+    branches: [codex/cpu-smp1-battement]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  temoin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8
+          path: temoin-base
+      - name: Installer QEMU et musl depuis Ubuntu
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential
+      - name: Construire les deux BIOS et le scénario commun
+        run: |
+          tools/ci/build_kernel.sh
+          temoin-base/tools/ci/build_kernel.sh
+          tools/ci/fabrique-scenario-endurance.sh "$RUNNER_TEMP/scenario"
+          root="$RUNNER_TEMP"
+          mkdir -p "$root/preuves"
+          { git rev-parse HEAD; git -C temoin-base rev-parse HEAD; qemu-system-x86_64 --version; lscpu; } > "$root/preuves/hote.txt"
+          sha256sum {temoin-base/,}target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$root/scenario/endurance.img" > "$root/preuves/inputs.sha256"
+      - name: Comparer le témoin et le correctif en SMP1
+        run: |
+          python3 tools/ci/reliability/temoin_battement_smp1.py \
+            temoin-base/target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin \
+            "$RUNNER_TEMP/scenario" "$RUNNER_TEMP/preuves/essai"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: temoin-battement-smp1
+          path: |
+            ${{ runner.temp }}/preuves/hote.txt
+            ${{ runner.temp }}/preuves/inputs.sha256
+            ${{ runner.temp }}/preuves/essai/*/*.log

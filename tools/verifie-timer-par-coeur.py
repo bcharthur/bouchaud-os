@@ -120,7 +120,8 @@ def main():
                 "reveille pas : c'est le verrou d'amorcage que cette regle "
                 "existe pour empecher."
             )
-        if "mesure_battement_par_coeur" not in enable:
+        if ("mesure_battement_par_coeur(200)" not in enable
+            or "mesure_battement(200," not in enable):
             fautes.append(
                 "smp.rs : le battement n'est plus mesure a l'amorcage. "
                 "Programmer un timer ne prouve pas qu'il se declenche, et "
@@ -164,7 +165,10 @@ def main():
                 "l'echantillonnage du quantum."
             )
 
-    mesure = corps(smp, "pub fn mesure_battement_par_coeur(")
+    point_entree = corps(smp, "pub fn mesure_battement_par_coeur(")
+    if point_entree is None or "mesure_battement(fenetre_ms," not in point_entree:
+        fautes.append("smp.rs : le point d’entrée ne délègue plus la mesure.")
+    mesure = corps(smp, "fn mesure_battement(")
     if mesure is None:
         fautes.append("smp.rs : la mesure du battement a disparu.")
     else:
