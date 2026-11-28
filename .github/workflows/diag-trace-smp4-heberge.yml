@@ -54,7 +54,7 @@ jobs:
           touch scenario/scenario/garde-vm-vivante
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/scenario/endurance.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario/scenario")
           sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin scenario/endurance.img > preuves/inputs.sha256
-      - name: Alterner les mêmes boots avec quatre et deux CPU Linux
+      - name: Valider la chronologie hôte sur trois boots ciblés
         run: |
           set -uo pipefail
           target=target/x86_64-bouchaud_os/debug
@@ -62,11 +62,9 @@ jobs:
             sudo -n mount -t tracefs nodev /sys/kernel/tracing
           fi
           rc=0
-          for smp in 4 8; do
-            serie=0
-            for cpus in 4 2 2 4; do
-              serie=$((serie + 1))
-              dir="preuves/smp$smp-$serie-hote$cpus"
+          for configuration in 4:4 8:4 8:2; do
+              IFS=: read -r smp cpus <<< "$configuration"
+              dir="preuves/smp$smp-hote$cpus"
               mkdir "$dir"
               if python3 tools/ci/capture_trace_reveil_qemu.py "$target/bouchaud-os" \
                    "$target/bootimage-bouchaud-os.bin" scenario/endurance.img "$dir" \
@@ -81,10 +79,9 @@ jobs:
                 rc=1
                 # Si le traceur ne démarre pas, répéter le même refus ne
                 # produit aucune information.
-                if [ ! -s "$dir/serial.log" ]; then break 2; fi
+                if [ ! -s "$dir/serial.log" ]; then break; fi
               fi
               if [ -f "$dir/hote.trace" ]; then gzip -1 "$dir/hote.trace"; fi
-            done
           done
           exit "$rc"
       - uses: actions/upload-artifact@v4

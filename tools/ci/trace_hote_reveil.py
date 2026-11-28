@@ -9,13 +9,14 @@ import re
 import struct
 import subprocess
 
-from analyse_trace_reveil import horloge_tsc
+from analyse_trace_reveil import decompose_irq, horloge_tsc, noyau, phases
 
 
 TRACEFS = Path('/sys/kernel/tracing')
 SWITCH = re.compile(r'prev_pid=(\d+).*?prev_state=(\S+).*?next_pid=(\d+)')
 TID = re.compile(r'\bpid=(\d+)\b')
-EVENT = re.compile(r'-(\d+)\s+\[\d+\]\s+\S+\s+(\d+)\.(\d+): (\w+): (.*)')
+EVENT = re.compile(r'-(\d+)\s+\[\d+\]\s+\S+\s+(\d+)\.(\d+): (\w+)(?:: |(?=\())(.*)')
+SYSCALLS = {'sys_write', 'sys_writev', 'sys_enter_write', 'sys_enter_writev'}
 PERTE = re.compile(r'^\s*(?:overrun|commit overrun|dropped events):\s*([1-9]\d*)', re.M)
 
 
@@ -31,7 +32,9 @@ class TraceHote:
         try:
             self.ecrit('tracing_on', '0')
             self.ecrit('trace_clock', 'mono')
-            self.ecrit('buffer_size_kb', '32768')
+            # Le bras SMP8 sur deux CPU a émis 1,54 M événements par CPU
+            # (environ 90 Mio) dans la première campagne.
+            self.ecrit('buffer_size_kb', '131072')
             self.ecrit('trace', '')
             self.evenement('sched/sched_switch', self.filtre('prev_pid', ids) + ' || ' + self.filtre('next_pid', ids))
             self.evenement('sched/sched_wakeup', self.filtre('pid', ids))
@@ -80,7 +83,7 @@ def trace_linux(lignes, cpu_map):
         tid, sec, frac, nom, contenu = ev.groups()
         tid = int(tid)
         t = int(sec) * 1_000_000_000 + int(frac.ljust(9, '0'))
-        if nom.startswith('sys_enter_write') and tid in cpu_map:
+        if nom in SYSCALLS and tid in cpu_map:
             marqueurs.append(t)
         elif nom == 'sched_switch':
             m = SWITCH.search(contenu)
@@ -177,7 +180,32 @@ def analyse(sortie):
             for ligne in lecteur:
                 resultats = rapproche(ligne, points, intervalles, residu)
                 ecrivain.writerow({**ligne, **dict(zip(cles, resultats))})
+    analyse_serie(sortie, points, intervalles, residu)
     print(f'RACCORD ancres={len(points)} plus_large_ns={max(b - a for a,b,_ in points)} residu_ns={residu}')
+
+
+def analyse_serie(sortie, points, intervalles, residu):
+    horloge = horloge_tsc(sortie)
+    index = noyau(sortie / 'BO_TRACE_REVEIL_TOTAL', sortie / 'BO_TRACE_REVEIL')
+    with (sortie / 'raccord-hote-tous.csv').open('w', newline='', encoding='utf-8') as rapport:
+        ecrivain = csv.writer(rapport)
+        ecrivain.writerow(('serie', 'phase', 'echantillon', 'retard_us', 'ecarte', 'inexplique_ns',
+                           'echeance_vers_irq_ns', 'raccord_hote', 'hote_pret_min_ns',
+                           'hote_pret_max_ns', 'raccord_largeur_ns'))
+        for serie, (phase, valeurs) in enumerate(phases(sortie / 'echantillons.txt'), 1):
+            for i, valeur in enumerate(valeurs):
+                candidats = index.get((valeur['tache'], valeur['entree_ns']), [])
+                delai = ''
+                if len(candidats) == 1:
+                    trace = candidats[0]
+                    etat, irq, delai, _ = decompose_irq((None,) * 8 + trace, horloge)
+                    raccord = rapproche({'raccord_irq': etat, 'echeance_ns': trace[2],
+                                         'irq_invite_ns': irq, 'cpu_scan_plus_un': trace[3]},
+                                        points, intervalles, residu)
+                else:
+                    raccord = ('noyau_ambigu' if candidats else 'noyau_absent', '', '', '')
+                ecrivain.writerow((serie, phase, i, valeur['retard_us'], valeur['ecart'],
+                                   valeur['inexplique_ns'], delai, *raccord))
 
 
 if __name__ == '__main__':
