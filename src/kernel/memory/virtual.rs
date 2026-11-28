@@ -1661,6 +1661,27 @@ impl AddressSpace {
     /// Supprime le mapping d'une plage (munmap). Les PTE sont d'abord
     /// retirees partout, puis le shootdown TLB est ACKe, et seulement ensuite
     /// les frames sont rendues. Cet ordre interdit tout use-after-free TLB.
+    /// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 -- la frontiere a laquelle reprendre
+    /// quand la table qui couvrirait `virt` est absente.
+    ///
+    /// Meme condition que `entry_mut(virt, false)` rendant `None` (un niveau
+    /// non PRESENT) : l'entree de niveau `level` couvre 4 Kio << 9*level ;
+    /// aucune page de cette etendue ne peut etre projetee. `None` : la table
+    /// des pages (dernier niveau) existe, il faut lire l'entree.
+    fn saut_table_absente(&self, virt: u64) -> Option<u64> {
+        let mut table = table_at(self.pml4);
+        for level in (1..4).rev() {
+            let index = ((virt >> (12 + 9 * level)) & 0x1FF) as usize;
+            let entry = table[index];
+            if entry & PTE_PRESENT == 0 {
+                let etendue = 1u64 << (12 + 9 * level);
+                return Some((virt & !(etendue - 1)).saturating_add(etendue));
+            }
+            table = table_at(entry & ADDR_MASK);
+        }
+        None
+    }
+
     pub fn prepare_unmap(&mut self, virt: u64, len: u64) -> UnmapRetirement {
         let start = virt & !(PAGE_SIZE - 1);
         let end = (virt + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -2291,6 +2312,10 @@ impl Drop for AddressSpace {
 const BLOC_TABLE: u64 = 512 * PAGE_SIZE;
 
 /// Invalide l'entree TLB d'une page.
+/// BOUCHAUD_DEMONTAGE_PAR_TABLES_V1 : etendue couverte par une table des pages
+/// (dernier niveau, 512 entrees de 4 Kio).
+const BLOC_TABLE: u64 = 512 * PAGE_SIZE;
+
 pub fn flush(virt: u64) {
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
