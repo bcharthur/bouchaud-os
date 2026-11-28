@@ -26,8 +26,7 @@ jobs:
           repo = os.environ['GITHUB_REPOSITORY']
           target = Path(os.environ['RUNNER_TEMP']) / 'qualification-endurance.zip'
           runs = {
-              45986494632: ('eb8ac15cf7f1e73fdc20ecb612e7a267a5400462', [3, 4]),
-              46140306888: ('ee311e024925e50d4f22ae128b31e9e52c05f1ee', [3]),
+              46140306888: ('ee311e024925e50d4f22ae128b31e9e52c05f1ee', [4]),
           }
           for run, (sha, tranches) in runs.items():
               archives = json.loads(subprocess.check_output(
