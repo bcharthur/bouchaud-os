@@ -25,7 +25,10 @@ jobs:
           BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" cargo bootimage --features diag-trace-reveil
           tools/ci/fabrique-scenario-endurance.sh scenario
           sed -i '1i export BO_ORDO_TRACE_FILE=/ordo-trace.txt' scenario/scenario/autorun
-          printf 'cat /ordo-trace.txt\necho TRACE_EXPORT_FIN\n' >> scenario/scenario/autorun
+          for copie in 1 2 3; do
+            printf 'echo TRACE_EXPORT_COPIE_%s\ncat /ordo-trace.txt\n' "$copie"
+          done >> scenario/scenario/autorun
+          printf 'echo TRACE_EXPORT_FIN\n' >> scenario/scenario/autorun
           touch scenario/scenario/garde-vm-vivante
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/scenario/endurance.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario/scenario")
           sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin scenario/endurance.img > preuves/inputs.sha256

@@ -112,17 +112,52 @@ def main():
     lignes = [ligne[ligne.index("ORDO_TRACE phase="):]
               for ligne in texte.splitlines() if "ORDO_TRACE phase=" in ligne]
     # Garder uniquement les tentatives dont l'export série est entier.
-    valides = []
-    for debut in range(0, len(lignes), 900):
-        tentative = lignes[debut:debut + 900]
-        if len(tentative) == 900 and all(re.search(r" i=(\d+) .* tache=-?\d+ entree_ns=-?\d+$", ligne)
-                                       and f" i={i % 300} " in ligne
-                                       for i, ligne in enumerate(tentative)):
-            valides.extend(tentative)
+    valides = rassemble_exports(texte)
     (sortie / "echantillons.txt").write_text("\n".join(valides) + "\n")
-    print(f"{len(valides)}/{len(lignes)} échantillons dans des tentatives exportées intégralement")
+    print(f"{len(valides)} échantillons récupérés dans {len(lignes)} lignes de trace")
     if not valides:
         raise ValueError("Aucune tentative intégralement exportée")
+
+
+CHAMPS = ("echeance_us", "retard_us", "sommeil", "ecart", "non_apparies",
+          "entree_noyau_us", "pret_ns", "externe_ns", "masque_ns", "inexplique_ns",
+          "tache", "entree_ns")
+PHASES = ("au repos", "sous charge (normal)", "sous charge (interactif)")
+TRAME = re.compile(r"ORDO_TRACE phase=(.*?) i=(\d+)" +
+                   "".join(fr" {champ}=-?\d+" for champ in CHAMPS))
+
+
+def rassemble_exports(texte):
+    # Les copies sont émises après les mesures et contiennent le même fichier.
+    # N'utiliser que des trames complètes et refuser les copies contradictoires.
+    copies = re.split(r"(?m)^.*?\+ echo TRACE_EXPORT_COPIE_[123]\s*$", texte)
+    blocs = []
+    for copie in copies:
+        lignes = [s[s.index("ORDO_TRACE phase="):] for s in copie.splitlines()
+                  if "ORDO_TRACE phase=" in s]
+        if lignes:
+            blocs.append(lignes)
+    if not blocs:
+        return []
+    valides = []
+    for debut in range(0, max(map(len, blocs)), 900):
+        tentative = []
+        for i in range(900):
+            possibles = set()
+            for bloc in blocs:
+                if len(bloc) <= debut + i:
+                    continue
+                ligne = bloc[debut + i]
+                trame = TRAME.fullmatch(ligne)
+                if trame and (trame[1], int(trame[2])) == (PHASES[i // 300], i % 300):
+                    possibles.add(ligne)
+            if len(possibles) != 1:
+                break
+            tentative.append(possibles.pop())
+        if len(tentative) == 900:
+            valides.extend(tentative)
+    return valides
+
 
 
 if __name__ == "__main__":
