@@ -1,4 +1,4 @@
-name: Diagnostic Ladybird E2E-02 KVM
+name: Parcours Ladybird KVM complet avec collecteur corrigé
 on:
   push:
     branches: [codex/diag-ladybird-e2e02]
@@ -43,7 +43,7 @@ jobs:
           unzip -q "$RUNNER_TEMP/15262105599.zip" -d native-browser
           tools/ci/verifie_artefact_ladybird.sh entrees native-browser | tee -a preuves/entrees.txt
           cp native-browser/BOUCHAUD_ARTIFACT_MANIFEST.json preuves/
-      - name: Parcours corrigé E2E-01 et E2E-02
+      - name: Jouer la définition complète des quatorze scénarios
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tools/e2e/ladybird -p test_e2e.py -q
@@ -51,19 +51,15 @@ jobs:
           python3 -I tools/e2e/ladybird/prepare_disque.py --artefact native-browser \
             --certs /etc/ssl/certs/ca-certificates.crt --ca-test "$RUNNER_TEMP/e2e-tls/ca.pem" \
             --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img
-          for repetition in 1 2; do
-            # Le runner peut rétablir les droits du périphérique entre deux boots.
-            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
-            test -r /dev/kvm && test -w /dev/kvm
-            ls -l /dev/kvm
-            python3 tools/e2e/ladybird/e2e.py --boot "$RUNNER_TEMP/boot.bin" \
-              --disque disque-e2e.img --accel kvm --smp 4 --memoire 8192 \
-              --sortie "preuves/kvm-$repetition" --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
-              --scenarios E2E-01,E2E-02 --exige E2E-01,E2E-02
-          done
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          python3 tools/e2e/ladybird/e2e.py --boot "$RUNNER_TEMP/boot.bin" \
+            --disque disque-e2e.img --accel kvm --smp 4 --memoire 8192 \
+            --sortie preuves/parcours-kvm --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
+            --exige E2E-01,E2E-02,E2E-03,E2E-04,E2E-05
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: diagnostic-ladybird-e2e02
+          name: diagnostic-ladybird-parcours-complet
           path: preuves/
           if-no-files-found: error
