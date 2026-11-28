@@ -1,0 +1,78 @@
+name: Lecture des preuves d’endurance TCG
+on:
+  push:
+    branches: [codex/audit-preuves-endurance]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  archives:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Vérifier les ZIP d’origine et extraire les journaux et résumés
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p preuves
+          python3 - <<'PY'
+          import hashlib, json, os, re, shutil, subprocess, zipfile
+          from pathlib import Path, PurePosixPath
+
+          repo = os.environ['GITHUB_REPOSITORY']
+          target = Path(os.environ['RUNNER_TEMP']) / 'qualification-endurance.zip'
+          runs = {
+              45986494632: ('eb8ac15cf7f1e73fdc20ecb612e7a267a5400462', [3, 4]),
+              46140306888: ('ee311e024925e50d4f22ae128b31e9e52c05f1ee', [3]),
+          }
+          for run, (sha, tranches) in runs.items():
+              archives = json.loads(subprocess.check_output(
+                  ['gh', 'api', f'repos/{repo}/actions/runs/{run}/artifacts?per_page=100'], text=True,
+              ))['artifacts']
+              for bloc in tranches:
+                  name = f'endurance-tranche-{bloc}'
+                  art, = (x for x in archives if x['name'] == name and not x['expired'])
+                  expected_source = art['workflow_run']
+                  if expected_source['id'] != run or expected_source['head_sha'] != sha:
+                      raise ValueError(f'Archive issue d’un autre run ou commit : {name}')
+                  with target.open('wb') as output:
+                      subprocess.run(['gh', 'api', f'repos/{repo}/actions/artifacts/{art["id"]}/zip'],
+                                     stdout=output, check=True)
+                  with target.open('rb') as source:
+                      digest = 'sha256:' + hashlib.file_digest(source, 'sha256').hexdigest()
+                  if digest != art['digest']:
+                      raise ValueError(f'SHA-256 invalide pour {art["id"]}')
+                  dest = Path('preuves') / str(run) / name
+                  dest.mkdir(parents=True)
+                  retained = []
+                  with zipfile.ZipFile(target) as archive:
+                      for member in archive.namelist():
+                          path = PurePosixPath(member)
+                          if path.name == 'summary.json':
+                              out = dest / 'summary.json'
+                          elif re.fullmatch(r'cycle-\d{4}', path.parent.name) and path.name == f'smp{4 if bloc == 3 else 8}.log':
+                              out = dest / path.parent.name / path.name
+                          else:
+                              continue
+                          out.parent.mkdir(parents=True, exist_ok=True)
+                          with archive.open(member) as src, out.open('xb') as output:
+                              shutil.copyfileobj(src, output)
+                          retained.append(str(out.relative_to(dest)))
+                  if sum(x == 'summary.json' for x in retained) != 1 or len(retained) < 2:
+                      raise ValueError(f'Résumé ou journaux absents pour {art["id"]}')
+                  (dest / 'origine.json').write_text(json.dumps({
+                      'source': expected_source, 'archive_id': art['id'], 'archive_sha256': digest,
+                      'fichiers_extraits': retained,
+                  }, indent=2) + '\n')
+                  print(f'ARCHIVE_VÉRIFIÉE run={run} tranche={bloc} sha={sha} archive={art["id"]} entrées={len(retained)}')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journaux-endurance-verifies
+          path: preuves/
+          if-no-files-found: error
