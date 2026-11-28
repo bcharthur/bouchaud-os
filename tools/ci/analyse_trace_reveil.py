@@ -104,6 +104,34 @@ def rapport(index, phases_trace, index_file=None):
                     yield (serie, nom, population, centile, rang, i, valeur, len(candidats), *trace, *file)
 
 
+
+def horloge_tsc(dossier):
+    def lit(nom, taille):
+        brut = (dossier / f"BO_TRACE_CLOCK_{nom}").read_bytes()
+        if len(brut) != taille:
+            raise ValueError(f"Taille incohérente pour l’horloge {nom}")
+        return int.from_bytes(brut, "little")
+
+    return lit("BOOT_TSC", 8), lit("HZ", 8), lit("SYNC", 1)
+
+
+def decompose_irq(ligne, horloge):
+    # L’échéance, le balayage et le TSC d’entrée proviennent du même réveil.
+    # Le TSC cru n’est comparable au monotone global que si le noyau a
+    # validé la synchronisation inter-cœurs. Ces champs ignorent l’hôte.
+    tsc, scan, echeance = (ligne[i] for i in (12, 13, 10))
+    if not tsc or not scan:
+        return "irq_non_relevee", "", "", ""
+    boot, hz, synchrone = horloge
+    if synchrone != 1 or not hz or not boot:
+        return "tsc_non_convertible", "", "", ""
+    if tsc < boot:
+        return "tsc_avant_amorcage", "", "", ""
+    irq = (tsc - boot) * 1_000_000_000 // hz
+    if irq > scan:
+        return "irq_posterieure_au_balayage", "", "", ""
+    return "ok", irq, irq - echeance, scan - irq
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("total", type=Path)
@@ -111,12 +139,14 @@ def main():
     parser.add_argument("echantillons", type=Path)
     parser.add_argument("sortie", type=Path)
     parser.add_argument("--file", nargs=2, type=Path, metavar=("TOTAL", "RECORDS"))
+    parser.add_argument("--horloge", type=Path, help="dossier des relevés TSC du BIOS arrêté")
     args = parser.parse_args()
     index = noyau(args.total, args.records)
     index_file = publications(*args.file) if args.file else None
     series = list(phases(args.echantillons))
     if not series or len(series) % 3:
         raise ValueError("le relevé doit contenir les trois phases de chaque tentative")
+    horloge = horloge_tsc(args.horloge) if args.horloge else None
     with args.sortie.open("w", newline="") as fichier:
         csv_out = csv.writer(fichier)
         csv_out.writerow((
@@ -125,8 +155,11 @@ def main():
             "cpu_scan_plus_un", "irq_tsc", "debut_scan_ns", "avant_file_ns",
             "election_ns", "reprise_ns", "cpu_reprise",
             "raccords_file", "publication_avant_ns", "publication_apres_ns",
+            "raccord_irq", "irq_invite_ns", "echeance_vers_irq_ns", "irq_vers_balayage_ns",
         ))
-        csv_out.writerows(rapport(index, series, index_file))
+        for ligne in rapport(index, series, index_file):
+            irq = decompose_irq(ligne, horloge) if horloge else ("horloge_absente", "", "", "")
+            csv_out.writerow((*ligne, *irq))
 
 
 if __name__ == "__main__":

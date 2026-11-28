@@ -13,6 +13,7 @@ import time
 TAILLES = {
     "BO_TRACE_REVEIL_TOTAL": 8, "BO_TRACE_REVEIL": 32768 * 88,
     "BO_TRACE_FILE_TOTAL": 8, "BO_TRACE_FILE": 32768 * 40,
+    "BO_TRACE_CLOCK_BOOT_TSC": 8, "BO_TRACE_CLOCK_HZ": 8, "BO_TRACE_CLOCK_SYNC": 1,
 }
 
 
@@ -89,7 +90,7 @@ def main():
         if len(fields) == 3 and fields[-1] in TAILLES:
             symbols[fields[-1]] = "0x" + fields[0]
     if symbols.keys() != TAILLES.keys():
-        raise ValueError("Le BIOS doit contenir les quatre symboles de trace")
+        raise ValueError("Le BIOS doit contenir les symboles de trace et d’horloge")
 
     with tempfile.TemporaryDirectory() as root, (sortie / "qemu.stderr").open("wb") as stderr:
         endpoint = Path(root) / "qmp"

@@ -36,7 +36,7 @@ jobs:
         run: |
           target=target/x86_64-bouchaud_os/debug
           python3 tools/ci/capture_trace_reveil_qemu.py "$target/bouchaud-os" "$target/bootimage-bouchaud-os.bin" scenario/endurance.img preuves
-          python3 tools/ci/analyse_trace_reveil.py preuves/BO_TRACE_REVEIL_TOTAL preuves/BO_TRACE_REVEIL preuves/echantillons.txt preuves/quantiles.csv --file preuves/BO_TRACE_FILE_TOTAL preuves/BO_TRACE_FILE
+          python3 tools/ci/analyse_trace_reveil.py preuves/BO_TRACE_REVEIL_TOTAL preuves/BO_TRACE_REVEIL preuves/echantillons.txt preuves/quantiles.csv --file preuves/BO_TRACE_FILE_TOTAL preuves/BO_TRACE_FILE --horloge preuves
       - uses: actions/upload-artifact@v4
         if: always()
         with:

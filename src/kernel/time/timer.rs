@@ -7,7 +7,9 @@ use crate::arch::x86_64::interrupts;
 use crate::arch::x86_64::ports::{inb, outb};
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+#[cfg_attr(feature = "diag-trace-reveil", export_name = "BO_TRACE_CLOCK_BOOT_TSC")]
 static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
+#[cfg_attr(feature = "diag-trace-reveil", export_name = "BO_TRACE_CLOCK_HZ")]
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static LAST_MONOTONIC_NS: AtomicU64 = AtomicU64::new(0);
 static INVARIANT_TSC: AtomicBool = AtomicBool::new(false);
@@ -278,6 +280,7 @@ pub fn tsc_vers_ns(cycles: u64, hz: u64) -> u64 {
 }
 
 /// BOUCHAUD_TSC_SYNCHRONE_V1 : le TSC a passe le test de derive entre coeurs.
+#[cfg_attr(feature = "diag-trace-reveil", export_name = "BO_TRACE_CLOCK_SYNC")]
 static TSC_SYNCHRONE: AtomicBool = AtomicBool::new(false);
 
 /// Declare le TSC synchrone (ou non) entre tous les coeurs en ligne.
