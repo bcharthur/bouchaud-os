@@ -9,54 +9,21 @@
 name: GPU composition
 
 on:
-  pull_request:
-    paths:
-      - 'src/drivers/display/**'
-      - 'src/gui/**'
-      - 'tools/ci/run_gpu_composition.sh'
-      - 'tools/ci/run_virtgpu_ring3.sh'
-      - 'tools/userland/virtgpu-caps-probe.c'
-      - 'tools/userland/virtgpu-textures.c'
-      - 'tools/userland/bouchaud-gpu.h'
-      - 'src/compat/linux/virtgpu.rs'
-      - 'tools/ci/ladybird_provenance.py'
-      - 'tools/ci/ladybird_empreinte.py'
-      - 'tools/ci/analyse_gpu_composition.py'
-      - 'tools/userland/mire-gpu.c'
-      - 'tools/doom/**'
-      - 'tools/ci/run_ladybird_browser_host.sh'
-      - 'tools/ci/bench_ladybird.py'
-      - '.github/workflows/gpu-composition.yml'
-  # BOUCHAUD_CI_TROIS_NIVEAUX_V1 : niveau B. Les branches de travail passent par
-  # la PR (`pull_request`) ; le push ne vise plus que `main`, apres fusion.
-  push:
-    branches: [main]
-    paths:
-      - 'src/drivers/display/**'
-      - 'src/gui/**'
-      - 'tools/ci/run_gpu_composition.sh'
-      - 'tools/ci/run_virtgpu_ring3.sh'
-      - 'tools/userland/virtgpu-caps-probe.c'
-      - 'tools/userland/virtgpu-textures.c'
-      - 'tools/userland/bouchaud-gpu.h'
-      - 'src/compat/linux/virtgpu.rs'
-      - 'tools/ci/ladybird_provenance.py'
-      - 'tools/ci/ladybird_empreinte.py'
-      - 'tools/ci/analyse_gpu_composition.py'
-      - 'tools/userland/mire-gpu.c'
-      - 'tools/doom/**'
-      - 'tools/ci/run_ladybird_browser_host.sh'
-      - 'tools/ci/bench_ladybird.py'
-      - '.github/workflows/gpu-composition.yml'
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Image BIOS standard du run
+        required: true
+        type: string
+      witness:
+        description: Image distincte avec panne GPU injectée
+        required: true
+        type: string
 
 permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: gpu-composition-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   banc:
@@ -71,24 +38,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU (VIRGL), Xvfb, Mesa, musl
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
             xvfb imagemagick musl-tools libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil build-essential
           qemu-system-x86_64 --version
           qemu-system-x86_64 -device help 2>&1 | grep virtio-gpu || true
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - uses: ./.github/actions/fabric-bootimage
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-            target
-          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            gpu-composition-${{ runner.os }}-
-            cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+          artifact: ${{ inputs.artifact }}
       - name: Virtgpu ring 3, BLIT relu au pixel et profil 2D (TCG)
         if: matrix.accel == 'tcg'
         run: |
@@ -105,12 +61,13 @@ jobs:
         run: |
           sudo chmod 666 /dev/kvm
           ls -l /dev/kvm
-      - name: Image de banc -- panne GPU injectee (non livrable)
+      - uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.witness }}
+          variant: banc-gpu-composition-panne
+      - name: Vérifier la séparation de l’image livrée et du témoin GPU
         run: |
           cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-livre.bin
-          cargo bootimage --features banc-gpu-composition-panne
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin boot-panne.bin
-          cp boot-livre.bin target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           if grep -aq GPU_COMPOSITION_INJECTION boot-livre.bin; then echo "INJECTION_DANS_L_IMAGE_LIVREE" >&2; exit 1; fi
           grep -aq GPU_COMPOSITION_INJECTION boot-panne.bin
       - name: Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)
@@ -204,22 +161,11 @@ jobs:
         run: tools/ci/verifie_artefact_ladybird.sh entrees native-browser
       - name: QEMU (VIRGL), Xvfb, Mesa, outils du smoke
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 qemu-system-gui qemu-system-modules-opengl \
             xvfb imagemagick libgl1 libglx-mesa0 libgl1-mesa-dri libegl-mesa0 python3-pil file socat netcat-openbsd
-      - name: Cache Cargo
-        uses: actions/cache@v4
+      - uses: ./.github/actions/fabric-bootimage
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-            target
-          key: gpu-composition-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            gpu-composition-${{ runner.os }}-
-            cargo-${{ runner.os }}-
-      - name: Bootimage
-        run: tools/ci/build_kernel.sh
+          artifact: ${{ inputs.artifact }}
       - name: Ladybird compose par le GPU (smoke produit sous virtio-gpu-gl)
         run: |
           Xvfb :70 -screen 0 1920x1200x24 -nolisten tcp &

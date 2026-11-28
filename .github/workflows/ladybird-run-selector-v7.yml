@@ -1,5 +1,7 @@
 name: Ladybird launcher selector V7
 on:
+  workflow_dispatch:
+  workflow_call:
   # Le declencheur push visait fix/ladybird-run-artifact-validated-20261108,
   # branche fusionnee (#274) et supprimee : declencheur mort, retire.
   pull_request:
@@ -84,7 +86,7 @@ jobs:
   windows-real-download:
     needs: [windows-powershell-51, live-github-selection]
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,3 +107,22 @@ jobs:
             throw 'Downloaded artifact did not pass hash, ELF and fingerprint verification'
           }
           Write-Host 'LADYBIRD_REAL_DOWNLOAD_VERIFIED_OK'
+      - name: Construire et preparer le lancement sans modifier Git
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cache = Join-Path $PWD.Path 'native-browser-m9'
+          if (Test-Path -LiteralPath $cache) { throw 'Cache de lancement inattendu' }
+          Move-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'bouchaud-ladybird-v7-verified') -Destination $cache
+          if (-not (Get-Command cargo-bootimage -ErrorAction SilentlyContinue)) {
+            cargo install bootimage --locked
+            if ($LASTEXITCODE -ne 0) { throw 'Installation de cargo-bootimage en echec' }
+          }
+          & .\run.ps1 -PreparerSeulement -VerifierDepotPropre -Accel tcg
+          if ($LASTEXITCODE -ne 0) { throw 'Preparation du disque ou controle Git en echec' }
+          if (-not (Test-Path -LiteralPath 'target/windows-scenarios/scenario-m9/autorun')) {
+            throw 'Le scenario devait etre prepare sous target/windows-scenarios'
+          }
+          Write-Host 'LADYBIRD_PREPARATION_DEPOT_PROPRE_OK'

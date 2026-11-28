@@ -1,0 +1,57 @@
+name: Build kernel
+on:
+  workflow_call:
+    inputs:
+      variant:
+        description: Identité de la configuration à compiler
+        type: string
+        default: default
+    outputs:
+      artifact:
+        description: Image BIOS standard de la qualification
+        value: ${{ jobs.build.outputs.artifact }}
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: fabric-kernel-${{ inputs.variant }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            fabric-kernel-${{ inputs.variant }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Construire l'image BIOS
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          case "$VARIANT" in
+            default) tools/ci/build_kernel.sh ;;
+            banc-gpu-composition-panne)
+              command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+              BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" cargo bootimage --features "$VARIANT"
+              ;;
+            *) exit 1 ;;
+          esac
+      - name: Établir l'identité de compilation
+        id: artifact
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          python3 tools/ci/fabric_bootimage.py publish target/fabric-publication --variant "$VARIANT"
+          echo "name=fabric-bios-${VARIANT}-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: target/fabric-publication/
+          if-no-files-found: error
+          retention-days: 7

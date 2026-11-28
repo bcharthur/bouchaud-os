@@ -1,0 +1,84 @@
+name: System Update
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  ab-rollback:
+    # BOUCHAUD_LOADER_AB_V1 : le chargeur A/B sous OVMF, un QEMU par boot sur le
+    # MEME disque, coupure SIGKILL a chaque boot. Candidat qui panique, candidat
+    # qui gele, une copie META corrompue (chacune), les deux corrompues ; puis
+    # le commit de sante par serviced (sante) et son refus quand un service
+    # critique du candidat echoue (sante-ko) ; enfin la mise a jour de bout en
+    # bout par `updated` en ring 3, refus de capacite compris (mise-a-jour) ;
+    # la recovery : META illisible, touche R + rollback manuel, echecs repetes
+    # du slot actif.
+    name: ab-rollback (${{ matrix.scenario }}, ${{ matrix.support }})
+    runs-on: ubuntu-24.04
+    # BOUCHAUD_OTA_V1 : ota-complet / ota-rollback construisent DEUX noyaux et
+    # telechargent ~100 Mo en TLS sous TCG (ota-reseau : deux fois, plus une
+    # relance de 60 s) ; les autres scenarios gardent 40.
+    timeout-minutes: ${{ startsWith(matrix.scenario, 'ota-') && matrix.scenario != 'ota-verifie' && 90 || 40 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [panique, gel, meta-0, meta-1, meta-2, sante, sante-ko, mise-a-jour, mise-a-jour-morts, sans-cle, ota-verifie, ota-complet, ota-rollback, ota-reseau, recovery-requise, recovery-rollback, echecs-repetes]
+        support: [nvme]
+        # BOUCHAUD_USB_VIDANGE_REELLE_V1 / BOUCHAUD_USB_LIAISON_SUPPORT_V1 : le
+        # disque A/B sur une cle USB. sante : commit accepte (vidange prouvee) ;
+        # sans-vidange : temoin negatif, aucun commit ; seconde-cle : une
+        # seconde cle qui refuse la vidange ne retire rien a la cle A/B.
+        include:
+          - scenario: sante
+            support: usb
+          - scenario: sans-vidange
+            support: usb
+          - scenario: seconde-cle
+            support: usb-deux
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            tools/reference/uefi-preboot-probe/target
+          key: ab-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ab-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            cargo-${{ runner.os }}-
+      - name: QEMU + OVMF
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 ovmf
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-unknown-uefi
+      - name: Rollback A/B (${{ matrix.scenario }}, ${{ matrix.support }})
+        env:
+          BO_AB_SUPPORT: ${{ matrix.support }}
+        run: bash tools/ci/run_ab_rollback.sh "${{ matrix.scenario }}" target/ab-rollback
+      # Diagnostic best-effort: ne modifie aucun verdict A/B ni aucune
+      # assertion. L'analyse par boot ne fabrique jamais un lien causal.
+      - name: Chronologie USB/SMP/A-B par boot (rapport facultatif)
+        if: always()
+        continue-on-error: true
+        run: |
+          if compgen -G 'target/ab-rollback/boot-*.log' >/dev/null; then
+            python3 tools/health/incident_timeline.py target/ab-rollback \
+              --output target/ab-rollback/incident-timeline.json
+          else
+            echo "AB_DIAG_NOTE aucun_log_disponible"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}
+          path: |
+            target/ab-rollback/boot-*.log
+            target/ab-rollback/incident-timeline.json
+          if-no-files-found: error
+          retention-days: 14

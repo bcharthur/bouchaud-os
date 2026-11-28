@@ -7,15 +7,19 @@ push et workflow_dispatch. Les sorties sont ecrites dans GITHUB_OUTPUT.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 from pathlib import Path
+
+from fabric_plan import plan
 
 ZERO = "0" * 40
 
 
 def git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], text=True).strip()
+    out = subprocess.check_output(["git", *args], text=True)
+    return out if "-z" in args else out.strip()
 
 
 def base_de_branche(head: str) -> str | None:
@@ -47,10 +51,10 @@ def changed_files(base: str | None, head: str) -> list[str]:
         except subprocess.CalledProcessError:
             return [p for p in git("ls-files").splitlines() if p]
     try:
-        out = git("diff", "--name-only", f"{base}...{head}")
+        out = git("diff", "--no-renames", "--name-only", "-z", f"{base}...{head}")
     except subprocess.CalledProcessError:
-        out = git("diff", "--name-only", base, head)
-    return [p for p in out.splitlines() if p]
+        out = git("diff", "--no-renames", "--name-only", "-z", base, head)
+    return [p for p in out.split("\0") if p]
 
 
 def any_match(paths: list[str], prefixes: tuple[str, ...] = (), exact: tuple[str, ...] = (), suffixes: tuple[str, ...] = ()) -> bool:
@@ -126,6 +130,8 @@ def main() -> int:
         "any_runtime": kernel or browser_engine or ladybird or userland or health or mm or primitives,
     }
 
+    fabric = plan(paths, exhaustive=forced)
+    print("Plan Fabric:", json.dumps(fabric, ensure_ascii=False))
     print("Fichiers modifies:")
     for path in paths:
         print(f"  - {path}")
@@ -138,6 +144,7 @@ def main() -> int:
         with open(output_path, "a", encoding="utf-8") as f:
             for key, value in outputs.items():
                 f.write(f"{key}={str(value).lower()}\n")
+            f.write("fabric_plan=" + json.dumps(fabric, ensure_ascii=True) + "\n")
     return 0
 
 

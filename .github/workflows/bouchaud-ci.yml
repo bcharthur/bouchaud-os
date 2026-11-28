@@ -1,0 +1,291 @@
+name: Bouchaud CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["ci-fabric/**"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Profil des preuves à valider
+        type: choice
+        default: FABRIC
+        options: [FAST, FABRIC, FULL, CERTIFICATION]
+      fabric:
+        description: Périmètre des bancs migrés
+        type: choice
+        default: all
+        options: [all, gpu, security, storage, p13, memory, ipc]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bouchaud-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      gpu: ${{ steps.plan.outputs.gpu }}
+      security: ${{ steps.plan.outputs.security }}
+      storage: ${{ steps.plan.outputs.storage }}
+      p13: ${{ steps.plan.outputs.p13 }}
+      ipc: ${{ steps.plan.outputs.ipc }}
+      memory: ${{ steps.plan.outputs.memory }}
+      any: ${{ steps.plan.outputs.any }}
+      profile: ${{ steps.plan.outputs.profile }}
+      proof_branch: ${{ steps.plan.outputs.proof_branch }}
+      proof_fabric: ${{ steps.plan.outputs.proof_fabric }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        name: Établir le plan de qualification
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          TEST_SHA: ${{ github.sha }}
+          MANUAL_FABRIC: ${{ inputs.fabric }}
+          MANUAL_PROFILE: ${{ inputs.profile }}
+          PROOF_REF: ${{ github.ref }}
+          PROOF_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$TEST_SHA" ]
+          if [[ "$PROOF_REF" != refs/tags/ci-fabric/* ]] && [ -z "$MANUAL_FABRIC" ]; then
+            if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              python3 tools/ci/classify_changes.py --base "$BASE_SHA" --head "$TEST_SHA"
+            else
+              python3 tools/ci/classify_changes.py --head "$TEST_SHA" --all
+            fi
+          fi
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          sys.path.insert(0, "tools/ci")
+          from fabric_plan import MIGRATED
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          manual = os.environ["MANUAL_FABRIC"]
+          domains = MIGRATED
+          profile = os.environ["MANUAL_PROFILE"] or "FABRIC"
+          branch = os.environ["PROOF_BRANCH"]
+          prefix = "refs/tags/ci-fabric/"
+          ref = os.environ["PROOF_REF"]
+          if ref.startswith(prefix):
+              parts = ref.removeprefix(prefix).split("/", 2)
+              if len(parts) != 3 or parts[0] not in {"FAST", "FABRIC", "FULL", "CERTIFICATION"}:
+                  raise ValueError("tag attendu : ci-fabric/PROFIL/SHA/branche")
+              profile, requested_sha, branch = parts
+              if requested_sha != os.environ["TEST_SHA"]:
+                  raise ValueError("le SHA inscrit dans le tag doit être le commit testé")
+              branch_sha = subprocess.check_output(
+                  ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+                  text=True,
+              ).strip()
+              if branch_sha != os.environ["TEST_SHA"]:
+                  raise ValueError("le tag et la branche de preuve doivent désigner le même commit")
+              manual = "all"
+          if profile in {"FULL", "CERTIFICATION"} and manual != "all":
+              raise ValueError("le profil exige le périmètre Fabric complet")
+          if profile == "FAST":
+              selected = []
+              plan = {"domains": [], "uncategorized": []}
+          elif manual:
+              selected = sorted(domains if manual == "all" else {manual})
+              if not set(selected) <= domains:
+                  raise ValueError("fabric inconnu")
+              if "p13" in selected:
+                  selected = sorted(set(selected) | {"memory"})
+              plan = {"domains": selected, "uncategorized": []}
+          else:
+              entry = next(line for line in output.read_text().splitlines() if line.startswith("fabric_plan="))
+              plan = json.loads(entry.removeprefix("fabric_plan="))
+              selected = sorted(domains & set(plan["domains"]))
+          contracts = json.loads(Path("tools/ci/fabric_contracts.json").read_text())["contracts"]
+          report = {**plan, "profile": profile, "sha": os.environ["TEST_SHA"], "migrated": selected,
+                    "contracts": {key: value for key, value in contracts.items() if value["owner"] in selected}}
+          Path("fabric-plan.json").write_text(json.dumps(report, indent=2) + "\n")
+          with output.open("a") as stream:
+              print(f"profile={profile}", file=stream)
+              print(f"proof_branch={branch}", file=stream)
+              print(f"proof_fabric={manual}", file=stream)
+              for domain in sorted(domains):
+                  print(f"{domain}={'true' if domain in selected else 'false'}", file=stream)
+              print(f"any={'true' if set(selected) & {'gpu', 'security', 'storage', 'p13', 'memory'} else 'false'}", file=stream)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fabric-plan
+          path: fabric-plan.json
+          if-no-files-found: error
+
+  kernel:
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    uses: ./.github/workflows/build-kernel.yml
+
+  gpu-witness:
+    needs: plan
+    if: needs.plan.outputs.gpu == 'true'
+    uses: ./.github/workflows/build-kernel.yml
+    with:
+      variant: banc-gpu-composition-panne
+
+  gpu:
+    needs: [plan, kernel, gpu-witness]
+    if: needs.plan.outputs.gpu == 'true'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/gpu-composition.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+      witness: ${{ needs.gpu-witness.outputs.artifact }}
+
+  security:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.security == 'true'
+    uses: ./.github/workflows/security-runtime.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+
+  storage:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.storage == 'true'
+    uses: ./.github/workflows/unix-fs-reliability.yml
+    with:
+      artifact: ${{ needs.kernel.outputs.artifact }}
+
+  p13:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.p13 == 'true'
+    uses: ./.github/workflows/os-primitives.yml
+    with:
+      p13_strict: false
+      cpu_only: true
+      bootimage_artifact: ${{ needs.kernel.outputs.artifact }}
+
+  memory:
+    needs: [plan, kernel]
+    if: needs.plan.outputs.memory == 'true'
+    uses: ./.github/workflows/fabric-memory.yml
+    with:
+      bootimage_artifact: ${{ needs.kernel.outputs.artifact }}
+
+  ipc:
+    needs: plan
+    if: needs.plan.outputs.ipc == 'true'
+    uses: ./.github/workflows/native-ipc-runtime.yml
+
+  verdict:
+    outputs:
+      attempt: ${{ steps.scope-attempt.outputs.attempt }}
+    name: Bouchaud Fabric (périmètre migré)
+    needs: [plan, kernel, gpu-witness, gpu, security, storage, p13, memory, ipc]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: scope-attempt
+        run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Vérifier les résultats du plan exécuté
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 tools/ci/fabric_verdict.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-verdict-${{ github.run_attempt }}
+          path: fabric-verdict.json
+          if-no-files-found: error
+
+
+  fast:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FAST' || needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    uses: ./.github/workflows/ci.yml
+    with:
+      exhaustive: true
+
+  non-regression:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FAST' || needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    uses: ./.github/workflows/non-regression.yml
+
+  windows-selector:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ladybird-run-selector-v7.yml
+
+  userland:
+    needs: plan
+    if: needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/userland.yml
+    with:
+      campaign: true
+
+  request-proofs:
+    needs: plan
+    if: ${{ startsWith(github.ref, 'refs/tags/ci-fabric/') && (needs.plan.outputs.profile == 'FULL' || needs.plan.outputs.profile == 'CERTIFICATION') }}
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ needs.plan.outputs.profile == 'CERTIFICATION' && 185 || 8 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Demander les campagnes indépendantes absentes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          FABRIC_PROOF_BRANCH: ${{ needs.plan.outputs.proof_branch }}
+        run: python3 tools/ci/fabric_request_proofs.py "$PROFILE"
+
+  qualification:
+    name: Bouchaud profil
+    if: ${{ always() && (startsWith(github.ref, 'refs/tags/ci-fabric/') || (github.event_name == 'workflow_dispatch' && (inputs.profile != 'FABRIC' || inputs.fabric == 'all'))) }}
+    needs: [plan, verdict, fast, non-regression, userland, windows-selector, request-proofs]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Exiger les preuves du profil sur le SHA exact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          FABRIC_PROOF_BRANCH: ${{ needs.plan.outputs.proof_branch }}
+          FABRIC_INPUT: ${{ needs.plan.outputs.proof_fabric }}
+          FABRIC_RESULT: ${{ needs.verdict.result }}
+          FABRIC_VERDICT_ATTEMPT: ${{ needs.verdict.outputs.attempt }}
+          USERLAND_RESULT: ${{ needs.userland.result }}
+          WINDOWS_SELECTOR_RESULT: ${{ needs.windows-selector.result }}
+          FAST_RESULT: ${{ needs.fast.result }}
+          NON_REGRESSION_RESULT: ${{ needs.non-regression.result }}
+        run: python3 tools/ci/fabric_merge_gate.py "$PROFILE"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fabric-merge-verdict-${{ github.run_attempt }}
+          path: fabric-merge-verdict.json
+          if-no-files-found: error

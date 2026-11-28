@@ -1,0 +1,43 @@
+name: Atelier
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  atelier-reactivite:
+    # BOUCHAUD_BANC_ATELIER_V1 : le bureau Atelier pilote comme un utilisateur
+    # (moniteur QEMU) -- bureau vide, ouverture/fermeture d'Insights, survol,
+    # deplacement, redimensionnement -- sous KVM (sorties de VM reelles, comme
+    # WHPX) puis TCG. Exige des trames mesurees dans chaque phase, aucune
+    # panique et AUCUN acces de configuration PCI pendant les trames : Insights
+    # re-enumerait le bus a chaque trame (~30 000 E/S), ~100 ms par trame sous
+    # WHPX. p50/p95/p99 publies, sans seuil de temps (runner partage).
+    name: qemu / reactivite Atelier (KVM, TCG)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU
+        run: |
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: integration-bootimage
+          path: image
+      - name: Acces a /dev/kvm
+        run: |
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+      - name: Atelier sous KVM, SMP2
+        run: python3 tools/ci/banc_atelier.py --boot image/bootimage-bouchaud-os.bin --sortie atelier-kvm-smp2 --accel kvm --smp 2 --exige-sans-es --etiquette kvm-smp2
+      - name: Atelier sous TCG, SMP2
+        if: ${{ !cancelled() }}
+        run: python3 tools/ci/banc_atelier.py --boot image/bootimage-bouchaud-os.bin --sortie atelier-tcg-smp2 --accel tcg --smp 2 --exige-sans-es --etiquette tcg-smp2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-atelier-reactivite
+          path: |
+            atelier-*/serie.log
+            atelier-*/resultat.json
+          if-no-files-found: warn

@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install OVMF + QEMU
-        run: tools/ci/apt-installe.sh qemu-system-x86 ovmf musl-tools build-essential binutils
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 ovmf musl-tools build-essential binutils
       - name: Rust UEFI toolchain
         run: |
           rustup show active-toolchain

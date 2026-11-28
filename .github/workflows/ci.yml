@@ -13,6 +13,11 @@ on:
   push:
     branches: ['**']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      exhaustive:
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -45,6 +50,7 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           REF: ${{ github.ref }}
+          EXHAUSTIVE: ${{ inputs.exhaustive }}
         run: |
           # BOUCHAUD_CI_DELTA_CUMULE_V1 : sur une branche de travail, le verdict
           # de CI Fast est celui de la TETE de la PR. Il classe donc TOUT le
@@ -53,7 +59,7 @@ jobs:
           # push : un push documentaire apres un push noyau rouge sautait les
           # controles noyau et rendait fast-gate vert sur la tete (revue #334).
           # Sur main, chaque SHA fusionne est classe contre le precedent.
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+          if [ "$EXHAUSTIVE" = true ] || [ "${{ github.event_name }}" = workflow_dispatch ]; then
             python3 tools/ci/classify_changes.py --head "$HEAD_SHA" --all
           elif [ "$REF" != refs/heads/main ]; then
             python3 tools/ci/classify_changes.py --base 0000000000000000000000000000000000000000 --head "$HEAD_SHA"
@@ -453,9 +459,11 @@ jobs:
           BROWSER: ${{ needs.browser-engine.result }}
           WINDOWS: ${{ needs.windows-scripts.result }}
           POLICY: ${{ needs.policy.result }}
+          EXHAUSTIVE: ${{ inputs.exhaustive }}
         run: |
           printf '%-12s %s\n' changes "$CHANGES" kernel "$KERNEL" variantes "$VARIANTES" host "$HOST" browser "$BROWSER" windows "$WINDOWS" policy "$POLICY"
           for r in "$CHANGES" "$KERNEL" "$VARIANTES" "$HOST" "$BROWSER" "$WINDOWS" "$POLICY"; do
             [ "$r" != failure ] && [ "$r" != cancelled ] || exit 1
+            [ "$EXHAUSTIVE" != true ] || [ "$r" = success ] || exit 1
           done
           echo FAST_GATE_OK

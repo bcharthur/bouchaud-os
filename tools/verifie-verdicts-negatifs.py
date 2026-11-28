@@ -30,7 +30,7 @@ RACINE = Path(__file__).resolve().parents[1]
 TOLERES = {
     ("integration.yml", "qt-pixel", None): "rendu Qt hote, diagnostic sans porte",
     ("ladybird-sync.yml", "upstream-head", None): "information sur la tete upstream, reseau externe",
-    ("native-ipc-runtime.yml", "ab-rollback", "Chronologie USB/SMP/A-B par boot (rapport facultatif)"):
+    ("system-update.yml", "ab-rollback", "Chronologie USB/SMP/A-B par boot (rapport facultatif)"):
         "rapport facultatif, ne modifie aucun verdict A/B",
     ("nightly.yml", "windows-debt", "ASCII strict global"): "dette Windows mesuree la nuit",
     ("nightly.yml", "windows-debt", "Syntaxe PowerShell globale"): "dette Windows mesuree la nuit",

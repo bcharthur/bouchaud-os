@@ -19,10 +19,7 @@ jobs:
           ref: bbce0e7b3ad44e3177174766ef0dcb1e180cd8f8
           path: temoin-base
       - name: Installer QEMU et musl depuis Ubuntu
-        run: |
-          args=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
-          sudo apt-get "${args[@]}" update
-          sudo apt-get "${args[@]}" install -y --no-install-recommends qemu-system-x86 musl-tools build-essential
+        run: tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential
       - name: Construire les deux BIOS et le scénario commun
         run: |
           tools/ci/build_kernel.sh

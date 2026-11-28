@@ -179,8 +179,8 @@ class TestNonRegression(unittest.TestCase):
             "src/kernel/process/thread/courant.rs",
             "userland/services/healthd/healthd.c",
         ])
-        self.assertIn("Native IPC Runtime", risks["usb_ab"])
-        self.assertIn("p13-primitives-noyau", risks["smp"])
+        self.assertIn("Bouchaud CI", risks["usb_ab"])
+        self.assertIn("Bouchaud CI", risks["smp"])
         self.assertIn("native_ipc", risks)
 
     def test_all_twelve_chantiers_are_classified(self):

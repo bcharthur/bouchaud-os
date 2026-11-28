@@ -1,0 +1,951 @@
+{
+  "contracts": {
+    "GPU.L3.RING3_BLIT": {
+      "owner": "gpu",
+      "layer": "L3",
+      "workflow": ".github/workflows/gpu-composition.yml",
+      "job": "banc",
+      "steps": [
+        "Virtgpu ring 3, BLIT relu au pixel et profil 2D (TCG)"
+      ],
+      "dependencies": [
+        "kernel",
+        "gpu-witness",
+        "ladybird"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG"
+      ],
+      "criteria": "GPU ring 3 et pixels conformes",
+      "evidence": [
+        "gpu-composition-${{ matrix.accel }}"
+      ]
+    },
+    "GPU.L4.COMPOSITION": {
+      "owner": "gpu",
+      "layer": "L4",
+      "workflow": ".github/workflows/gpu-composition.yml",
+      "job": "banc",
+      "steps": [
+        "Banc du compositeur GPU (mire au pixel, A/B DOOM, repli 2D)"
+      ],
+      "dependencies": [
+        "kernel",
+        "gpu-witness",
+        "ladybird"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG",
+        "KVM"
+      ],
+      "criteria": "Mire conforme, témoin de panne et repli 2D",
+      "evidence": [
+        "gpu-composition-${{ matrix.accel }}"
+      ]
+    },
+    "GPU.L7.LADYBIRD_VIRGL": {
+      "owner": "gpu",
+      "layer": "L7",
+      "workflow": ".github/workflows/gpu-composition.yml",
+      "job": "ladybird-gpu",
+      "steps": [
+        "Verifier la provenance de l'artefact et les entrees du SHA",
+        "Verdict de composition GPU du navigateur",
+        "Benchmark Ladybird (GPU on / off)"
+      ],
+      "dependencies": [
+        "kernel",
+        "gpu-witness",
+        "ladybird"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "VIRGL",
+        "CPU témoin"
+      ],
+      "criteria": "Provenance identique, publication GPU démontrée et preuve A/B",
+      "evidence": [
+        "gpu-composition-ladybird"
+      ]
+    },
+    "SECURITY.L3.STRUCTURE": {
+      "owner": "security",
+      "layer": "L3",
+      "workflow": ".github/workflows/security-runtime.yml",
+      "job": "security-runtime",
+      "steps": [
+        "Security structural guard",
+        "Security policy host tests"
+      ],
+      "dependencies": [
+        "kernel"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "hôte"
+      ],
+      "criteria": "Garde et assertions hôte au vert",
+      "evidence": [
+        "security-runtime-proof"
+      ]
+    },
+    "SECURITY.L5.RING3": {
+      "owner": "security",
+      "layer": "L5",
+      "workflow": ".github/workflows/security-runtime.yml",
+      "job": "security-runtime",
+      "steps": [
+        "Security ring3 proof"
+      ],
+      "dependencies": [
+        "kernel"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG"
+      ],
+      "criteria": "Contrat d'isolation ring 3 accepté",
+      "evidence": [
+        "security-runtime-proof"
+      ]
+    },
+    "SECURITY.L6.MEDIA_WRITE": {
+      "owner": "security",
+      "layer": "L6",
+      "workflow": ".github/workflows/security-runtime.yml",
+      "job": "cle-usb-test",
+      "steps": [
+        "Garde des chemins d'ecriture (mutations)",
+        "Regle pure et suivi NVMe (tests hote)",
+        "Banc QEMU TCG",
+        "Banc QEMU KVM"
+      ],
+      "dependencies": [
+        "kernel"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "hôte",
+        "TCG",
+        "KVM"
+      ],
+      "criteria": "Témoins, contrôle du support autorisé et interdiction des autres écritures",
+      "evidence": [
+        "cle-usb-test-proof"
+      ]
+    },
+    "STORAGE.L3.HOST_TREE": {
+      "owner": "storage",
+      "layer": "L3",
+      "workflow": ".github/workflows/unix-fs-reliability.yml",
+      "job": "unix-fs",
+      "steps": [
+        "Classement du banc (tests)",
+        "Parcours de find (tests hote)"
+      ],
+      "dependencies": [
+        "kernel"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "hôte"
+      ],
+      "criteria": "Verdicts et traversée hôte acceptés",
+      "evidence": [
+        "unix-fs-reliability"
+      ]
+    },
+    "STORAGE.L6.UNIX_FS": {
+      "owner": "storage",
+      "layer": "L6",
+      "workflow": ".github/workflows/unix-fs-reliability.yml",
+      "job": "unix-fs",
+      "steps": [
+        "Scenarios find et commandes (TCG)",
+        "Scenarios find et commandes (KVM)",
+        "Temoin -- persistance avec zone effacee entre deux demarrages (DOIT echouer)"
+      ],
+      "dependencies": [
+        "kernel"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG",
+        "KVM"
+      ],
+      "criteria": "Tous les scénarios passent et le témoin est rejeté",
+      "evidence": [
+        "unix-fs-reliability"
+      ]
+    },
+    "STORAGE.L6.OTA_AB_ROLLBACK": {
+      "owner": "update",
+      "layer": "L6",
+      "workflow": ".github/workflows/system-update.yml",
+      "job": "ab-rollback",
+      "steps": [
+        "Rollback A/B (${{ matrix.scenario }}, ${{ matrix.support }})"
+      ],
+      "dependencies": [
+        "ipc-compatibility"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG NVMe",
+        "TCG USB"
+      ],
+      "criteria": "Les séquences de démarrage, refus et états durables exigés sont observés",
+      "evidence": [
+        "ab-rollback-${{ matrix.scenario }}-${{ matrix.support }}"
+      ]
+    },
+    "CPU.L5.CLOCK_AGREEMENT": {
+      "owner": "p13",
+      "layer": "L5",
+      "workflow": ".github/workflows/os-primitives.yml",
+      "job": "probes",
+      "steps": [
+        "Horloges 1 / 10 / 60 s contre le temps de l'hote (TCG puis KVM)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG SMP4",
+        "KVM SMP4 (2 boots)"
+      ],
+      "criteria": "Trois passages et seuils du banc horaire existant",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "CPU.L4.PRECISE_WAKEUP": {
+      "owner": "p13",
+      "layer": "L4",
+      "workflow": ".github/workflows/os-primitives.yml",
+      "job": "reveil-precis",
+      "steps": [
+        "P13+ -- A/B reveil a l'echeance exacte au repos, KVM SMP1 puis SMP4 (politique par defaut on depuis b6c99032)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "KVM SMP1",
+        "KVM SMP4"
+      ],
+      "criteria": "Verdict du banc A/B, témoins conservés",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "CPU.L4.SCHEDULER_ATTRIBUTION": {
+      "owner": "p13",
+      "layer": "L4",
+      "workflow": ".github/workflows/os-primitives.yml",
+      "job": "probes",
+      "steps": [
+        "Ordonnanceur -- methode de preuve P13 sous KVM, SMP1, SMP2, SMP4, SMP8 (temps vole prouve par l'hote)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "KVM SMP1/2/4/8"
+      ],
+      "criteria": "Attribution par preuve du temps volé",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "CPU.L5.FUTEX": {
+      "owner": "p13",
+      "layer": "L5",
+      "workflow": ".github/workflows/os-primitives.yml",
+      "job": "probes",
+      "steps": [
+        "Futex -- un reveil compte n'est jamais perdu (attendant temporise, condvar glibc), SMP1 et SMP4 (TCG)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG SMP1/4"
+      ],
+      "criteria": "Aucun réveil compté perdu",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "MEMORY.L6.DMA_TIMEOUT": {
+      "owner": "p13",
+      "layer": "L6",
+      "workflow": ".github/workflows/os-primitives.yml",
+      "job": "gpu-tampon",
+      "steps": [
+        "P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG",
+        "KVM"
+      ],
+      "criteria": "Mémoire DMA conservée après perte de réponse",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "MEMORY.L4.MULTITHREAD_FAULT": {
+      "owner": "memory",
+      "layer": "L4",
+      "workflow": ".github/workflows/fabric-memory.yml",
+      "job": "memory-fault",
+      "steps": [
+        "Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG SMP1/8",
+        "KVM SMP4"
+      ],
+      "criteria": "Confinement de la faute multithread",
+      "evidence": [
+        "os-primitives-memory-fault"
+      ]
+    },
+    "IPC.L5.RING3_ABI": {
+      "owner": "ipc",
+      "layer": "L5",
+      "workflow": ".github/workflows/native-ipc-runtime.yml",
+      "job": "native-ipc-runtime",
+      "steps": [
+        "Preuve ABI/IPC native depuis ring3"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG"
+      ],
+      "criteria": "Sonde ABI/IPC réussie",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "ATELIER.L7.DESKTOP_RING3": {
+      "owner": "ipc",
+      "layer": "L7",
+      "workflow": ".github/workflows/native-ipc-runtime.yml",
+      "job": "native-ipc-runtime",
+      "steps": [
+        "Bureau ring 3 utilisable -- dock, calculatrice, reprise du compositeur (TCG)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG"
+      ],
+      "criteria": "Dock, calculatrice et reprise du compositeur",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "IPC.L6.SUPERVISED_SERVICES": {
+      "owner": "ipc",
+      "layer": "L6",
+      "workflow": ".github/workflows/native-ipc-runtime.yml",
+      "job": "native-ipc-runtime",
+      "steps": [
+        "Services natifs supervises (SMP4 puis SMP1)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG SMP1/4"
+      ],
+      "criteria": "Comportement des services supervisés",
+      "evidence": [
+        "journal et artefacts du job"
+      ]
+    },
+    "NETWORK.L5.DNS_TCP_RING3": {
+      "owner": "network",
+      "layer": "L5",
+      "workflow": ".github/workflows/fabric-network.yml",
+      "job": "dns-udp",
+      "steps": [
+        "DNS depuis ring3",
+        "TCP depuis ring3 - segment non parti renvoye"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG",
+        "SLIRP"
+      ],
+      "criteria": "Les assertions des bancs et injections réseau réussissent",
+      "evidence": [
+        "journaux et artefacts Integration"
+      ]
+    },
+    "NETWORK.L6.DHCP_RX": {
+      "owner": "network",
+      "layer": "L6",
+      "workflow": ".github/workflows/fabric-network.yml",
+      "job": "dhcp-recuperation",
+      "steps": [
+        "L offre DHCP sur le fil",
+        "Recuperation, SLIRP par defaut",
+        "Reprise RX effective et inefficace",
+        "Scenarios DHCP deterministes",
+        "Recuperation, SLIRP hors 10.0.2.x"
+      ],
+      "dependencies": [
+        "integration-bootimage"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "TCG",
+        "SLIRP"
+      ],
+      "criteria": "Les assertions des bancs et injections réseau réussissent",
+      "evidence": [
+        "journaux et artefacts Integration"
+      ]
+    },
+    "LADYBIRD.L7.C22": {
+      "owner": "ladybird",
+      "layer": "L7",
+      "workflow": ".github/workflows/ladybird-native-browser.yml",
+      "job": "memoire-onglets",
+      "steps": [
+        "C22 -- 6/6 stricts sur le candidat, sans temoin historique"
+      ],
+      "dependencies": [
+        "dedoublonne",
+        "artefact"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "KVM"
+      ],
+      "criteria": "Six répétitions strictes et preuve mémoire du candidat",
+      "evidence": [
+        "journal et preuves du workflow"
+      ]
+    },
+    "SYSTEM.L6.NIGHTLY": {
+      "owner": "integration",
+      "layer": "L6",
+      "workflow": ".github/workflows/nightly.yml",
+      "job": "nightly-gate",
+      "steps": [
+        "Verdict"
+      ],
+      "dependencies": [
+        "kernel-build",
+        "qemu-core",
+        "dns",
+        "resolve-ladybird",
+        "ladybird-smoke",
+        "windows-debt"
+      ],
+      "criticality": "required",
+      "profile": "FULL",
+      "configurations": [
+        "QEMU et preuves hôte"
+      ],
+      "criteria": "Toutes les ressources du plan Nightly sont jugées",
+      "evidence": [
+        "journal et preuves du workflow"
+      ]
+    },
+    "SYSTEM.L7.ENDURANCE": {
+      "owner": "reliability",
+      "layer": "L7",
+      "workflow": ".github/workflows/endurance.yml",
+      "job": "endurance-gate",
+      "steps": [
+        "Verdict agrege"
+      ],
+      "dependencies": [
+        "construire",
+        "tranche"
+      ],
+      "criticality": "required",
+      "profile": "FULL",
+      "configurations": [
+        "Matrice hebdomadaire"
+      ],
+      "criteria": "Verdict agrégé des campagnes selon les budgets existants",
+      "evidence": [
+        "journal et preuves du workflow"
+      ]
+    },
+    "CPU.L7.P13_CERTIFICATION": {
+      "owner": "cpu",
+      "layer": "L7",
+      "workflow": ".github/workflows/p13-final-candidate.yml",
+      "job": "final-gate",
+      "steps": [
+        "Compare strict results AND independent C22 and Nightly runs"
+      ],
+      "dependencies": [
+        "hosted-primitives-strict",
+        "dedicated-three-campaigns",
+        "dedicated-smp8"
+      ],
+      "criticality": "required",
+      "profile": "CERTIFICATION",
+      "configurations": [
+        "KVM dédié et preuves indépendantes"
+      ],
+      "criteria": "Verdict strict C22 et Nightly sur candidat exact",
+      "evidence": [
+        "journal et preuves du workflow"
+      ]
+    },
+    "ATELIER.L6.RESPONSIVENESS": {
+      "owner": "atelier",
+      "layer": "L6",
+      "workflow": ".github/workflows/fabric-atelier.yml",
+      "job": "atelier-reactivite",
+      "steps": [
+        "Atelier sous KVM, SMP2",
+        "Atelier sous TCG, SMP2"
+      ],
+      "dependencies": [
+        "integration-bootimage"
+      ],
+      "criticality": "required",
+      "profile": "FABRIC",
+      "configurations": [
+        "KVM SMP2",
+        "TCG SMP2"
+      ],
+      "criteria": "Trames mesurées dans chaque phase, aucune panique et aucun accès PCI pendant les trames",
+      "evidence": [
+        "integration-atelier-reactivite"
+      ]
+    },
+    "USERLAND.L7.LEGACY_PRODUCT": {
+      "owner": "userland",
+      "layer": "L7",
+      "workflow": ".github/workflows/userland.yml",
+      "job": "product",
+      "steps": [
+        "Preparer scenario",
+        "Demarrer Bouchaud OS",
+        "Verdict M5 + produit"
+      ],
+      "dependencies": [
+        "userland"
+      ],
+      "criticality": "required",
+      "profile": "FULL",
+      "configurations": [
+        "TCG"
+      ],
+      "criteria": "Démarrage et contrôle produit M5 sur le disque publié",
+      "evidence": [
+        "serie-produit-legacy"
+      ]
+    },
+    "WINDOWS.L5.CLEAN_PREPARATION": {
+      "owner": "windows",
+      "layer": "L5",
+      "workflow": ".github/workflows/ladybird-run-selector-v7.yml",
+      "job": "windows-real-download",
+      "steps": [
+        "Download, unpack and verify genuine Ladybird build",
+        "Construire et preparer le lancement sans modifier Git"
+      ],
+      "dependencies": [
+        "bouchaud-ladybird-native-browser"
+      ],
+      "criticality": "required",
+      "profile": "FULL",
+      "configurations": [
+        "Windows PowerShell 5.1"
+      ],
+      "criteria": "Provenance validée et dépôt propre après construction du scénario",
+      "evidence": [
+        "LADYBIRD_PREPARATION_DEPOT_PROPRE_OK"
+      ]
+    },
+    "SYSTEM.L2.OTA_HOST": {
+      "owner": "update",
+      "layer": "L2",
+      "workflow": ".github/workflows/ci.yml",
+      "job": "host-tests",
+      "steps": [
+        "Agent OTA anneau 3 (tests, TLS strict sur l'hote)",
+        "Mise a jour A/B (preuve hote)"
+      ],
+      "dependencies": [],
+      "criticality": "required",
+      "profile": "FAST",
+      "configurations": [
+        "Linux hôte"
+      ],
+      "criteria": "Tests OTA, TLS strict et preuve de mise à jour A/B",
+      "evidence": [
+        "journal du job"
+      ]
+    },
+    "SYSTEM.L7.HOSTED_ENDURANCE": {
+      "owner": "reliability",
+      "layer": "L7",
+      "workflow": ".github/workflows/endurance.yml",
+      "job": "tranche",
+      "steps": [
+        "Campagne",
+        "Verdict (campagne / budgets / metriques absentes / noyau)"
+      ],
+      "dependencies": [
+        "endurance-bootimage"
+      ],
+      "criticality": "required",
+      "profile": "FULL",
+      "configurations": [
+        "Matrice historique de tranches SMP"
+      ],
+      "criteria": "Scénario complet, marqueurs et budgets d’endurance conformes",
+      "evidence": [
+        "endurance-tranche-${{ matrix.tranche }}"
+      ]
+    }
+  },
+  "qualification": {
+    "profiles": {
+      "FAST": {
+        "current": [
+          "FAST_RESULT",
+          "NON_REGRESSION_RESULT"
+        ],
+        "campaigns": [],
+        "current_artifacts": [
+          "fabric-plan",
+          "non-regression-report"
+        ]
+      },
+      "FABRIC": {
+        "current": [
+          "FABRIC_RESULT"
+        ],
+        "campaigns": [],
+        "current_artifacts": [
+          "fabric-plan",
+          "fabric-verdict-{attempt}",
+          "os-primitives-temoin-reveil-historique",
+          "os-primitives-debug",
+          "os-primitives-reveil-precis",
+          "os-primitives-ordonnanceur-ab",
+          "os-primitives-gpu-tampon",
+          "os-primitives-memory-fault",
+          "gpu-composition-tcg",
+          "gpu-composition-kvm",
+          "gpu-composition-ladybird",
+          "security-runtime-proof",
+          "cle-usb-test-proof",
+          "unix-fs-reliability",
+          "native-ipc-runtime-proof",
+          "ab-rollback-panique-nvme",
+          "ab-rollback-gel-nvme",
+          "ab-rollback-meta-0-nvme",
+          "ab-rollback-meta-1-nvme",
+          "ab-rollback-meta-2-nvme",
+          "ab-rollback-sante-nvme",
+          "ab-rollback-sante-ko-nvme",
+          "ab-rollback-mise-a-jour-nvme",
+          "ab-rollback-mise-a-jour-morts-nvme",
+          "ab-rollback-sans-cle-nvme",
+          "ab-rollback-ota-verifie-nvme",
+          "ab-rollback-ota-complet-nvme",
+          "ab-rollback-ota-rollback-nvme",
+          "ab-rollback-ota-reseau-nvme",
+          "ab-rollback-recovery-requise-nvme",
+          "ab-rollback-recovery-rollback-nvme",
+          "ab-rollback-echecs-repetes-nvme",
+          "ab-rollback-sante-usb",
+          "ab-rollback-sans-vidange-usb",
+          "ab-rollback-seconde-cle-usb-deux"
+        ]
+      },
+      "FULL": {
+        "current": [
+          "FABRIC_RESULT",
+          "FAST_RESULT",
+          "NON_REGRESSION_RESULT",
+          "USERLAND_RESULT",
+          "WINDOWS_SELECTOR_RESULT"
+        ],
+        "campaigns": [
+          "integration.yml",
+          "reliability-v3.yml",
+          "ladybird-native-browser.yml",
+          "nightly.yml",
+          "endurance.yml",
+          "doom-port-windows.yml"
+        ],
+        "current_artifacts": [
+          "fabric-plan",
+          "fabric-verdict-{attempt}",
+          "os-primitives-temoin-reveil-historique",
+          "os-primitives-debug",
+          "os-primitives-reveil-precis",
+          "os-primitives-ordonnanceur-ab",
+          "os-primitives-gpu-tampon",
+          "os-primitives-memory-fault",
+          "gpu-composition-tcg",
+          "gpu-composition-kvm",
+          "gpu-composition-ladybird",
+          "security-runtime-proof",
+          "cle-usb-test-proof",
+          "unix-fs-reliability",
+          "native-ipc-runtime-proof",
+          "ab-rollback-panique-nvme",
+          "ab-rollback-gel-nvme",
+          "ab-rollback-meta-0-nvme",
+          "ab-rollback-meta-1-nvme",
+          "ab-rollback-meta-2-nvme",
+          "ab-rollback-sante-nvme",
+          "ab-rollback-sante-ko-nvme",
+          "ab-rollback-mise-a-jour-nvme",
+          "ab-rollback-mise-a-jour-morts-nvme",
+          "ab-rollback-sans-cle-nvme",
+          "ab-rollback-ota-verifie-nvme",
+          "ab-rollback-ota-complet-nvme",
+          "ab-rollback-ota-rollback-nvme",
+          "ab-rollback-ota-reseau-nvme",
+          "ab-rollback-recovery-requise-nvme",
+          "ab-rollback-recovery-rollback-nvme",
+          "ab-rollback-echecs-repetes-nvme",
+          "ab-rollback-sante-usb",
+          "ab-rollback-sans-vidange-usb",
+          "ab-rollback-seconde-cle-usb-deux",
+          "non-regression-report",
+          "userland",
+          "serie-produit-legacy"
+        ]
+      },
+      "CERTIFICATION": {
+        "current": [
+          "FABRIC_RESULT",
+          "FAST_RESULT",
+          "NON_REGRESSION_RESULT",
+          "USERLAND_RESULT",
+          "WINDOWS_SELECTOR_RESULT"
+        ],
+        "campaigns": [
+          "integration.yml",
+          "reliability-v3.yml",
+          "ladybird-native-browser.yml",
+          "nightly.yml",
+          "endurance.yml",
+          "doom-port-windows.yml",
+          "p13-final-candidate.yml"
+        ],
+        "current_artifacts": [
+          "fabric-plan",
+          "fabric-verdict-{attempt}",
+          "os-primitives-temoin-reveil-historique",
+          "os-primitives-debug",
+          "os-primitives-reveil-precis",
+          "os-primitives-ordonnanceur-ab",
+          "os-primitives-gpu-tampon",
+          "os-primitives-memory-fault",
+          "gpu-composition-tcg",
+          "gpu-composition-kvm",
+          "gpu-composition-ladybird",
+          "security-runtime-proof",
+          "cle-usb-test-proof",
+          "unix-fs-reliability",
+          "native-ipc-runtime-proof",
+          "ab-rollback-panique-nvme",
+          "ab-rollback-gel-nvme",
+          "ab-rollback-meta-0-nvme",
+          "ab-rollback-meta-1-nvme",
+          "ab-rollback-meta-2-nvme",
+          "ab-rollback-sante-nvme",
+          "ab-rollback-sante-ko-nvme",
+          "ab-rollback-mise-a-jour-nvme",
+          "ab-rollback-mise-a-jour-morts-nvme",
+          "ab-rollback-sans-cle-nvme",
+          "ab-rollback-ota-verifie-nvme",
+          "ab-rollback-ota-complet-nvme",
+          "ab-rollback-ota-rollback-nvme",
+          "ab-rollback-ota-reseau-nvme",
+          "ab-rollback-recovery-requise-nvme",
+          "ab-rollback-recovery-rollback-nvme",
+          "ab-rollback-echecs-repetes-nvme",
+          "ab-rollback-sante-usb",
+          "ab-rollback-sans-vidange-usb",
+          "ab-rollback-seconde-cle-usb-deux",
+          "non-regression-report",
+          "userland",
+          "serie-produit-legacy"
+        ]
+      }
+    },
+    "campaigns": {
+      "integration.yml": {
+        "jobs": [
+          "integration-gate",
+          "kernel / bootimage once",
+          "qemu / mm-ng6 smp4",
+          "qemu / os primitives",
+          "qemu / proc-stat et cout du fork",
+          "qemu / noyau fige, proprietaire du verrou",
+          "qemu / tempete fork+exec (fuite de processus)",
+          "qemu / system health",
+          "qemu / boot smoke",
+          "qemu / nvme + gpt",
+          "qemu / python depuis le disque",
+          "qemu / fenetre de migration des marques par coeur",
+          "qemu / BRDP + telemetry e2e",
+          "qemu / bar pci hors fenetre (uefi, 46 bits)",
+          "qemu / arbre usb",
+          "qemu / branchement a chaud",
+          "qemu / stockage usb (bulk-only)",
+          "qemu / liaison volume usb",
+          "atelier-reactivite / qemu / reactivite Atelier (KVM, TCG)",
+          "dns-udp / qemu / dns udp ring3",
+          "dhcp-recuperation / qemu / dhcp + reprise rx"
+        ],
+        "artifacts": [
+          "integration-bootimage",
+          "integration-mm-ng6",
+          "integration-atelier-reactivite",
+          "integration-os-primitives"
+        ],
+        "dispatch_inputs": {
+          "suite": "all"
+        }
+      },
+      "reliability-v3.yml": {
+        "jobs": [
+          "reliability-gate",
+          "reliability / property fuzz",
+          "reliability / hosted soak 20m",
+          "reliability / qemu SMP1",
+          "reliability / qemu SMP2",
+          "reliability / qemu SMP4",
+          "reliability / qemu SMP8"
+        ],
+        "artifacts": [
+          "reliability-bootimage",
+          "reliability-hosted-soak",
+          "reliability-smp1",
+          "reliability-smp2",
+          "reliability-smp4",
+          "reliability-smp8"
+        ],
+        "dispatch_inputs": {}
+      },
+      "ladybird-native-browser.yml": {
+        "jobs": [
+          "ladybird / verdict de convergence",
+          "ladybird / provenance de l'artefact",
+          "ladybird / C22 memoire 6x6 candidat (KVM strict)",
+          "ladybird / endurance 10 min",
+          "ladybird / endurance sous KVM (stabilite + performance)",
+          "ladybird / endurance 20 min sous KVM (diagnostic)",
+          "ladybird / wpt",
+          "ladybird / cache et SQL apres redemarrage",
+          "ladybird / bureau ring 3 (DOOM + Ladybird composes par composited)",
+          "ladybird / browser-host smoke",
+          "ladybird / sites reels",
+          "ladybird / image Trigkey de livraison (A/B, STATE, bureau, DOOM, Ladybird)",
+          "ladybird / robustesse (crash d'un rendu, cadres isoles, cycle des workers)"
+        ],
+        "artifacts": [
+          "bouchaud-ladybird-native-browser",
+          "ladybird-memoire",
+          "ladybird-endurance",
+          "ladybird-endurance-kvm",
+          "ladybird-endurance-longue",
+          "trigkey-livraison-preuves"
+        ],
+        "dispatch_inputs": {
+          "palier": "qualification"
+        }
+      },
+      "nightly.yml": {
+        "jobs": [
+          "nightly-gate",
+          "nightly / Ladybird product",
+          "nightly / dns ring3"
+        ],
+        "artifacts": [
+          "nightly-dns-log",
+          "nightly-ladybird-logs"
+        ],
+        "dispatch_inputs": {}
+      },
+      "endurance.yml": {
+        "jobs": [
+          "endurance-gate",
+          "endurance / tranche 1 / SMP1",
+          "endurance / tranche 2 / SMP2",
+          "endurance / tranche 3 / SMP4",
+          "endurance / tranche 4 / SMP8"
+        ],
+        "artifacts": [
+          "endurance-bootimage",
+          "endurance-tranche-1",
+          "endurance-tranche-2",
+          "endurance-tranche-3",
+          "endurance-tranche-4"
+        ],
+        "dispatch_inputs": {
+          "minutes_par_tranche": "90"
+        }
+      },
+      "doom-port-windows.yml": {
+        "jobs": [
+          "doom-windows"
+        ],
+        "artifacts": [],
+        "dispatch_inputs": {}
+      },
+      "p13-final-candidate.yml": {
+        "jobs": [
+          "P13 / final SHA gate (no missing proof accepted)"
+        ],
+        "artifacts": [
+          "p13-three-campaigns-{sha}",
+          "p13-smp8-{sha}"
+        ],
+        "dispatch_inputs": {
+          "perimetre": "complet",
+          "soak_minutes": "30"
+        },
+        "after": [
+          "ladybird-native-browser.yml",
+          "nightly.yml"
+        ]
+      }
+    }
+  }
+}

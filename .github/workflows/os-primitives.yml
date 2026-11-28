@@ -10,6 +10,12 @@ on:
         default: false
   workflow_call:
     inputs:
+      bootimage_artifact:
+        type: string
+        default: ''
+      cpu_only:
+        type: boolean
+        default: false
       p13_strict:
         type: boolean
         required: false
@@ -34,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + musl
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -47,9 +53,24 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      # Le BIOS mutualisé ne transporte pas le sous-programme Cargo.
+      # Ce job compile aussi ses propres images instrumentées.
+      - name: Préparer cargo-bootimage pour les constructions indépendantes
+        if: inputs.bootimage_artifact != ''
+        run: command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Primitives sur Bouchaud OS
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: tools/ci/run_os_primitives.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
@@ -175,19 +196,6 @@ jobs:
           # l'est dans le job `gpu-tampon`.
           SCANOUT_SORTIE=$PWD/scanout-virtio SCANOUT_TAMPON=copie SCANOUT_TRAME=off tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
           SCANOUT_SORTIE=$PWD/scanout-virtio-kvm SCANOUT_TAMPON=copie SCANOUT_TRAME=off BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_scanout.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
-      - name: Faute ring 3 d'un processus multi-fils -- SMP1 et SMP8 (TCG), SMP4 (KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_FAUTE_MULTIFIL_V1 / BOUCHAUD_BSP_PREEMPTION_DIRECTE_V1 :
-        # #UD/#DE/#GP/#PF depuis le fil principal ou un frere ; le noyau
-        # survit et le processus meurt. SMP1 met tout sur le coeur zero : un
-        # fil de calcul pur doit y etre preempte, et y mourir condamne.
-        run: |
-          BO_SMP=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
-          cp serie-faute-multifil.log serie-faute-multifil-smp1.log
-          BO_SMP=8 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 2
-          cp serie-faute-multifil.log serie-faute-multifil-smp8.log
-          BO_QEMU_KVM=1 tools/ci/run_faute_multifil.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 3
-          cp serie-faute-multifil.log serie-faute-multifil-kvm.log
       - name: Futex -- un reveil compte n'est jamais perdu (attendant temporise, condvar glibc), SMP1 et SMP4 (TCG)
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         # BOUCHAUD_FUTEX_REVEIL_COMPTE_V1 (#376) : un attendant temporise choisi
@@ -416,49 +424,6 @@ jobs:
             fi
           done
           exit $r
-      - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
-        # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
-        # part vers QEMU, puis l'attente est declaree echue. La memoire doit
-        # rester hors de l'allocateur (etat Inconnue), le bureau se replier,
-        # sans panique. DERNIER pas : il reconstruit l'image avec l'option, les
-        # pas precedents ont teste l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-sans-reponse
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
-          PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
-          PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
-      - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
-        # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
-        # (une entree, id de tete, longueur, barriere identique). Noyau
-        # compile avec `banc-virtio-gpu-reponse-etrangere` : le premier
-        # transfert du bureau est juge contre la barriere d'une autre
-        # commande. La violation doit etre nommee et chiffree, la file
-        # cassee, le scanout abandonne au premier echec, le bureau vivant.
-        # Image a option : apres les pas de l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-reponse-etrangere
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
-          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
-          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
-      - name: P10+.1 -- pannes de l'attente par interruption, MSI-X masque, parasites, reponse jamais vue (TCG puis KVM)
-        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
-        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : noyau compile avec
-        # `banc-virtio-gpu-irq-pannes`, bureau sous `gpu-irq on`. Interruptions
-        # perdues rattrapees par la relecture, parasites sans progres et sans
-        # presentation refusee, attente aveugle finie a son echeance, file
-        # cassee, scanout abandonne, compositeur vivant, aucune panique.
-        # Image a option : apres les pas de l'image livree.
-        run: |
-          cargo bootimage --features banc-virtio-gpu-irq-pannes
-          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-irq-pannes.bin
-          r=0
-          PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
-          PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
-          exit $r
       # Mode normal : publication du diagnostic, sans modifier la CI produit.
       # Mode manuel p13_strict=true : les NON_QUALIFIANT deviennent bloquants.
       - name: P13 -- qualification stricte ordonnanceur KVM SMP1/2/4
@@ -499,17 +464,13 @@ jobs:
             serie-virtio-*.log
             scanout-virtio*/serie-*.log
             scanout-virtio*/capture-*.ppm
-            serie-faute-multifil-*.log
             serie-compta-injection-*.log
             compta-utilisateur-kvm-smp*/serie.log
             serie-extinction-contention-*.log
             serie-entrelacement-*.log
-            virtio-dma-panne*/serie.log
-            virtio-reponse-etrangere*/serie.log
             ordonnanceur-attribution-*/serie.log
             banc-presentation-*/serie-*.log
             banc-irq-gpu-*/serie.log
-            virtio-irq-pannes*/serie.log
           if-no-files-found: warn
 
   # Les A/B d'ordonnancement, en parallele des sondes : chacun est un
@@ -525,7 +486,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + musl
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -538,9 +499,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -594,7 +565,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: QEMU + musl
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -607,9 +578,19 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -656,12 +637,12 @@ jobs:
   # parallele des sondes (deux demarrages par accelerateur).
   gpu-tampon:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: QEMU + musl
         run: |
-          tools/ci/apt-installe.sh qemu-system-x86 musl-tools build-essential file
+          tools/ci/apt-installe-ubuntu.sh qemu-system-x86 musl-tools build-essential file
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -674,9 +655,24 @@ jobs:
           restore-keys: |
             primitives-debug-${{ runner.os }}-
             cargo-${{ runner.os }}-
+      # Le BIOS mutualisé ne transporte pas le sous-programme Cargo.
+      # Ce job compile aussi ses propres images instrumentées.
+      - name: Préparer cargo-bootimage pour les constructions indépendantes
+        if: inputs.bootimage_artifact != ''
+        run: command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+      - if: inputs.bootimage_artifact != ''
+        uses: ./.github/actions/fabric-bootimage
+        with:
+          artifact: ${{ inputs.bootimage_artifact }}
       - name: Bootimage
         id: bootimage
-        run: tools/ci/build_kernel.sh
+        env:
+          BOOTIMAGE_ARTIFACT: ${{ inputs.bootimage_artifact }}
+        run: |
+          if [ -z "$BOOTIMAGE_ARTIFACT" ]; then
+            tools/ci/build_kernel.sh
+          fi
+          test -s target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin
       - name: Acces a /dev/kvm
         if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
         run: |
@@ -739,6 +735,49 @@ jobs:
           AB_SORTIE=$PWD/banc-dechirure-tcg tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
           AB_SORTIE=$PWD/banc-dechirure-kvm BO_QEMU_KVM=1 tools/ci/run_banc_dechirure.sh target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin 4 2 || r=1
           exit $r
+      - name: P10 -- ATTACH_BACKING sans reponse, memoire DMA conservee (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_DMA_ETAT_V1 : noyau compile avec l'option de
+        # banc `banc-virtio-gpu-sans-reponse` -- la requete d'attache du bureau
+        # part vers QEMU, puis l'attente est declaree echue. La memoire doit
+        # rester hors de l'allocateur (etat Inconnue), le bureau se replier,
+        # sans panique. DERNIER pas : il reconstruit l'image avec l'option, les
+        # pas precedents ont teste l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-sans-reponse
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+          PANNE_SORTIE=$PWD/virtio-dma-panne-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_dma_panne.sh bootimage-panne-dma.bin
+      - name: P10 -- reponse etrangere sur la file de controle, file cassee (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_BARRIERE_V1 : toute commande part avec
+        # VIRTIO_GPU_FLAG_FENCE, une seule en vol, et sa reponse est jugee
+        # (une entree, id de tete, longueur, barriere identique). Noyau
+        # compile avec `banc-virtio-gpu-reponse-etrangere` : le premier
+        # transfert du bureau est juge contre la barriere d'une autre
+        # commande. La violation doit etre nommee et chiffree, la file
+        # cassee, le scanout abandonne au premier echec, le bureau vivant.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-reponse-etrangere
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+          ETRANGERE_SORTIE=$PWD/virtio-reponse-etrangere-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_reponse_etrangere.sh bootimage-reponse-etrangere.bin
+      - name: P10+.1 -- pannes de l'attente par interruption, MSI-X masque, parasites, reponse jamais vue (TCG puis KVM)
+        if: ${{ !cancelled() && steps.bootimage.outcome == 'success' }}
+        # BOUCHAUD_VIRTIO_GPU_IRQ_V1 : noyau compile avec
+        # `banc-virtio-gpu-irq-pannes`, bureau sous `gpu-irq on`. Interruptions
+        # perdues rattrapees par la relecture, parasites sans progres et sans
+        # presentation refusee, attente aveugle finie a son echeance, file
+        # cassee, scanout abandonne, compositeur vivant, aucune panique.
+        # Image a option : apres les pas de l'image livree.
+        run: |
+          cargo bootimage --features banc-virtio-gpu-irq-pannes
+          cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin bootimage-irq-pannes.bin
+          r=0
+          PANNES_SORTIE=$PWD/virtio-irq-pannes tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          PANNES_SORTIE=$PWD/virtio-irq-pannes-kvm BO_QEMU_KVM=1 tools/ci/run_virtio_gpu_irq_pannes.sh bootimage-irq-pannes.bin || r=1
+          exit $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -751,4 +790,13 @@ jobs:
             scanout-trame-*/capture-*.ppm
             banc-trame-*/serie.log
             banc-dechirure-*/serie.log
+            virtio-dma-panne*/serie.log
+            virtio-reponse-etrangere*/serie.log
+            virtio-irq-pannes*/serie.log
           if-no-files-found: warn
+
+  memory-fault:
+    if: ${{ !inputs.cpu_only }}
+    uses: ./.github/workflows/fabric-memory.yml
+    with:
+      bootimage_artifact: ${{ inputs.bootimage_artifact }}
