@@ -1,0 +1,78 @@
+name: Mesurer le surcoût SMP4 en ABBA
+on:
+  push:
+    branches: [codex/trace-smp4-surcout]
+permissions:
+  contents: read
+jobs:
+  abba:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Dépendances Ubuntu signées
+        run: |
+          args=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Update::Error-Mode=any -o Acquire::Retries=3)
+          sudo apt-get "${args[@]}" update
+          sudo apt-get "${args[@]}" install -y --no-install-recommends qemu-system-x86 musl-tools build-essential time
+      - name: Deux BIOS et un scénario partagé
+        run: |
+          mkdir -p preuves
+          { git rev-parse HEAD; lscpu; qemu-system-x86_64 --version; cat /proc/self/cgroup; } > preuves/hote.txt
+          command -v cargo-bootimage >/dev/null || cargo install bootimage --locked
+          export BOUCHAUD_BUILD_COMMIT
+          BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+          for arm in temoin trace; do
+            features=()
+            if [ "$arm" = trace ]; then features=(--features diag-trace-reveil); fi
+            cargo bootimage "${features[@]}" > "preuves/build-$arm.log" 2>&1
+            cp target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin "$RUNNER_TEMP/$arm.bin"
+          done
+          tools/ci/fabrique-scenario-endurance.sh "$RUNNER_TEMP/scenario"
+          sha256sum "$RUNNER_TEMP"/{temoin,trace}.bin "$RUNNER_TEMP/scenario/endurance.img" > preuves/inputs.sha256
+      - name: Cycle historique en deux blocs ABBA
+        env:
+          PYTHONPATH: tools/ci/reliability
+        run: |
+          cat > "$RUNNER_TEMP/qemu-chronometre" <<'SH'
+          #!/usr/bin/env bash
+          exec /usr/bin/time -f 'wall_s=%e user_s=%U system_s=%S rss_kib=%M status=%x' -o "$BO_CHRONO" qemu-system-x86_64 "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/qemu-chronometre"
+          python3 -u - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from etat_cycle import OK, etat_du_cycle
+          from qemu_matrix import run_one
+
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          scenario = tmp / "scenario"
+          markers = (scenario / "marqueurs-endurance.txt").read_text().splitlines()
+          verdicts = []
+          for index, arm in enumerate(("temoin", "trace", "trace", "temoin") * 2, 1):
+              output = Path("preuves") / f"{index:02}-{arm}"
+              os.environ["BO_CHRONO"] = str((output / "cout.txt").resolve())
+              r = run_one(str(tmp / "qemu-chronometre"), tmp / f"{arm}.bin", 4, 300, 4096, output,
+                          markers, scenario / "endurance.img")
+              trace = Path(r["log"]).read_text(errors="replace")
+              verdict, reason = etat_du_cycle(r, trace, "ENDURANCE_ORDONNANCEUR_OK")
+              if r.get("disque"):
+                  Path(r["disque"]).unlink(missing_ok=True)
+              verdicts.append(dict(ordre=index, bras=arm, verdict=verdict, raison=reason, **r))
+              print(arm, verdict, reason)
+          Path("preuves/verdicts.json").write_text(json.dumps(verdicts, indent=2) + "\n")
+          raise SystemExit(0 if all(v["verdict"] == OK for v in verdicts) else 1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: surcout-smp4-abba
+          path: |
+            preuves/**/*.log
+            preuves/**/*.txt
+            preuves/*.sha256
+            preuves/*.json
