@@ -16,7 +16,6 @@ jobs:
       - name: Outils Ubuntu et accès à KVM
         run: |
           tools/ci/apt-installe-ubuntu.sh qemu-system-x86 file acl unzip
-          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
       - name: Relire le BIOS et l’artefact du run indépendant en échec
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,6 +52,10 @@ jobs:
             --certs /etc/ssl/certs/ca-certificates.crt --ca-test "$RUNNER_TEMP/e2e-tls/ca.pem" \
             --url http://10.0.2.2:18300/accueil.html --sortie disque-e2e.img
           for repetition in 1 2; do
+            # Le runner peut rétablir les droits du périphérique entre deux boots.
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+            test -r /dev/kvm && test -w /dev/kvm
+            ls -l /dev/kvm
             python3 tools/e2e/ladybird/e2e.py --boot "$RUNNER_TEMP/boot.bin" \
               --disque disque-e2e.img --accel kvm --smp 4 --memoire 8192 \
               --sortie "preuves/kvm-$repetition" --port-fixture 18300 --tls-dir "$RUNNER_TEMP/e2e-tls" \
