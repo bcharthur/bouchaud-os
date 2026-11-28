@@ -1,4 +1,4 @@
-name: Capture causale SMP4 sur runner hébergé
+name: Réveils TCG SMP4/SMP8 et contention hôte appariée
 on:
   push:
     branches: [codex/trace-smp4-heberge]
@@ -7,7 +7,7 @@ permissions:
 jobs:
   capture:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,7 +20,16 @@ jobs:
       - name: Construire le BIOS instrumenté et le scénario
         run: |
           mkdir preuves
-          { git rev-parse HEAD; lscpu; qemu-system-x86_64 --version; cat /proc/self/cgroup; } > preuves/hote.txt
+          {
+            git rev-parse HEAD
+            lscpu
+            lscpu -e=CPU,CORE,SOCKET,ONLINE
+            taskset -pc $$
+            qemu-system-x86_64 --version
+            cat /proc/self/cgroup
+            cat /sys/fs/cgroup/cpu.max /proc/pressure/cpu
+            qemu-system-x86_64 -trace help
+          } > preuves/hote.txt
           cargo bootimage --version || cargo install bootimage --locked
           BOUCHAUD_BUILD_COMMIT="$(git rev-parse --short=12 HEAD)" cargo bootimage --features diag-trace-reveil
           tools/ci/fabrique-scenario-endurance.sh scenario
@@ -32,13 +41,49 @@ jobs:
           touch scenario/scenario/garde-vm-vivante
           (cd tools/userland && IMAGE="$GITHUB_WORKSPACE/scenario/endurance.img" ./mkdisk.sh "$GITHUB_WORKSPACE/scenario/scenario")
           sha256sum target/x86_64-bouchaud_os/debug/bootimage-bouchaud-os.bin scenario/endurance.img > preuves/inputs.sha256
-      - name: Capturer et corréler les réveils
+      - name: Alterner les mêmes boots avec quatre et deux CPU Linux
         run: |
+          set -uo pipefail
           target=target/x86_64-bouchaud_os/debug
-          python3 tools/ci/capture_trace_reveil_qemu.py "$target/bouchaud-os" "$target/bootimage-bouchaud-os.bin" scenario/endurance.img preuves
-          python3 tools/ci/analyse_trace_reveil.py preuves/BO_TRACE_REVEIL_TOTAL preuves/BO_TRACE_REVEIL preuves/echantillons.txt preuves/quantiles.csv --file preuves/BO_TRACE_FILE_TOTAL preuves/BO_TRACE_FILE --horloge preuves
+          if ! sudo -n test -r /sys/kernel/tracing/events/sched/sched_switch/enable; then
+            sudo -n mount -t tracefs nodev /sys/kernel/tracing
+          fi
+          rc=0
+          for smp in 4 8; do
+            serie=0
+            for cpus in 4 2 2 4; do
+              serie=$((serie + 1))
+              dir="preuves/smp$smp-$serie-hote$cpus"
+              mkdir "$dir"
+              if python3 tools/ci/capture_trace_reveil_qemu.py "$target/bouchaud-os" \
+                   "$target/bootimage-bouchaud-os.bin" scenario/endurance.img "$dir" \
+                   --smp "$smp" --hote-cpus "$cpus" --trace-hote &&
+                 python3 tools/ci/analyse_trace_reveil.py "$dir/BO_TRACE_REVEIL_TOTAL" \
+                   "$dir/BO_TRACE_REVEIL" "$dir/echantillons.txt" "$dir/quantiles.csv" \
+                   --file "$dir/BO_TRACE_FILE_TOTAL" "$dir/BO_TRACE_FILE" --horloge "$dir" &&
+                 python3 tools/ci/trace_hote_reveil.py "$dir"; then
+                printf '%s COLLECTE_OK\n' "$dir" | tee -a preuves/collecte.txt
+              else
+                printf '%s COLLECTE_INCOMPLETE\n' "$dir" | tee -a preuves/collecte.txt
+                rc=1
+                # Si le traceur ne démarre pas, répéter le même refus ne
+                # produit aucune information.
+                if [ ! -s "$dir/serial.log" ]; then break 2; fi
+              fi
+              if [ -f "$dir/hote.trace" ]; then gzip -1 "$dir/hote.trace"; fi
+            done
+          done
+          exit "$rc"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trace-reveils-smp4
-          path: preuves/
+          name: attribution-reveils-tcg
+          path: |
+            preuves/
+            !preuves/**/*.trace.gz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trace-linux-reveils-tcg
+          path: preuves/**/*.trace.gz
+          if-no-files-found: ignore

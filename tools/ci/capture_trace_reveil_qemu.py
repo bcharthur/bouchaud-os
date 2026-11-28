@@ -2,6 +2,7 @@
 """Capture les mesures invitées et les compteurs d'attente des vCPU de QEMU."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +15,7 @@ TAILLES = {
     "BO_TRACE_REVEIL_TOTAL": 8, "BO_TRACE_REVEIL": 32768 * 88,
     "BO_TRACE_FILE_TOTAL": 8, "BO_TRACE_FILE": 32768 * 40,
     "BO_TRACE_CLOCK_BOOT_TSC": 8, "BO_TRACE_CLOCK_HZ": 8, "BO_TRACE_CLOCK_SYNC": 1,
+    "BO_TRACE_HOTE_TOTAL": 8, "BO_TRACE_HOTE": 64 * 24,
 }
 
 
@@ -32,7 +34,7 @@ def qmp(stream, command, args=None):
     raise RuntimeError("Connexion QMP interrompue")
 
 
-def capture(vm, endpoint, output, symbols):
+def capture(vm, endpoint, output, symbols, avec_trace_hote):
     serial = output / "serial.log"
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(10)
@@ -45,27 +47,18 @@ def capture(vm, endpoint, output, symbols):
             qmp(stream, "qmp_capabilities")
             cpus = qmp(stream, "query-cpus-fast")
             host.write(json.dumps({"cpu_map": cpus}) + "\n")
-            with serial.open("rb") as log:
-                pending = b""
-                while vm.poll() is None and time.monotonic() < deadline:
-                    debut = time.monotonic_ns()
-                    stats = {}
-                    for cpu in cpus:
-                        path = Path(f"/proc/{vm.pid}/task/{cpu['thread-id']}/schedstat")
-                        if path.exists():
-                            try:
-                                stats[cpu["cpu-index"]] = list(map(int, path.read_text().split()))
-                            except FileNotFoundError:
-                                continue
-                    host.write(json.dumps({"avant_ns": debut, "apres_ns": time.monotonic_ns(), "schedstat": stats}) + "\n")
-                    pending += log.read()
-                    if b"TRACE_EXPORT_FIN" in pending:
-                        break
-                    pending = pending[-64:]
-                    time.sleep(.02)
-                else:
-                    raise RuntimeError("Export invité absent")
-            qmp(stream, "stop")
+            trace_hote = None
+            if avec_trace_hote:
+                from trace_hote_reveil import TraceHote
+                trace_hote = TraceHote(vm, cpus, output / 'debugcon.bin', output)
+            try:
+                if trace_hote is not None:
+                    qmp(stream, "cont")
+                attend_export(vm, serial, host, cpus, deadline)
+                qmp(stream, "stop")
+            finally:
+                if trace_hote is not None:
+                    trace_hote.termine()
             for name, size in TAILLES.items():
                 path = output / name
                 response = qmp(stream, "human-monitor-command", {
@@ -75,12 +68,38 @@ def capture(vm, endpoint, output, symbols):
                     raise RuntimeError(f"Lecture RAM {name}: {response}")
 
 
+def attend_export(vm, serial, host, cpus, deadline):
+    while not serial.exists() and vm.poll() is None and time.monotonic() < deadline:
+        time.sleep(.01)
+    with serial.open("rb") as log:
+        pending = b""
+        while vm.poll() is None and time.monotonic() < deadline:
+            debut = time.monotonic_ns()
+            stats = {}
+            for cpu in cpus:
+                path = Path(f"/proc/{vm.pid}/task/{cpu['thread-id']}/schedstat")
+                try:
+                    stats[cpu["cpu-index"]] = list(map(int, path.read_text().split()))
+                except FileNotFoundError:
+                    continue
+            host.write(json.dumps({"avant_ns": debut, "apres_ns": time.monotonic_ns(), "schedstat": stats}) + "\n")
+            pending += log.read()
+            if b"TRACE_EXPORT_FIN" in pending:
+                return
+            pending = pending[-64:]
+            time.sleep(.02)
+    raise RuntimeError("Export invité absent")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path)
     parser.add_argument("bios", type=Path)
     parser.add_argument("scenario", type=Path)
     parser.add_argument("sortie", type=Path)
+    parser.add_argument("--smp", type=int, choices=(4, 8), default=4)
+    parser.add_argument("--hote-cpus", type=int, choices=(2, 4))
+    parser.add_argument("--trace-hote", action="store_true")
     args = parser.parse_args()
     sortie = args.sortie.resolve()
     sortie.mkdir(parents=True, exist_ok=True)
@@ -96,15 +115,25 @@ def main():
         endpoint = Path(root) / "qmp"
         scenario = Path(root) / "scenario.img"
         shutil.copyfile(args.scenario, scenario)
-        cmd = ["qemu-system-x86_64", "-drive", f"format=raw,snapshot=on,file={args.bios}",
-               "-m", "4096", "-smp", "4", "-cpu", "max", "-display", "none", "-no-reboot",
+        cmd = ["qemu-system-x86_64", "-drive", f"format=raw,file={args.bios}",
+               "-m", "4096", "-smp", str(args.smp), "-cpu", "max", "-display", "none", "-no-reboot",
                "-serial", f"file:{sortie / 'serial.log'}", "-netdev", "user,id=net0",
                "-device", "e1000,netdev=net0", "-audiodev", "none,id=muet",
                "-device", "AC97,audiodev=muet", "-drive", f"format=raw,file={scenario}",
                "-qmp", f"unix:{endpoint},server=on,wait=off"]
+        if args.trace_hote:
+            cmd += ['-S', '-debugcon', f'file:{sortie / "debugcon.bin"}']
+        if args.hote_cpus:
+            cpus = sorted(os.sched_getaffinity(0))
+            if len(cpus) < args.hote_cpus:
+                raise ValueError(f'Affinité hôte insuffisante : {cpus}')
+            # Même sélection sur tous les boots. Le reste des paramètres QEMU
+            # est identique, seul le nombre de CPU Linux alloués change.
+            cmd[:0] = ['taskset', '-c', ','.join(map(str, cpus[:args.hote_cpus]))]
+        (sortie / 'qemu-argv.json').write_text(json.dumps(cmd) + '\n')
         with subprocess.Popen(cmd, stderr=stderr) as vm:
             try:
-                capture(vm, endpoint, sortie, symbols)
+                capture(vm, endpoint, sortie, symbols, args.trace_hote)
             finally:
                 if vm.poll() is None:
                     vm.terminate()

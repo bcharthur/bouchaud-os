@@ -1145,6 +1145,8 @@ fn proc_fil() -> Vec<u8> {
         na += 1;
     });
     ENREGISTREUR.arme(tache, maintenant);
+    #[cfg(feature = "diag-trace-reveil")]
+    crate::kernel::attribution_reveil::trace_horloge_hote();
     let mut sortie = format!(
         "fil preuve_hote={} externe_ns={} inexplique_ns={} masque_ns={} pret_ns={} incompletes={} \
          vol_total_ns={} vol_coeurs={} a_ns={}\nsommeils n={} perdus={}\n",

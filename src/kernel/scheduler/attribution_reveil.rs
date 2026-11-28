@@ -1431,6 +1431,30 @@ pub fn trace_entree_irq(cpu: usize) -> u64 {
     ENTREE_IRQ_TSC.get(cpu).map_or(0, |tsc| tsc.load(Ordering::Relaxed))
 }
 
+// Ancre hors des 300 réveils mesurés. En TCG, l'écriture du chardev debugcon
+// se fait synchroniquement dans cet outb. Le traceur hôte relève son appel
+// système, nécessairement entre les deux lectures ordonnées du TSC invité.
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_HOTE_TOTAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "diag-trace-reveil")]
+#[no_mangle]
+static BO_TRACE_HOTE: [[AtomicU64; 3]; 64] =
+    [const { [const { AtomicU64::new(0) }; 3] }; 64];
+
+#[cfg(feature = "diag-trace-reveil")]
+pub fn trace_horloge_hote() {
+    let index = BO_TRACE_HOTE_TOTAL.fetch_add(1, Ordering::Relaxed) as usize;
+    if let Some(ancre) = BO_TRACE_HOTE.get(index) {
+        let avant = crate::kernel::timer::lecture_tsc_ordonnee();
+        unsafe { crate::arch::x86_64::ports::outb(0xe9, b'R'); }
+        let apres = crate::kernel::timer::lecture_tsc_ordonnee();
+        ancre[0].store(avant, Ordering::Relaxed);
+        ancre[1].store(apres, Ordering::Relaxed);
+        ancre[2].store(index as u64 + 1, Ordering::Release);
+    }
+}
+
 // Diagnostic TCG. Lire les symboles avec la VM arrêtée. Aucun accès série,
 // aucune allocation, aucun recyclage de case pendant la capture.
 #[cfg(feature = "diag-trace-reveil")]
