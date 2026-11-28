@@ -34,6 +34,7 @@ AFFICHAGE=${BO_SMOKE_AFFICHAGE:-bga}
 AFFICHE=(-display none)
 CAPTURE_X=0
 SKIA_BACKEND=${BO_SMOKE_SKIA_BACKEND:-cpu}
+EXIGE_RENDU_SKIA=${BO_SMOKE_EXIGE_RENDU_SKIA:-0}
 ACCEL_QEMU=()
 case "${BO_SMOKE_ACCEL:-}" in
     "") ;;
@@ -64,6 +65,51 @@ case "$AFFICHAGE" in
         case "$SKIA_BACKEND" in cpu|vulkan) ;; *) echo "Backend Skia inconnu" >&2; exit 2 ;; esac ;;
     *) echo "BO_SMOKE_AFFICHAGE inconnu : $AFFICHAGE (bga, virtio, virgl ou venus)" >&2; exit 2 ;;
 esac
+# Explicit host Vulkan profiles qualify only the selected host ICD. The
+# guest receives its own Mesa Venus ICD in the autorun below.
+VENUS_HOST_PROFILE=${BO_SMOKE_VENUS_HOST_PROFILE:-}
+if [[ -n "$VENUS_HOST_PROFILE" ]]; then
+    if [[ "$AFFICHAGE" != venus ]]; then
+        echo 'BO_SMOKE_VENUS_HOST_PROFILE exige BO_SMOKE_AFFICHAGE=venus.' >&2
+        exit 2
+    fi
+    case "$VENUS_HOST_PROFILE" in
+        hardware|lavapipe) ;;
+        *) echo 'Profil Vulkan hôte attendu : hardware ou lavapipe.' >&2; exit 2 ;;
+    esac
+    icd=${BO_SMOKE_VENUS_HOST_ICD:?Indiquer le manifeste ICD Vulkan hôte}
+    [[ -f "$icd" ]] || { echo "ICD Vulkan introuvable : $icd" >&2; exit 2; }
+    command -v vulkaninfo >/dev/null || { echo 'vulkaninfo requis pour qualifier le renderer.' >&2; exit 2; }
+    properties=$(qemu-system-x86_64 -device virtio-gpu-gl-pci,help 2>&1)
+    for property in venus blob hostmem; do
+        if ! grep -qE "^[[:space:]]+$property=" <<<"$properties"; then
+            echo "QEMU ne fournit pas la propriété $property du transport Venus." >&2
+            exit 2
+        fi
+    done
+    unset VK_ICD_FILENAMES VK_ADD_DRIVER_FILES VK_LOADER_DRIVERS_SELECT VK_LOADER_DRIVERS_DISABLE
+    if [[ "$VENUS_HOST_PROFILE" = hardware ]]; then
+        unset LIBGL_ALWAYS_SOFTWARE
+    fi
+    export VK_DRIVER_FILES="$(realpath -e "$icd")"
+    summary=$(LC_ALL=C vulkaninfo --summary)
+    echo "$summary"
+    mapfile -t devices < <(sed -nE 's/^[[:space:]]*deviceType[[:space:]]*=[[:space:]]*([A-Z_]+).*/\1/p' <<<"$summary")
+    mapfile -t names < <(sed -nE 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*(.+)/\1/p' <<<"$summary")
+    if [[ ${#devices[@]} != 1 || ${#names[@]} != 1 ]]; then
+        echo 'Le profil Venus exige un seul périphérique Vulkan hôte visible.' >&2
+        exit 2
+    fi
+    case "$VENUS_HOST_PROFILE:${devices[0]}" in
+        hardware:PHYSICAL_DEVICE_TYPE_DISCRETE_GPU|hardware:PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) ;;
+        lavapipe:PHYSICAL_DEVICE_TYPE_CPU)
+            [[ ${names[0],,} =~ llvmpipe|lavapipe ]] || {
+                echo "Le périphérique logiciel choisi n’est pas Lavapipe : ${names[0]}" >&2; exit 2;
+            } ;;
+        *) echo "Renderer incompatible avec $VENUS_HOST_PROFILE : ${names[0]} (${devices[0]})" >&2; exit 2 ;;
+    esac
+    echo "LADYBIRD_VENUS_HOST profile=$VENUS_HOST_PROFILE device=${names[0]}"
+fi
 if [ "$CAPTURE_X" = 1 ] && [ -z "${DISPLAY:-}" ]; then
     echo "Ce mode graphique exige DISPLAY (Xvfb)" >&2
     exit 2
@@ -245,6 +291,15 @@ echo "AUTORUN_DESKTOP_RETURN statut=\$?"
 AUTORUN
 if [ "$AFFICHAGE" = venus ]; then
   sed -i "1i export LD_LIBRARY_PATH=/lib\nexport VK_DRIVER_FILES=/usr/share/vulkan/icd.d/bouchaud_venus.json\nexport BOUCHAUD_SKIA_BACKEND=$SKIA_BACKEND" "$SCENARIO/autorun"
+  if [ "$SKIA_BACKEND" = vulkan ] && [ -n "$VENUS_HOST_PROFILE" ]; then
+    sed -i '1i export VK_LOADER_DEBUG=driver' "$SCENARIO/autorun"
+  fi
+  if [ "$SKIA_BACKEND" = vulkan ] && [ "${BO_SMOKE_SKIA_PARTIAL_READBACK:-0}" = 1 ]; then
+    sed -i '1i export BOUCHAUD_SKIA_PARTIAL_READBACK=1' "$SCENARIO/autorun"
+  fi
+  if [ "$SKIA_BACKEND" = vulkan ] && [ "${BO_SMOKE_SKIA_READBACK_TRACE:-0}" = 1 ]; then
+    sed -i '1i export BOUCHAUD_SKIA_READBACK_TRACE=1' "$SCENARIO/autorun"
+  fi
 fi
 # BOUCHAUD_BANC_SERIE_LENTE_V1 : `BO_SMOKE_SERIE_LENTE_NS=N` fait couter N ns
 # de plus a chaque octet COM1 (commande `serie-lente`) : reproduit sous TCG la
@@ -1088,6 +1143,28 @@ fi
 if [ "$AFFICHAGE" = venus ] && [ "$SKIA_BACKEND" = vulkan ]; then
   if ! grep -aFq '[LB:SKIA] readback=vulkan' "$LOG" || grep -aFq '[LB:SKIA] readback=failed' "$LOG"; then
     echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=readback_skia" >&2
+    exit 1
+  fi
+fi
+
+# For the completed-frame qualification, also require the new compositor
+# marker. Older artifacts can still run the pre-existing smoke.
+if [ "$AFFICHAGE" = venus ] && [ "$EXIGE_RENDU_SKIA" = 1 ]; then
+  rendu_vulkan=0
+  if grep -aFq 'LADYBIRD_RENDER_BACKEND=vulkan' "$LOG"; then
+    rendu_vulkan=1
+  fi
+  if { [ "$SKIA_BACKEND" = vulkan ] && [ "$rendu_vulkan" = 0 ]; } ||
+     { [ "$SKIA_BACKEND" = cpu ] && [ "$rendu_vulkan" = 1 ]; }; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=trame_skia_achevee attendu=$SKIA_BACKEND" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$SKIA_BACKEND" = vulkan && -n "$VENUS_HOST_PROFILE" ]]; then
+  if ! grep -aFq -- "Using \"Virtio-GPU Venus (${names[0]})\"" "$LOG" ||
+     ! grep -aFq 'LADYBIRD_RENDER_BACKEND=vulkan' "$LOG"; then
+    echo "LADYBIRD_FUNCTIONAL_SMOKE fail raison=renderer_venus_non_confirme attendu=${names[0]}" >&2
     exit 1
   fi
 fi
